@@ -131,6 +131,14 @@ if wait_field task failed '.status.phase' Running 600 2>"${test_root}/error"; th
 fi
 grep -Fq 'Task/failed failed' "${test_root}/error"
 grep -Fq 'runtime status captured' "${test_root}/error"
+job_status='{"status":{"state":"Failed"}}'
+wait_field executionworkspace failed '.status.state' Failed
+if wait_field executionworkspace failed '.status.state' Suspended 0 2>"${test_root}/error"; then
+  echo 'failed workspace passed its suspension wait' >&2
+  exit 1
+fi
+grep -Fq 'ExecutionWorkspace/failed failed' "${test_root}/error"
+grep -Fq 'runtime status captured' "${test_root}/error"
 job_status='{"status":{}}'
 if wait_field task incomplete '.status.phase' Running 0 2>"${test_root}/error"; then
   echo 'incomplete ACP task passed its running wait' >&2

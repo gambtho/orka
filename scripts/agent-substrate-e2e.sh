@@ -100,6 +100,11 @@ wait_field() {
       runtime_diagnostics
       return 1
     fi
+    if [[ "${resource}" == executionworkspace ]] && jq -e '.status.state == "Failed"' <<<"${object}" >/dev/null; then
+      printf 'ExecutionWorkspace/%s failed before %s = %s\n' "${name}" "${expression}" "${expected}" >&2
+      runtime_diagnostics
+      return 1
+    fi
     now=$(date +%s)
     if (( now - start >= seconds )); then
       printf 'Timed out waiting for %s/%s %s = %s\n' "${resource}" "${name}" "${expression}" "${expected}" >&2

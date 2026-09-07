@@ -129,7 +129,13 @@ func (r *RuntimePoolReconciler) reconcileNativeSubstrateRuntimePool(ctx context.
 		if pending, err := r.linkedWorkspaceSuspendIntentPending(ctx, pool); err != nil {
 			return ctrl.Result{}, err
 		} else if pending && !substrateWorkspaceSuspendRequested(pool) {
-			return r.nativeSubstrateProgress(ctx, pool, corev1alpha1.RuntimePoolLifecycleDraining, "waiting for the linked workspace suspension intent")
+			// The upgrade coordinator still needs the admitted instance to
+			// authenticate drain while Task settlement records the detach intent.
+			poolStatus := r.baseRuntimePoolStatus(pool, pool.Status.CurrentReplicas)
+			poolStatus.Lifecycle, poolStatus.AdmissionState = corev1alpha1.RuntimePoolLifecycleDraining, corev1alpha1.RuntimePoolAdmissionDraining
+			poolStatus.Message = "waiting for the linked workspace suspension intent"
+			r.setRuntimePoolCondition(pool, &poolStatus, corev1alpha1.RuntimePoolConditionAdmissionReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonAdmissionClosed, poolStatus.Message)
+			return r.finishRuntimePoolStatus(ctx, pool, poolStatus, time.Second)
 		}
 		suspend := substrateWorkspaceSuspendRequested(pool)
 		ready, result, err := r.drainNativeSubstrateRuntime(ctx, pool, cfg, cm, record, actor, suspend)

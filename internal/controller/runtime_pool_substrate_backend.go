@@ -5076,11 +5076,11 @@ func substrateRuntimeContainer(
 // policies independently, so the gate cannot open by accident.
 func substrateFullMemoryRestoreGateOpen() bool { return false }
 
-// linkedWorkspaceSuspendIntentPending reports a suspend-capable pool whose
-// linked ExecutionWorkspace has DesiredState Suspended while the pool's own
-// durable suspension intent is not recorded yet: the crash window between the
-// workspace patch and the adapter's pool annotation must never fall through
-// to ordinary teardown.
+// linkedWorkspaceSuspendIntentPending protects a requested suspension before
+// the adapter records it on the pool. The frozen detach action is already an
+// intent while Task settlement has not yet changed the workspace desired state.
+// A planned upgrade can lower replicas in either window, but ordinary teardown
+// must not delete the only copy of the workspace data.
 func (r *RuntimePoolReconciler) linkedWorkspaceSuspendIntentPending(
 	ctx context.Context,
 	pool *corev1alpha1.RuntimePool,
@@ -5093,9 +5093,8 @@ func (r *RuntimePoolReconciler) linkedWorkspaceSuspendIntentPending(
 		return false, nil
 	}
 	linked := &workspacev1alpha1.ExecutionWorkspace{}
-	// This fence guards a destructive scale-down: a DesiredState=Suspended
-	// write that reached the API server but not this controller's cache must
-	// still hold teardown, so the read is uncached.
+	// This fence guards destructive scale-down. A frozen action or desired
+	// state that has not reached the cache must still hold teardown.
 	if err := r.sandboxReader().Get(ctx, types.NamespacedName{Namespace: pool.Namespace, Name: name}, linked); err != nil {
 		if apierrors.IsNotFound(err) {
 			return false, nil
@@ -5113,9 +5112,12 @@ func (r *RuntimePoolReconciler) linkedWorkspaceSuspendIntentPending(
 	if linkedUID == "" || string(linked.UID) != linkedUID {
 		return false, nil
 	}
-	return linked.DeletionTimestamp.IsZero() &&
-		linked.Status.State != workspacev1alpha1.ExecutionWorkspaceStateFailed &&
-		linked.Spec.DesiredState == workspacev1alpha1.ExecutionWorkspaceDesiredSuspended, nil
+	if !linked.DeletionTimestamp.IsZero() || linked.Status.State == workspacev1alpha1.ExecutionWorkspaceStateFailed {
+		return false, nil
+	}
+	return linked.Spec.DesiredState == workspacev1alpha1.ExecutionWorkspaceDesiredSuspended ||
+		linked.Spec.DesiredState == workspacev1alpha1.ExecutionWorkspaceDesiredReady &&
+			linked.Annotations[acpWorkspaceDetachActionAnnotation] == string(workspacev1alpha1.WorkspaceOnDetachSuspend), nil
 }
 
 // substrateRuntimePoolSuspendCapable reports whether the pool's immutable
