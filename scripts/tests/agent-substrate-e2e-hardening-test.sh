@@ -33,8 +33,8 @@ source "${root}/scripts/agent-substrate-e2e.sh"
     $binding.roleRef == {apiGroup:"rbac.authorization.k8s.io",kind:"Role",name:$role.metadata.name} and
     $binding.subjects == [{kind:"ServiceAccount",name:"orka-controller-manager",namespace:"isolated-controller"}]
   ' "${test_root}/worker-rbac.json" >/dev/null
-  rg -Fxq -- 'auth can-i list workerpools.ate.dev --as=system:serviceaccount:isolated-controller:orka-controller-manager --quiet' "${test_root}/rbac-calls"
-  rg -Fxq -- '-n ate-demo auth can-i delete pods --as=system:serviceaccount:isolated-controller:orka-controller-manager --quiet' "${test_root}/rbac-calls"
+  grep -Fxq -- 'auth can-i list workerpools.ate.dev --all-namespaces --as=system:serviceaccount:isolated-controller:orka-controller-manager --quiet' "${test_root}/rbac-calls"
+  grep -Fxq -- '-n ate-demo auth can-i delete pods --as=system:serviceaccount:isolated-controller:orka-controller-manager --quiet' "${test_root}/rbac-calls"
   for rbac_failure in 'apply -f -' 'list workerpools.ate.dev' 'delete pods' 'create networkpolicies'; do
     if grant_substrate_worker_access >"${test_root}/rbac-error" 2>&1; then
       echo 'Substrate setup ignored missing controller permissions' >&2
@@ -101,6 +101,39 @@ if wait_field task unreadable '.status.phase' Running 0; then
   echo 'unreadable ACP task passed its running wait' >&2
   exit 1
 fi
+
+# A prompt ID alone cannot prove that inference reached the fixture. Keep the
+# one-request limit and reject failure, missing delivery, and duplicate calls.
+fixture_key_value="$(fixture_key ORKA_NATIVE_FIRST_OK)"
+fixture_count=1
+fixture_read() { jq -cn --arg key "${fixture_key_value}" --argjson count "${fixture_count}" '{($key):$count}'; }
+wait_fixture_request first ORKA_NATIVE_FIRST_OK 0
+for fixture_count in 2 '"invalid"' -1; do
+  if wait_fixture_request duplicate ORKA_NATIVE_FIRST_OK 0; then
+    echo 'invalid fixture count passed the restart barrier' >&2
+    exit 1
+  fi
+done
+fixture_count=0
+job_status='{"status":{"phase":"Running"}}'
+kubectl() { printf '%s\n' "${job_status}"; }
+if wait_fixture_request missing ORKA_NATIVE_FIRST_OK 0 2>"${test_root}/error"; then
+  echo 'missing inference passed the restart barrier' >&2
+  exit 1
+fi
+grep -Fq 'never reached the provider fixture' "${test_root}/error"
+job_status='{"status":{"phase":"Failed"}}'
+if wait_fixture_request failed ORKA_NATIVE_FIRST_OK 600 2>"${test_root}/error"; then
+  echo 'failed inference passed the restart barrier' >&2
+  exit 1
+fi
+grep -Fq 'failed before reaching the provider fixture' "${test_root}/error"
+fixture_read() { return 7; }
+if wait_fixture_request unreadable ORKA_NATIVE_FIRST_OK 0; then
+  echo 'unreadable fixture passed the restart barrier' >&2
+  exit 1
+fi
+unset -f fixture_read
 unset -f runtime_diagnostics
 source "${root}/scripts/agent-substrate-e2e.sh"
 

@@ -31,7 +31,10 @@ cleanup() {
     job_diagnostics substrate-direct-conformance
     job_diagnostics native-mcp-client
     workload_logs ate-system -l app=ate-api-server
+    workload_logs ate-system -l app=atenet-egress
     workload_logs ate-demo -l ate.dev/worker-pool=orka-native
+    workload_logs vekil-system -l app.kubernetes.io/component=responses-fixture
+    workload_logs orka-system -l orka.ai/network-role=provider-auth-proxy
     workload_logs orka-system -l control-plane=controller-manager
   fi
   if [[ "${KEEP_CLUSTER}" != 1 && "${CLUSTER_PREPARED:-0}" == 1 ]]; then kind delete cluster --name "${KIND_CLUSTER}"; fi
@@ -267,11 +270,39 @@ assert_fixture_count() {
   key="$(fixture_key "$1")"
   [[ "$(fixture_read /fixture/marker-counts | jq -r --arg key "${key}" '.[$key] // 0')" == "$2" ]]
 }
+wait_fixture_request() {
+  local task_name="$1" marker="$2" seconds="${3:-180}" key count start object
+  key="$(fixture_key "${marker}")"
+  start=$(date +%s)
+  while true; do
+    count="$(fixture_read /fixture/marker-counts | jq -er --arg key "${key}" '.[$key] // 0')" || return 1
+    if [[ ! "${count}" =~ ^[0-9]+$ ]] || (( count > 1 )); then
+      printf 'Task/%s did not reach the fixture exactly once\n' "${task_name}" >&2
+      return 1
+    fi
+    if [[ "${count}" == 1 ]]; then return 0; fi
+    object="$(kubectl -n orka-system --request-timeout=15s get task "${task_name}" -o json)" || return 1
+    if jq -e '.status.phase == "Failed"' <<<"${object}" >/dev/null; then
+      printf 'Task/%s failed before reaching the provider fixture\n' "${task_name}" >&2
+      runtime_diagnostics
+      return 1
+    fi
+    if (( $(date +%s) - start >= seconds )); then
+      printf 'Task/%s never reached the provider fixture\n' "${task_name}" >&2
+      runtime_diagnostics
+      return 1
+    fi
+    sleep 2
+  done
+}
 exercise_acp_lifecycle() {
   log "Running cold execution, long streaming, suspend and checkpoint export"
   submit_task native-first native-session 'ORKA_HOLD_60S Reply exactly: ORKA_NATIVE_FIRST_OK'
   wait_field task native-first '.status.phase' Running
   wait_field task native-first '.status.execution.promptID != null and .status.execution.promptID != ""' true
+  # A prompt ID is allocated before inference starts. Observe the held model
+  # request before restarting, so this checks recovery of an in-flight turn.
+  wait_fixture_request native-first ORKA_NATIVE_FIRST_OK
   local pool first_actor workspace
   pool="$(pool_for_task native-first)"
   first_actor="$(journal_for_pool "${pool}" | jq -er '.attempt.uid')"

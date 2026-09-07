@@ -90,7 +90,7 @@ grant_substrate_worker_access() {
     kubectl -n ate-demo apply -f - || return 1
 
   local controller_user="system:serviceaccount:${ORKA_NAMESPACE}:orka-controller-manager" permission verb resource
-  if ! kubectl auth can-i list workerpools.ate.dev --as="${controller_user}" --quiet; then
+  if ! kubectl auth can-i list workerpools.ate.dev --all-namespaces --as="${controller_user}" --quiet; then
     printf 'Orka lacks cluster-wide WorkerPool discovery permission\n' >&2
     return 1
   fi
