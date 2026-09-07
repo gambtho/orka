@@ -203,7 +203,8 @@ func (s *nativeSubstrateTemplateStore) infrastructure(ctx context.Context, templ
 	pools := &unstructured.UnstructuredList{}
 	pools.SetAPIVersion("ate.dev/v1alpha1")
 	pools.SetKind("WorkerPoolList")
-	if err := s.r.List(ctx, pools, client.MatchingLabels(match)); err != nil {
+	// WorkerPools belong to provider namespaces outside the tenant cache.
+	if err := s.r.nativeSubstrateReader().List(ctx, pools, client.MatchingLabels(match)); err != nil {
 		return nil, fmt.Errorf("resolve native Substrate worker selector: %w", err)
 	}
 	if len(pools.Items) != 1 {

@@ -6,6 +6,8 @@
 {{- include "orka.validateAgentExecutionSnapshot" . }}
 {{- include "orka.validateWebhooks" . }}
 {{- include "orka.validatePublisherAuth" . }}
+{{- include "orka.validateSubstrateCredentials" . }}
+{{- $substrateCredentials := .Values.controller.substrate.apiCredentials | default dict -}}
 {{- if not (regexMatch "^sha256:[0-9a-f]{64}$" (.Values.controller.image.digest | default "")) }}
 {{- fail "controller.image.digest must be a sha256 digest" }}
 {{- end }}
@@ -350,6 +352,18 @@ spec:
             - --substrate-enabled=true
             {{- end }}
             - {{ printf "--substrate-api-endpoint=%s" (.apiEndpoint | default "api.ate-system.svc:443") | quote }}
+            {{- if $substrateCredentials.existingSecret }}
+            {{- if $substrateCredentials.certKey }}
+            - --substrate-api-cert-file=/var/run/orka/substrate-api/client.crt
+            - --substrate-api-key-file=/var/run/orka/substrate-api/client.key
+            {{- end }}
+            {{- if $substrateCredentials.bearerTokenKey }}
+            - --substrate-api-bearer-token-file=/var/run/orka/substrate-api/bearer-token
+            {{- end }}
+            {{- if $substrateCredentials.caKey }}
+            - --substrate-api-ca-file=/var/run/orka/substrate-api/ca.crt
+            {{- end }}
+            {{- end }}
             {{- if .apiCertFile }}
             - {{ printf "--substrate-api-cert-file=%s" .apiCertFile | quote }}
             {{- end }}
@@ -486,6 +500,11 @@ spec:
           volumeMounts:
             - name: tmp
               mountPath: /tmp
+            {{- if and $harnessV2 $substrateCredentials.existingSecret }}
+            - name: substrate-api-credentials
+              mountPath: /var/run/orka/substrate-api
+              readOnly: true
+            {{- end }}
             - name: store
               mountPath: /data
             {{- if $harnessV2 }}
@@ -517,6 +536,27 @@ spec:
       volumes:
         - name: tmp
           emptyDir: {}
+        {{- if and $harnessV2 $substrateCredentials.existingSecret }}
+        - name: substrate-api-credentials
+          secret:
+            secretName: {{ $substrateCredentials.existingSecret | quote }}
+            defaultMode: 0400
+            items:
+              {{- if $substrateCredentials.certKey }}
+              - key: {{ $substrateCredentials.certKey | quote }}
+                path: client.crt
+              - key: {{ $substrateCredentials.privateKeyKey | quote }}
+                path: client.key
+              {{- end }}
+              {{- if $substrateCredentials.bearerTokenKey }}
+              - key: {{ $substrateCredentials.bearerTokenKey | quote }}
+                path: bearer-token
+              {{- end }}
+              {{- if $substrateCredentials.caKey }}
+              - key: {{ $substrateCredentials.caKey | quote }}
+                path: ca.crt
+              {{- end }}
+        {{- end }}
         {{- if $harnessV2 }}
         - name: acp-artifact-capability
           secret:

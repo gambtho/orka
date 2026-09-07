@@ -168,6 +168,83 @@ func TestNativeSubstrateExplicitRecoveryUsesLastVerifiedDataWithoutReplayingSour
 	}
 }
 
+func TestNativeSubstrateRecoveryReexportsImportedCheckpoint(t *testing.T) {
+	h := newNativeRuntimeTestHarness(t)
+	ws := nativeCheckpointWorkspace(t, h, "original")
+	h.until(t, nativeTestServing)
+	h.api.data[h.record(t).Attempt.Name] = "retained source data"
+	substrateSuspendTestPoolIntent(t, h.r, h.pool, true)
+	h.until(t, nativeTestSuspended)
+	cp := nativeExportCheckpoint(t, h, ws, false)
+	source := runtimePoolTestGetPool(t, h.r, h.pool)
+	digest := cp.Status.Digest
+	nativeDeletePool(t, h, &source)
+	if err := h.r.Delete(t.Context(), ws); err != nil {
+		t.Fatal(err)
+	}
+
+	restore := runtimePoolSubstrateTestObject()
+	restore.Name, restore.UID = "acp-ws-codex-0123456789abcdef", "imported-pool-uid"
+	restore.Spec = *source.Spec.DeepCopy()
+	restore.Spec.DesiredReplicas = 1
+	restore.Spec.ExecutionWorkspace.Substrate.RestoreFrom = &corev1alpha1.WorkspaceCheckpointReference{
+		Name: cp.Name, UID: string(cp.UID), Digest: digest,
+	}
+	if err := h.r.Create(t.Context(), restore); err != nil {
+		t.Fatal(err)
+	}
+	h.pool = restore
+	importedWS := nativeCheckpointWorkspace(t, h, "imported")
+	h.until(t, nativeTestServing)
+	if err := h.r.Delete(t.Context(), cp); err != nil {
+		t.Fatal(err)
+	}
+	r := &SubstrateCheckpointReconciler{RuntimePools: h.r}
+	if _, err := r.Reconcile(t.Context(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(cp)}); err != nil {
+		t.Fatal(err)
+	}
+	delete(h.api.actors, h.record(t).Attempt.Name)
+	h.step(t)
+	before := h.api.resumes
+	recovered := nativeExportCheckpoint(t, h, importedWS, true)
+	if recovered.Status.Digest != digest || h.api.resumes != before {
+		t.Fatal("recovery lost the imported data or replayed the failed source")
+	}
+	nativeDeletePool(t, h, restore)
+	if err := h.r.Delete(t.Context(), importedWS); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.Reconcile(t.Context(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(recovered)}); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.r.Get(t.Context(), client.ObjectKeyFromObject(recovered), recovered); err != nil {
+		t.Fatal(err)
+	}
+	_, artifact, err := h.r.readSubstrateCheckpointArtifact(t.Context(), digest)
+	if err != nil || artifact == nil || recovered.Status.Phase != "Ready" ||
+		!artifact.Owners[substratePublicCheckpointOwner(recovered)] || len(h.api.tags) != 1 {
+		t.Fatal("re-exported data did not survive deletion of the failed importing workspace")
+	}
+	if artifact.SourceWorkspace.UID != ws.UID {
+		t.Fatal("recovery rewrote the immutable artifact provenance")
+	}
+	destination := runtimePoolSubstrateTestObject()
+	destination.Name, destination.UID = "acp-ws-codex-3333333333333333", "recovered-pool-uid"
+	destination.Spec = *restore.Spec.DeepCopy()
+	destination.Spec.ExecutionWorkspace.Substrate.RestoreFrom = &corev1alpha1.WorkspaceCheckpointReference{
+		Name: recovered.Name, UID: string(recovered.UID), Digest: recovered.Status.Digest,
+	}
+	if err := h.r.Create(t.Context(), destination); err != nil {
+		t.Fatal(err)
+	}
+	h.pool = destination
+	nativeCheckpointWorkspace(t, h, "recovered-destination")
+	h.until(t, nativeTestServing)
+	if h.api.data[h.record(t).Attempt.Name] != "retained source data" {
+		t.Fatal("re-exported checkpoint could not restore its original data into a new workspace")
+	}
+}
+
 func TestNativeSubstrateBootDeadlineAndConsentIdentity(t *testing.T) {
 	h := newNativeRuntimeTestHarness(t)
 	h.until(t, func(_ *corev1alpha1.RuntimePool, record *substrateNativeState) bool {

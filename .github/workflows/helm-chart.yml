@@ -434,6 +434,7 @@ jobs:
           agents.core.orka.ai
           branchclaims.core.orka.ai
           controllerepochs.core.orka.ai
+          executionworkspacecheckpoints.workspace.orka.ai
           executionworkspaceclasses.workspace.orka.ai
           executionworkspacepools.workspace.orka.ai
           executionworkspaceproviders.workspace.orka.ai

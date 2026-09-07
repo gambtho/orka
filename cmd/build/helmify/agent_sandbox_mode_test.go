@@ -106,6 +106,8 @@ func TestStaticChartGrantsAgentSandboxRuntimeRBAC(t *testing.T) {
 func TestStaticChartEnablesWorkspaceDispatchForSubstrate(t *testing.T) {
 	output, err := helmTemplateStaticChart(t,
 		"--set", "controller.substrate.enabled=true",
+		"--set-string", "controller.substrate.apiCredentials.existingSecret=substrate-control",
+		"--set-string", "controller.substrate.apiCredentials.bearerTokenKey=token",
 		"--set", "controller.executionWorkspace.dispatchEnabled=true",
 		"--show-only", "templates/deployment.yaml",
 	)

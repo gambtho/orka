@@ -94,7 +94,9 @@ func (r *SubstrateCheckpointReconciler) Reconcile(ctx context.Context, req ctrl.
 		if err != nil {
 			return ctrl.Result{}, err
 		}
-		if artifact == nil || !artifact.Owners[substratePoolCheckpointOwner(pool)] || artifact.SourceWorkspace != checkpoint.Spec.WorkspaceRef || artifact.Namespace != checkpoint.Namespace {
+		if artifact == nil || !artifact.Owners[substratePoolCheckpointOwner(pool)] || artifact.Namespace != checkpoint.Namespace ||
+			!reflect.DeepEqual(artifact.Checkpoint, *record.Checkpoint) ||
+			artifact.ClassBinding != ws.Spec.ClassBinding || artifact.ProviderBinding != ws.Spec.ProviderBinding {
 			return r.phase(ctx, checkpoint, "Failed", "ArtifactUnavailable", "the source no longer owns the verified Data artifact")
 		}
 		// Persist the selected digest before acquiring a reference. Retrying an
@@ -108,10 +110,32 @@ func (r *SubstrateCheckpointReconciler) Reconcile(ctx context.Context, req ctrl.
 	if err != nil {
 		return ctrl.Result{}, err
 	}
-	if artifact == nil || artifact.Namespace != checkpoint.Namespace || artifact.SourceWorkspace != checkpoint.Spec.WorkspaceRef || !reflect.DeepEqual(checkpoint.Status.ClassBinding, &artifact.ClassBinding) {
+	if artifact == nil || artifact.Namespace != checkpoint.Namespace ||
+		!reflect.DeepEqual(checkpoint.Status.ClassBinding, &artifact.ClassBinding) {
 		return r.phase(ctx, checkpoint, "Failed", "ArtifactUnavailable", "the recorded Data artifact or source identity is unavailable")
 	}
-	from := "pool:" + artifact.Namespace + "/" + artifact.SourcePool.Name + ":" + string(artifact.SourcePool.UID)
+	from := ""
+	if !artifact.Owners[substratePublicCheckpointOwner(checkpoint)] {
+		// Imported artifacts retain their original provenance. Acquire from
+		// the exporting workspace's exact pool, which may itself be a restore.
+		// Once acquired, the public reference survives that workspace's deletion.
+		ws := &workspacev1alpha1.ExecutionWorkspace{}
+		if err := pools.nativeSubstrateReader().Get(ctx,
+			types.NamespacedName{Namespace: checkpoint.Namespace, Name: checkpoint.Spec.WorkspaceRef.Name}, ws); err != nil {
+			return r.phase(ctx, checkpoint, "Pending", "SourceUnavailable", "source workspace is unavailable before reference acquisition")
+		}
+		pool := &corev1alpha1.RuntimePool{}
+		if err := pools.nativeSubstrateReader().Get(ctx,
+			types.NamespacedName{Namespace: ws.Namespace, Name: ws.Annotations[acpExecutionWorkspacePoolAnnotation]}, pool); err != nil {
+			return r.phase(ctx, checkpoint, "Pending", "SourceUnavailable", "source RuntimePool is unavailable before reference acquisition")
+		}
+		if ws.UID != checkpoint.Spec.WorkspaceRef.UID || ws.Labels[workspacev1alpha1.ProviderControllerLabel] != acpWorkspaceControllerLabelValue ||
+			pool.Labels[acpExecutionWorkspaceLinkLabel] != ws.Name || pool.Annotations[acpExecutionWorkspaceUIDAnnotation] != string(ws.UID) ||
+			!substrateRuntimePoolSuspendCapable(pool) || artifact.ClassBinding != ws.Spec.ClassBinding || artifact.ProviderBinding != ws.Spec.ProviderBinding {
+			return r.phase(ctx, checkpoint, "Failed", "SourceChanged", "source workspace or pool binding changed before reference acquisition")
+		}
+		from = substratePoolCheckpointOwner(pool)
+	}
 	if err := pools.acquireSubstrateCheckpointArtifact(ctx, cm, artifact, from, substratePublicCheckpointOwner(checkpoint)); err != nil {
 		if apierrors.IsConflict(err) || apierrors.IsServerTimeout(err) || apierrors.IsTimeout(err) {
 			return ctrl.Result{}, err

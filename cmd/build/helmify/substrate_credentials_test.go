@@ -1,0 +1,140 @@
+package main
+
+import (
+	"slices"
+	"strconv"
+	"strings"
+	"testing"
+
+	appsv1 "k8s.io/api/apps/v1"
+	corev1 "k8s.io/api/core/v1"
+	rbacv1 "k8s.io/api/rbac/v1"
+	"sigs.k8s.io/yaml"
+)
+
+func TestStaticChartMountsRotatableSubstrateCredentials(t *testing.T) {
+	for _, mode := range []string{"mtls", "bearer", "disabled"} {
+		t.Run(mode, func(t *testing.T) {
+			args := []string{
+				"--set", "controller.substrate.enabled=" + strconv.FormatBool(mode != "disabled"),
+				"--set-string", "controller.substrate.apiCredentials.existingSecret=substrate-control",
+				"--set-string", "controller.substrate.apiCredentials.caKey=server-ca",
+				"--show-only", "templates/deployment.yaml",
+			}
+			wantKeys := map[string]string{"server-ca": "ca.crt"}
+			wantArgs := []string{"--substrate-api-ca-file=/var/run/orka/substrate-api/ca.crt"}
+			if mode == "mtls" {
+				args = append(args, "--set-string", "controller.substrate.apiCredentials.certKey=identity",
+					"--set-string", "controller.substrate.apiCredentials.privateKeyKey=private-key")
+				wantKeys["identity"], wantKeys["private-key"] = "client.crt", "client.key"
+				wantArgs = append(wantArgs, "--substrate-api-cert-file=/var/run/orka/substrate-api/client.crt",
+					"--substrate-api-key-file=/var/run/orka/substrate-api/client.key")
+			} else {
+				args = append(args, "--set-string", "controller.substrate.apiCredentials.bearerTokenKey=access-token")
+				wantKeys["access-token"] = "bearer-token"
+				wantArgs = append(wantArgs, "--substrate-api-bearer-token-file=/var/run/orka/substrate-api/bearer-token")
+			}
+			var deployment appsv1.Deployment
+			if err := yaml.Unmarshal([]byte(requireHelmRender(t, args...)), &deployment); err != nil {
+				t.Fatal(err)
+			}
+			container := deployment.Spec.Template.Spec.Containers[0]
+			for _, arg := range wantArgs {
+				if !slices.Contains(container.Args, arg) {
+					t.Errorf("controller is missing %s", arg)
+				}
+			}
+			if slices.Contains(container.Args, "--substrate-enabled=true") != (mode != "disabled") {
+				t.Fatal("retaining cleanup credentials changed Substrate admission")
+			}
+			mountIndex := slices.IndexFunc(container.VolumeMounts, func(m corev1.VolumeMount) bool {
+				return m.Name == "substrate-api-credentials"
+			})
+			if mountIndex < 0 {
+				t.Fatal("controller has no Substrate credential mount")
+			}
+			mount := container.VolumeMounts[mountIndex]
+			if mount.MountPath != "/var/run/orka/substrate-api" || !mount.ReadOnly || mount.SubPath != "" {
+				t.Fatal("credential mount is writable or prevents projected Secret rotation")
+			}
+			volumeIndex := slices.IndexFunc(deployment.Spec.Template.Spec.Volumes, func(v corev1.Volume) bool {
+				return v.Name == mount.Name
+			})
+			if volumeIndex < 0 {
+				t.Fatal("credential mount has no volume")
+			}
+			secret := deployment.Spec.Template.Spec.Volumes[volumeIndex].Secret
+			if secret == nil || secret.SecretName != "substrate-control" || len(secret.Items) != len(wantKeys) ||
+				secret.DefaultMode == nil || *secret.DefaultMode != 0400 {
+				t.Fatal("controller does not project exactly the configured credential keys")
+			}
+			for _, item := range secret.Items {
+				if wantKeys[item.Key] != item.Path {
+					t.Errorf("credential key %s has unexpected mounted path %s", item.Key, item.Path)
+				}
+			}
+		})
+	}
+}
+
+func TestStaticChartRejectsIncompleteSubstrateCredentials(t *testing.T) {
+	for _, selection := range []string{
+		"",
+		"apiCredentials.existingSecret=client,apiCredentials.certKey=cert",
+		"apiCredentials.bearerTokenKey=token",
+		"apiCredentials.existingSecret=client,apiCredentials.certKey=cert," +
+			"apiCredentials.privateKeyKey=key,apiCredentials.bearerTokenKey=token",
+		"apiCredentials.existingSecret=client,apiCredentials.bearerTokenKey=token,apiBearerTokenFile=/custom/token",
+	} {
+		t.Run(selection, func(t *testing.T) {
+			args := []string{"--set", "controller.substrate.enabled=true", "--show-only", "templates/deployment.yaml"}
+			for value := range strings.SplitSeq(selection, ",") {
+				if value != "" {
+					args = append(args, "--set-string", "controller.substrate."+value)
+				}
+			}
+			output, err := helmTemplateStaticChart(t, args...)
+			if err == nil || !strings.Contains(output, "controller.substrate") {
+				t.Fatal("Helm accepted incomplete or conflicting Substrate authentication")
+			}
+		})
+	}
+}
+
+func TestStaticChartConfinesSubstrateWorkerPermissions(t *testing.T) {
+	rendered := requireHelmRender(t, "--set", "controller.substrate.enabled=false",
+		"--set-string", "controller.substrate.workerNamespaces[0]=ate-workers",
+		"--show-only", "templates/substrate-worker-rbac.yaml")
+	var role rbacv1.Role
+	if err := yaml.Unmarshal([]byte(requireRenderedDocument(t, rendered, "kind: Role\n")), &role); err != nil {
+		t.Fatal(err)
+	}
+	if role.Namespace != "ate-workers" {
+		t.Fatal("Substrate worker authority escaped the selected provider namespace")
+	}
+	for _, verb := range []string{"get", "list", "delete"} {
+		if !testSubstrateRuleAllows(role.Rules, "", "pods", verb) {
+			t.Errorf("worker cleanup lacks Pod %s permission", verb)
+		}
+	}
+	for _, verb := range []string{"get", "create", "patch", "delete"} {
+		if !testSubstrateRuleAllows(role.Rules, "networking.k8s.io", "networkpolicies", verb) {
+			t.Errorf("worker confinement lacks NetworkPolicy %s permission", verb)
+		}
+	}
+	for _, resource := range []string{"secrets", "pods/exec", "serviceaccounts/token"} {
+		for _, verb := range []string{"get", "list", "create", "delete"} {
+			if testSubstrateRuleAllows(role.Rules, "", resource, verb) {
+				t.Errorf("worker role unexpectedly grants %s on %s", verb, resource)
+			}
+		}
+	}
+	var binding rbacv1.RoleBinding
+	if err := yaml.Unmarshal([]byte(requireRenderedDocument(t, rendered, "kind: RoleBinding\n")), &binding); err != nil {
+		t.Fatal(err)
+	}
+	if binding.Namespace != role.Namespace || binding.RoleRef.Name != role.Name || binding.RoleRef.Kind != "Role" ||
+		len(binding.Subjects) != 1 || binding.Subjects[0].Namespace != staticChartTestNamespace {
+		t.Fatal("worker role is not bound to the release controller")
+	}
+}

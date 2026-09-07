@@ -44,6 +44,26 @@ The native route is `name.atespace.<suffix>`. Identical Actor names in different
 Atespaces remain distinct. An explicit local insecure-TLS option exists, but
 the bundled installer uses verified server trust and projected client identity.
 
+Helm can mount control credentials from an existing Secret in the release namespace:
+
+```yaml
+controller:
+  substrate:
+    enabled: true
+    apiCredentials:
+      existingSecret: substrate-control
+      certKey: tls.crt
+      privateKeyKey: tls.key
+      caKey: ca.crt
+    workerNamespaces: [ate-workers]
+```
+
+For bearer authentication, select `apiCredentials.bearerTokenKey` instead of
+the certificate and private-key keys. Secret projections support rotation.
+`workerNamespaces` grants Pod cleanup and NetworkPolicy management only in the
+listed provider namespaces. Keep both settings while disabling Substrate
+admission so existing workspaces can still finish cleanup.
+
 The infrastructure template must select exactly one WorkerPool and specify a
 gVisor `sandboxConfig`, resource limits, and snapshot storage. The controller
 compiles separate immutable native templates for ACP. It preserves admitted
@@ -139,6 +159,10 @@ is not automatically replayed. Full-memory restore remains prohibited by ADR
 Actor scale-to-zero does not imply WorkerPool Pod scale-to-zero. Upstream
 currently provides one Actor slot per worker. Worker capacity and autoscaling
 remain operator responsibilities.
+
+`SubstrateActorPool.spec.templateRef.namespace` is immutable because it selects
+the Atespace where pool members live. Create another pool to move Atespaces;
+the original pool retains responsibility for cleaning up its Actors.
 
 ## Checkpoints, forks, and recovery
 

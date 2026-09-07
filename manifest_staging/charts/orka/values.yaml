@@ -148,6 +148,18 @@ controller:
     apiBearerTokenFile: ""
     apiCAFile: ""
     apiInsecureSkipVerify: false
+    # Mount an existing Secret for native control authentication. Select either
+    # certKey + privateKeyKey or bearerTokenKey. caKey is optional for public CAs.
+    # Keep this configured while disabling admission so cleanup can authenticate.
+    apiCredentials:
+      existingSecret: ""
+      certKey: ""
+      privateKeyKey: ""
+      bearerTokenKey: ""
+      caKey: ""
+    # Dedicated provider namespaces where ACP may read/delete exact worker Pods
+    # and manage confinement NetworkPolicies. Keep until all pools are deleted.
+    workerNamespaces: []
     routerUrl: http://atenet-router.ate-system.svc
     actorDnsSuffix: actors.resources.substrate.ate.dev
     defaultTemplate: ""

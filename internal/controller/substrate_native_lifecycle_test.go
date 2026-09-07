@@ -544,3 +544,57 @@ func TestNativeSubstrateFreshStoppedPoolNeedsNoJournal(t *testing.T) {
 	}
 	nativeDeletePool(t, h, &pool)
 }
+
+func TestNativeSubstrateUnfencedBootBlocksCleanup(t *testing.T) {
+	for _, providerState := range []string{"missing", "suspended"} {
+		for _, action := range []string{"stop", "delete"} {
+			t.Run(providerState+"/"+action, func(t *testing.T) {
+				h := newNativeRuntimeTestHarness(t)
+				h.until(t, func(_ *corev1alpha1.RuntimePool, record *substrateNativeState) bool {
+					return record != nil && record.Attempt != nil && record.Attempt.BootRequested &&
+						record.Attempt.Worker == nil && h.api.resumes == 1
+				})
+				name := h.record(t).Attempt.Name
+				actor := h.api.actors[name]
+				assignment := actor.GetStatus().GetWorkerAssignment()
+				workerPod := types.NamespacedName{Namespace: assignment.GetWorkerNamespace(), Name: assignment.GetWorkerPod()}
+				if providerState == "missing" {
+					delete(h.api.actors, name)
+				} else {
+					actor.Status.State = ateapipb.ActorState_ACTOR_STATE_SUSPENDED
+					actor.Status.WorkerAssignment = nil
+				}
+				pool := runtimePoolTestGetPool(t, h.r, h.pool)
+				if action == "delete" {
+					if err := h.r.Delete(t.Context(), &pool); err != nil {
+						t.Fatal(err)
+					}
+				} else {
+					pool.Spec.DesiredReplicas = 0
+					if err := h.r.Update(t.Context(), &pool); err != nil {
+						t.Fatal(err)
+					}
+				}
+				for range 6 {
+					h.step(t)
+					pool = runtimePoolTestGetPool(t, h.r, h.pool)
+					record := h.record(t)
+					if record == nil || record.Attempt == nil || record.Attempt.Name != name || record.Attempt.WorkloadAbsent {
+						t.Fatal("cleanup discarded an unfenced boot or asserted workload absence")
+					}
+					if pool.Status.AdmissionState != corev1alpha1.RuntimePoolAdmissionClosed ||
+						pool.Status.Lifecycle == corev1alpha1.RuntimePoolLifecycleStopped ||
+						!slices.Contains(pool.Finalizers, runtimePoolFinalizer) {
+						t.Fatal("cleanup admitted work, reported stopped, or released the pool finalizer")
+					}
+				}
+				if h.api.resumes != 1 || h.api.deletes != 0 {
+					t.Fatal("cleanup replayed an uncertain boot or deleted its provider identity")
+				}
+				if err := h.r.Get(t.Context(), workerPod, &corev1.Pod{}); err != nil {
+					t.Fatalf("cleanup touched the worker without a recorded fence: %v", err)
+				}
+			})
+		}
+	}
+}

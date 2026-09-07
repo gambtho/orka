@@ -1044,15 +1044,18 @@ func main() {
 		LeaderElectionReleaseOnCancel: true,
 	}
 
-	// Tenant resources are always namespace-scoped. Only harness v2 may also
-	// cache RuntimePool child kinds from its separately owned runtime namespace.
+	// Tenant resources remain namespace-scoped. Harness v2 also watches its
+	// runtime children and the controller's durable checkpoint records.
 	runtimeCacheNamespace := ""
+	controllerCacheNamespace := ""
 	if acpRuntimeEnabled {
 		runtimeCacheNamespace = acpRuntimeNamespace
+		controllerCacheNamespace = currentPodNamespace()
 	}
 	mgrOptions.Cache = managerCacheOptions(
 		watchNamespace,
 		runtimeCacheNamespace,
+		controllerCacheNamespace,
 	)
 
 	mgr, err := ctrl.NewManager(restConfig, mgrOptions)
@@ -2129,7 +2132,7 @@ func parseExactLabels(raw string) (map[string]string, error) {
 	return result, nil
 }
 
-func managerCacheOptions(watchNamespace, acpRuntimeNamespace string) cache.Options {
+func managerCacheOptions(watchNamespace, acpRuntimeNamespace, controllerNamespace string) cache.Options {
 	watchNamespace = strings.TrimSpace(watchNamespace)
 	if watchNamespace == "" {
 		return cache.Options{}
@@ -2137,6 +2140,12 @@ func managerCacheOptions(watchNamespace, acpRuntimeNamespace string) cache.Optio
 
 	options := cache.Options{
 		DefaultNamespaces: map[string]cache.Config{watchNamespace: {}},
+		ByObject:          make(map[crclient.Object]cache.ByObject),
+	}
+	if namespace := strings.TrimSpace(controllerNamespace); namespace != "" && namespace != watchNamespace {
+		options.ByObject[&corev1.ConfigMap{}] = cache.ByObject{Namespaces: map[string]cache.Config{
+			watchNamespace: {}, namespace: {},
+		}}
 	}
 	runtimeNamespace := strings.TrimSpace(acpRuntimeNamespace)
 	if runtimeNamespace == "" {
@@ -2147,7 +2156,6 @@ func managerCacheOptions(watchNamespace, acpRuntimeNamespace string) cache.Optio
 		watchNamespace:   {},
 		runtimeNamespace: {},
 	}
-	options.ByObject = make(map[crclient.Object]cache.ByObject)
 	options.ByObject[&appsv1.Deployment{}] = cache.ByObject{Namespaces: runtimeChildNamespaces}
 	options.ByObject[&appsv1.ReplicaSet{}] = cache.ByObject{Namespaces: runtimeChildNamespaces}
 	options.ByObject[&corev1.Pod{}] = cache.ByObject{Namespaces: runtimeChildNamespaces}

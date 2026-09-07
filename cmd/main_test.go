@@ -514,12 +514,14 @@ func TestManagerCacheOptions(t *testing.T) {
 		&policyv1.PodDisruptionBudget{},
 	}
 	tests := []struct {
-		name               string
-		watchNamespace     string
-		runtimeNamespace   string
-		wantDefault        []string
-		wantRuntimeChild   []string
-		wantChildOverrides bool
+		name                string
+		watchNamespace      string
+		runtimeNamespace    string
+		controllerNamespace string
+		wantDefault         []string
+		wantRuntimeChild    []string
+		wantConfigMaps      []string
+		wantChildOverrides  bool
 	}{
 		{
 			name:             "cluster-wide watch is unrestricted",
@@ -556,17 +558,33 @@ func TestManagerCacheOptions(t *testing.T) {
 			wantDefault:      []string{"tenant-a"},
 			wantRuntimeChild: []string{"tenant-a"},
 		},
+		{
+			name:           "checkpoint records remain watched outside tenant and runtime namespaces",
+			watchNamespace: "tenant-a", runtimeNamespace: "orka-runtimes", controllerNamespace: "orka-system",
+			wantDefault: []string{"tenant-a"}, wantRuntimeChild: []string{"orka-runtimes", "tenant-a"},
+			wantConfigMaps: []string{"orka-system", "tenant-a"}, wantChildOverrides: true,
+		},
+		{
+			name:           "checkpoint collection does not depend on a separate runtime namespace",
+			watchNamespace: "tenant-a", controllerNamespace: "orka-system",
+			wantDefault: []string{"tenant-a"}, wantRuntimeChild: []string{"tenant-a"},
+			wantConfigMaps: []string{"orka-system", "tenant-a"},
+		},
+		{
+			name:           "controller namespace equal to tenant needs no override",
+			watchNamespace: "tenant-a", controllerNamespace: "tenant-a",
+			wantDefault: []string{"tenant-a"}, wantRuntimeChild: []string{"tenant-a"},
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			options := managerCacheOptions(tt.watchNamespace, tt.runtimeNamespace)
+			options := managerCacheOptions(tt.watchNamespace, tt.runtimeNamespace, tt.controllerNamespace)
 			assertCacheNamespaces(t, options.DefaultNamespaces, tt.wantDefault)
 
 			for _, object := range []client.Object{
 				&corev1alpha1.Task{},
 				&corev1alpha1.Agent{},
-				&corev1.ConfigMap{},
 			} {
 				if _, ok := cacheByObjectForType(options, object); ok {
 					t.Fatalf("default-cached object %T unexpectedly has a ByObject override", object)
@@ -575,6 +593,12 @@ func TestManagerCacheOptions(t *testing.T) {
 			}
 
 			wantOverrides := 0
+			wantConfigMaps := tt.wantDefault
+			if tt.wantConfigMaps != nil {
+				wantOverrides++
+				wantConfigMaps = tt.wantConfigMaps
+			}
+			assertCacheNamespaces(t, effectiveCacheNamespaces(options, &corev1.ConfigMap{}), wantConfigMaps)
 			if tt.wantChildOverrides {
 				wantOverrides += len(childTypes)
 			}

@@ -50,9 +50,12 @@ func (r *RuntimePoolReconciler) importNativeSubstrateCheckpoint(ctx context.Cont
 		}
 		ready := meta.FindStatusCondition(checkpoint.Status.Conditions, substrateNativeReady)
 		if string(checkpoint.UID) != ref.UID || checkpoint.Status.Digest != ref.Digest || !checkpoint.DeletionTimestamp.IsZero() ||
-			checkpoint.Status.Phase != substrateNativeReady || ready == nil || ready.Status != "True" || ready.ObservedGeneration != checkpoint.Generation || checkpoint.Spec.WorkspaceRef != artifact.SourceWorkspace {
+			checkpoint.Status.Phase != substrateNativeReady || ready == nil || ready.Status != "True" || ready.ObservedGeneration != checkpoint.Generation ||
+			checkpoint.Spec.WorkspaceRef.UID == ws.UID || !reflect.DeepEqual(checkpoint.Status.ClassBinding, &artifact.ClassBinding) {
 			return fmt.Errorf("restoreFrom does not identify a Ready checkpoint at the accepted UID and digest")
 		}
+		// A recovery export can retain imported data with older provenance.
+		// Its acquired catalog owner binds this public checkpoint to that data.
 		if err := r.acquireSubstrateCheckpointArtifact(ctx, artifactCM, artifact, substratePublicCheckpointOwner(checkpoint), owner); err != nil {
 			return err
 		}

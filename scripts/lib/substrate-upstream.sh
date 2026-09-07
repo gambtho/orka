@@ -39,15 +39,14 @@ PY
      "$(git -C "${SUBSTRATE_DIR}" rev-parse HEAD)" == "${SUBSTRATE_UPSTREAM_COMMIT}" ]] || {
     printf 'Substrate checkout does not match the official upstream pin\n' >&2; return 1;
   }
-  git -C "${SUBSTRATE_DIR}" diff --exit-code --quiet || return 1
-  git -C "${SUBSTRATE_DIR}" diff --cached --exit-code --quiet || return 1
+  substrate_require_clean_upstream "${SUBSTRATE_DIR}" || return 1
   local registry_port
   registry_port="$(docker inspect -f '{{(index (index .HostConfig.PortBindings "5000/tcp") 0).HostPort}}' kind-registry 2>/dev/null || true)"
   if [[ -n "${registry_port}" && "${registry_port}" != "${KIND_REGISTRY_PORT}" ]]; then
     printf 'Existing kind-registry uses another port; refusing to replace shared infrastructure\n' >&2
     return 1
   fi
-  if kind get clusters 2>/dev/null | rg -qx -- "${cluster}"; then
+  if kind get clusters 2>/dev/null | grep -Fxq -- "${cluster}"; then
     [[ "${SUBSTRATE_REUSE_CLUSTER:-0}" == 1 ]] || {
       printf 'Cluster %s already exists; set SUBSTRATE_REUSE_CLUSTER=1 to reuse it\n' "${cluster}" >&2; return 1;
     }
@@ -56,6 +55,14 @@ PY
     (cd "${SUBSTRATE_DIR}" && bash hack/create-kind-cluster.sh) || return 1
   fi
   (cd "${SUBSTRATE_DIR}" && bash hack/install-ate-kind.sh --deploy-ate-system) || return 1
-  git -C "${SUBSTRATE_DIR}" diff --exit-code --quiet || return 1
-  git -C "${SUBSTRATE_DIR}" diff --cached --exit-code --quiet
+  substrate_require_clean_upstream "${SUBSTRATE_DIR}"
+}
+
+substrate_require_clean_upstream() {
+  local state
+  state="$(git -C "$1" status --porcelain --untracked-files=all)" || return 1
+  if [[ -n "${state}" ]]; then
+    printf 'Substrate checkout contains modified or untracked files; refusing upstream conformance\n' >&2
+    return 1
+  fi
 }

@@ -22,8 +22,10 @@ const (
 )
 
 // SubstrateActorPoolSpec defines an operator-owned oversubscription pool.
+// +kubebuilder:validation:XValidation:rule="has(self.templateRef.__namespace__) == has(oldSelf.templateRef.__namespace__) && (!has(self.templateRef.__namespace__) || self.templateRef.__namespace__ == oldSelf.templateRef.__namespace__)",message="templateRef.namespace is immutable; create another pool to change Atespace"
 type SubstrateActorPoolSpec struct {
-	// TemplateRef is the ActorTemplate used for pool members.
+	// TemplateRef is the ActorTemplate used for pool members. Its namespace
+	// selects the native Atespace and is immutable so cleanup retains ownership.
 	// +kubebuilder:validation:Required
 	TemplateRef WorkspaceTemplateReference `json:"templateRef"`
 
@@ -98,7 +100,7 @@ type SubstrateActorPool struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`
 
-	Spec   SubstrateActorPoolSpec   `json:"spec,omitempty"`
+	Spec   SubstrateActorPoolSpec   `json:"spec"`
 	Status SubstrateActorPoolStatus `json:"status,omitempty"`
 }
 

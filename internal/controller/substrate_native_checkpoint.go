@@ -344,8 +344,10 @@ func (r *RuntimePoolReconciler) stopNativeSubstrateRuntime(ctx context.Context, 
 		}
 		return r.nativeSubstrateProgress(ctx, pool, corev1alpha1.RuntimePoolLifecycleStopping, "independently proved that the previous native workload is absent")
 	}
-	if a.Worker == nil && a.BootRequested && actor != nil && actor.GetStatus().GetState() != ateapipb.ActorState_ACTOR_STATE_SUSPENDED {
-		return r.nativeSubstrateProgress(ctx, pool, corev1alpha1.RuntimePoolLifecycleStopping, "waiting to identify the worker of an in-flight native boot before cleanup")
+	if a.BootRequested && !a.WorkloadAbsent {
+		// Actor disappearance or suspension cannot prove that a booted worker
+		// stopped. Preserve the journal until an exact worker fence is recovered.
+		return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, errors.New("native boot has no independent workload-absence proof; preserving its Actor and journal for recovery"))
 	}
 	if actor != nil {
 		if !a.DeleteIssued {

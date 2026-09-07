@@ -70,6 +70,23 @@ func TestNativeSubstrateCompilerPreservesSupervisorContract(t *testing.T) {
 	}
 }
 
+func TestNativeSubstrateTemplateDiscoveryUsesProviderInventory(t *testing.T) {
+	h := newNativeRuntimeTestHarness(t)
+	h.r.APIReader = h.r.Client
+	// A tenant-only cache contains neither the provider WorkerPool nor its namespace.
+	h.r.Client = fake.NewClientBuilder().WithScheme(h.r.Scheme).Build()
+	store := &nativeSubstrateTemplateStore{r: h.r}
+	object, err := store.Get(t.Context(), substrateTestTemplateNamespace, substrateTestBaseTemplateName)
+	if err != nil {
+		t.Fatal(err)
+	}
+	namespace, _, _ := unstructured.NestedString(object.Object, "spec", "workerPoolRef", "namespace")
+	name, _, _ := unstructured.NestedString(object.Object, "spec", "workerPoolRef", "name")
+	if namespace != substrateTestWorkerNamespace || name != substrateTestWorkerPoolName {
+		t.Fatalf("native infrastructure selected WorkerPool %s/%s outside its provider inventory", namespace, name)
+	}
+}
+
 func TestNativeSubstrateCompilerRejectsOversizedEnvironmentAndUnresolvedReferences(t *testing.T) {
 	r, _ := runtimePoolSubstrateTestReconciler(t, nil, &fakeSubstrateActorControl{})
 	for _, unresolved := range []bool{false, true} {

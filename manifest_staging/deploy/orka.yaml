@@ -1342,12 +1342,12 @@ rules:
   - workspace.orka.ai
   resources:
   - executionworkspacecheckpoints
-  - executionworkspaceproviders
   verbs:
   - get
   - list
   - patch
   - update
+  - use
   - watch
 - apiGroups:
   - workspace.orka.ai
@@ -1390,6 +1390,16 @@ rules:
   verbs:
   - get
   - list
+  - watch
+- apiGroups:
+  - workspace.orka.ai
+  resources:
+  - executionworkspaceproviders
+  verbs:
+  - get
+  - list
+  - patch
+  - update
   - watch
 - apiGroups:
   - workspace.orka.ai

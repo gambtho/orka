@@ -18,18 +18,50 @@ PORT_FORWARD_PIDS=()
 source "${ROOT_DIR}/scripts/lib/substrate-upstream.sh"
 source "${ROOT_DIR}/scripts/lib/substrate-orka-local.sh"
 source "${ROOT_DIR}/scripts/lib/e2e-admission-tls.sh"
+source "${ROOT_DIR}/scripts/lib/redact.sh"
 
 log() { printf '[%s] %s\n' "$(date -u +%H:%M:%S)" "$*"; }
 kubectl_ate() { "${TMP_ROOT}/kubectl-ate" --context "kind-${KIND_CLUSTER}" "$@"; }
 cleanup() {
   local rc=$?
   for pid in "${PORT_FORWARD_PIDS[@]}"; do kill "${pid}" 2>/dev/null || true; done
-  if (( rc )); then
+  if (( rc )) && [[ "${CLUSTER_PREPARED:-0}" == 1 ]]; then
     kubectl -n orka-system get tasks,runtimepools,executionworkspaces,executionworkspacecheckpoints 2>/dev/null || true
     kubectl get pods -A 2>/dev/null || true
+    job_diagnostics substrate-direct-conformance
+    job_diagnostics native-mcp-client
   fi
   if [[ "${KEEP_CLUSTER}" != 1 && "${CLUSTER_PREPARED:-0}" == 1 ]]; then kind delete cluster --name "${KIND_CLUSTER}"; fi
   exit "${rc}"
+}
+job_diagnostics() {
+  local name="$1" bootstrap_secret=""
+  local ORKA_REDACT_SECRET_VARS=(bootstrap_secret)
+  if [[ -f "${TMP_ROOT}/bootstrap-token" ]]; then bootstrap_secret="$(<"${TMP_ROOT}/bootstrap-token")"; fi
+  log "Conformance diagnostics for job/${name}"
+  # Restrict metadata to status; Pod specs can contain projected credentials.
+  kubectl -n orka-system --request-timeout=15s get pods -l "job-name=${name}" -o json 2>/dev/null |
+    jq '[.items[] | {name: .metadata.name, phase: .status.phase, conditions: .status.conditions,
+      containers: [.status.containerStatuses[]? | {name, state}]}]' | redact >&2 || true
+  kubectl -n orka-system --request-timeout=15s logs "job/${name}" --all-containers=true \
+    --prefix=true --tail=200 --pod-running-timeout=5s 2>&1 | redact >&2 || true
+}
+wait_job() {
+  local name="$1" seconds="$2" start status
+  start=$(date +%s)
+  while true; do
+    status="$(kubectl -n orka-system --request-timeout=15s get job "${name}" -o json)" || return 1
+    if jq -e 'any(.status.conditions[]?; (.type == "Failed" or .type == "FailureTarget") and .status == "True")' <<<"${status}" >/dev/null; then
+      printf 'Conformance job/%s failed\n' "${name}" >&2
+      return 1
+    fi
+    if jq -e 'any(.status.conditions[]?; .type == "Complete" and .status == "True")' <<<"${status}" >/dev/null; then return 0; fi
+    if (( $(date +%s) - start >= seconds )); then
+      printf 'Timed out waiting for conformance job/%s\n' "${name}" >&2
+      return 1
+    fi
+    sleep 2
+  done
 }
 wait_field() {
   local resource="$1" name="$2" expression="$3" expected="$4" seconds="${5:-600}" start
@@ -293,8 +325,8 @@ spec:
               labelSelector: {matchLabels: {podcert.ate.dev/canarying: live}}
               path: trust-bundle.pem
 YAML
-  kubectl -n orka-system wait --for=condition=Complete job/substrate-direct-conformance --timeout=600s
-  kubectl -n orka-system logs job/substrate-direct-conformance | rg -q '^native direct workspace conformance passed$'
+  wait_job substrate-direct-conformance 600
+  kubectl -n orka-system logs job/substrate-direct-conformance | grep -Fxq 'native direct workspace conformance passed'
   kubectl -n orka-system delete job substrate-direct-conformance
 }
 exercise_mcp() {
@@ -361,13 +393,13 @@ spec:
         - {name: ORKA_TOOL_ARGS, value: '{"message":"native"}'}
         - {name: ORKA_TOOL_EXPECT_RESULT, value: 'mcp-e2e-ok:native-mcp:native'}
 YAML
-  kubectl -n orka-system wait --for=condition=Complete job/native-mcp-client --timeout=180s
+  wait_job native-mcp-client 180
   kubectl -n orka-system delete tool native-mcp
   kubectl -n orka-system delete substrateactorpool native-mcp
   kubectl -n orka-system delete job,role,rolebinding,serviceaccount native-mcp-client
 }
 main() {
-  for command in docker git go jq kind ko kubectl openssl python3 rg curl; do command -v "${command}" >/dev/null || { echo "${command} is required" >&2; return 1; }; done
+  for command in docker git go jq kind ko kubectl openssl python3 curl; do command -v "${command}" >/dev/null || { echo "${command} is required" >&2; return 1; }; done
   mkdir -p "${TMP_ROOT}/docker-config"
   chmod 700 "${TMP_ROOT}"
   export DOCKER_CONFIG="${TMP_ROOT}/docker-config"
@@ -405,8 +437,7 @@ main() {
   exercise_mcp "${client}"
   create_workspace_class
   exercise_acp_lifecycle
-  git -C "${SUBSTRATE_DIR}" diff --exit-code --quiet
-  git -C "${SUBSTRATE_DIR}" diff --cached --exit-code --quiet
+  substrate_require_clean_upstream "${SUBSTRATE_DIR}"
   log 'Unmodified upstream Substrate conformance passed'
 }
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then main "$@"; fi
