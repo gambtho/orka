@@ -25,6 +25,8 @@ func TestSubstrateNativeRPCDeadlinesReachProvider(t *testing.T) {
 			return &ateapipb.ResumeActorResponse{}, nil
 		case ateapipb.Control_SuspendActor_FullMethodName:
 			return &ateapipb.SuspendActorResponse{}, nil
+		case ateapipb.Control_CreateTag_FullMethodName, ateapipb.Control_DeleteTag_FullMethodName, ateapipb.Control_GetTag_FullMethodName:
+			return &ateapipb.Tag{}, nil
 		default:
 			return &ateapipb.Actor{}, nil
 		}
@@ -41,12 +43,18 @@ func TestSubstrateNativeRPCDeadlinesReachProvider(t *testing.T) {
 		want   time.Duration
 	}{
 		{"cold boot respects readiness window", "resume", 3 * time.Minute, 3 * time.Minute},
-		{"checkpoint respects operation window", "suspend", 2 * time.Minute, 2 * time.Minute},
+		{"suspension respects operation window", "suspend", 2 * time.Minute, 2 * time.Minute},
+		{"snapshot tag creation respects operation window", "createTag", 2 * time.Minute, 2 * time.Minute},
 		{"cold boot has bounded fallback", "resume", 0, 5 * time.Minute},
-		{"checkpoint has bounded fallback", "suspend", 0, 5 * time.Minute},
+		{"suspension has bounded fallback", "suspend", 0, 5 * time.Minute},
+		{"snapshot tag creation has bounded fallback", "createTag", 0, 5 * time.Minute},
+		{"snapshot tag deletion has bounded fallback", "deleteTag", 0, 5 * time.Minute},
 		{"deletion has bounded fallback", "delete", 0, 5 * time.Minute},
 		{"short caller deadline wins", "resume", 5 * time.Second, 5 * time.Second},
+		{"snapshot tag creation respects short deadline", "createTag", 5 * time.Second, 5 * time.Second},
+		{"snapshot tag deletion respects short deadline", "deleteTag", 5 * time.Second, 5 * time.Second},
 		{"metadata reads stay bounded", "read", 3 * time.Minute, 30 * time.Second},
+		{"snapshot tag reads stay bounded", "readTag", 3 * time.Minute, 30 * time.Second},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := t.Context()
@@ -63,6 +71,16 @@ func TestSubstrateNativeRPCDeadlinesReachProvider(t *testing.T) {
 				_, err = api.Control.SuspendActor(ctx, &ateapipb.SuspendActorRequest{Actor: ref})
 			case "delete":
 				_, err = api.Control.DeleteActor(ctx, &ateapipb.DeleteActorRequest{Actor: ref, AnyState: true})
+			case "createTag":
+				_, err = api.Control.CreateTag(ctx, &ateapipb.CreateTagRequest{Tag: &ateapipb.Tag{
+					Metadata:    &ateapipb.ResourceMetadata{Atespace: ref.Atespace, Name: "checkpoint"},
+					SourceActor: ref,
+					Scope:       ateapipb.TagScope_TAG_SCOPE_ATESPACE,
+				}})
+			case "deleteTag":
+				_, err = api.Control.DeleteTag(ctx, &ateapipb.DeleteTagRequest{Tag: ref})
+			case "readTag":
+				_, err = api.Control.GetTag(ctx, &ateapipb.GetTagRequest{Tag: ref})
 			default:
 				_, err = api.Control.GetActor(ctx, &ateapipb.GetActorRequest{Actor: ref})
 			}

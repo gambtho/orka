@@ -149,7 +149,7 @@ controller:
     apiCAFile: ""
     apiInsecureSkipVerify: false
     # Mount an existing Secret for native control authentication. Select either
-    # certKey + privateKeyKey or bearerTokenKey. caKey is optional for public CAs.
+    # certKey + privateKeyKey or bearerTokenKey. Verified TLS requires caKey.
     # Keep this configured while disabling admission so cleanup can authenticate.
     apiCredentials:
       existingSecret: ""

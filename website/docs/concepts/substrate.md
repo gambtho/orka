@@ -59,7 +59,9 @@ controller:
 ```
 
 For bearer authentication, select `apiCredentials.bearerTokenKey` instead of
-the certificate and private-key keys. Secret projections support rotation.
+the certificate and private-key keys. Verified TLS requires `apiCredentials.caKey`
+for either authentication method, or `apiCAFile` when mounting credentials yourself.
+Secret projections support rotation.
 `workerNamespaces` grants Pod cleanup and NetworkPolicy management only in the
 listed provider namespaces. Keep both settings while disabling Substrate
 admission so existing workspaces can still finish cleanup.

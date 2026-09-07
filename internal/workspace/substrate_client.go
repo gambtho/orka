@@ -114,7 +114,9 @@ func substrateRPCDeadline(ctx context.Context, method string, req, reply any, co
 		ateapipb.Control_SuspendActor_FullMethodName,
 		ateapipb.Control_PauseActor_FullMethodName,
 		ateapipb.Control_DeleteActor_FullMethodName,
-		ateapipb.Control_DeleteActorTemplate_FullMethodName:
+		ateapipb.Control_DeleteActorTemplate_FullMethodName,
+		ateapipb.Control_CreateTag_FullMethodName,
+		ateapipb.Control_DeleteTag_FullMethodName:
 		timeout = 5 * time.Minute
 	}
 	ctx, cancel := context.WithTimeout(ctx, timeout)

@@ -101,6 +101,51 @@ func TestStaticChartRejectsIncompleteSubstrateCredentials(t *testing.T) {
 	}
 }
 
+func TestStaticChartRequiresSubstrateServerTrust(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		selection  string
+		caSetting  string
+		caArgument string
+	}{
+		{"Secret mTLS", "apiCredentials.existingSecret=client,apiCredentials.certKey=cert,apiCredentials.privateKeyKey=key",
+			"apiCredentials.caKey=server-ca", "--substrate-api-ca-file=/var/run/orka/substrate-api/ca.crt"},
+		{"Secret bearer", "apiCredentials.existingSecret=client,apiCredentials.bearerTokenKey=token",
+			"apiCredentials.caKey=server-ca", "--substrate-api-ca-file=/var/run/orka/substrate-api/ca.crt"},
+		{"mounted mTLS", "apiCertFile=/custom/client.crt,apiKeyFile=/custom/client.key",
+			"apiCAFile=/custom/ca.crt", "--substrate-api-ca-file=/custom/ca.crt"},
+		{"mounted bearer", "apiBearerTokenFile=/custom/token",
+			"apiCAFile=/custom/ca.crt", "--substrate-api-ca-file=/custom/ca.crt"},
+	} {
+		for _, enabled := range []bool{true, false} {
+			t.Run(tc.name+" enabled="+strconv.FormatBool(enabled), func(t *testing.T) {
+				args := []string{"--set", "controller.substrate.enabled=" + strconv.FormatBool(enabled),
+					"--show-only", "templates/deployment.yaml"}
+				for value := range strings.SplitSeq(tc.selection, ",") {
+					args = append(args, "--set-string", "controller.substrate."+value)
+				}
+				output, err := helmTemplateStaticChart(t, args...)
+				if err == nil || !strings.Contains(output, "required for verified Substrate API TLS") {
+					t.Fatal("Helm accepted Substrate authentication without server trust")
+				}
+				for _, trust := range []struct{ flag, value, argument string }{
+					{"--set-string", tc.caSetting, tc.caArgument},
+					{"--set", "apiInsecureSkipVerify=true", "--substrate-api-insecure-skip-verify=true"},
+				} {
+					var deployment appsv1.Deployment
+					rendered := requireHelmRender(t, append(slices.Clone(args), trust.flag, "controller.substrate."+trust.value)...)
+					if err := yaml.Unmarshal([]byte(rendered), &deployment); err != nil {
+						t.Fatal(err)
+					}
+					if !slices.Contains(deployment.Spec.Template.Spec.Containers[0].Args, trust.argument) {
+						t.Fatalf("controller is missing selected trust argument %s", trust.argument)
+					}
+				}
+			})
+		}
+	}
+}
+
 func TestStaticChartConfinesSubstrateWorkerPermissions(t *testing.T) {
 	rendered := requireHelmRender(t, "--set", "controller.substrate.enabled=false",
 		"--set-string", "controller.substrate.workerNamespaces[0]=ate-workers",

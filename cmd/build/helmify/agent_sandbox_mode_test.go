@@ -108,6 +108,7 @@ func TestStaticChartEnablesWorkspaceDispatchForSubstrate(t *testing.T) {
 		"--set", "controller.substrate.enabled=true",
 		"--set-string", "controller.substrate.apiCredentials.existingSecret=substrate-control",
 		"--set-string", "controller.substrate.apiCredentials.bearerTokenKey=token",
+		"--set-string", "controller.substrate.apiCredentials.caKey=server-ca",
 		"--set", "controller.executionWorkspace.dispatchEnabled=true",
 		"--show-only", "templates/deployment.yaml",
 	)
