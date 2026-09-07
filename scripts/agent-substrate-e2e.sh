@@ -25,6 +25,7 @@ kubectl_ate() { "${TMP_ROOT}/kubectl-ate" --context "kind-${KIND_CLUSTER}" "$@";
 cleanup() {
   local rc=$?
   for pid in "${PORT_FORWARD_PIDS[@]}"; do kill "${pid}" 2>/dev/null || true; done
+  rm -f "${TMP_ROOT}/native-history-token" "${TMP_ROOT}/native-history-header"
   if (( rc )) && [[ "${CLUSTER_PREPARED:-0}" == 1 ]]; then
     runtime_diagnostics
     kubectl get pods -A 2>/dev/null || true
@@ -250,6 +251,11 @@ journal_for_pool() {
 }
 service_read() {
   local namespace="$1" service="$2" target_port="$3" path="$4" port
+  local request_headers=()
+  if [[ -n "${5:-}" ]]; then
+    [[ -s "$5" ]] || return 1
+    request_headers=(--header "@$5")
+  fi
   port="$(python3 - <<'PORT'
 import socket
 with socket.socket() as sock:
@@ -261,12 +267,33 @@ PORT
   local pid=$! result start
   PORT_FORWARD_PIDS+=("${pid}")
   start=$(date +%s)
-  until result="$(curl -fsS --connect-timeout 1 --max-time 3 "http://127.0.0.1:${port}${path}" 2>/dev/null)"; do
+  until result="$(curl -fsS --connect-timeout 1 --max-time 3 "${request_headers[@]}" "http://127.0.0.1:${port}${path}" 2>/dev/null)"; do
     if (( $(date +%s) - start > 20 )); then kill "${pid}" 2>/dev/null || true; return 1; fi
     sleep 1
   done
   kill "${pid}" 2>/dev/null || true
   printf '%s\n' "${result}"
+}
+create_history_api_identity() {
+  jq -n '{apiVersion:"v1",kind:"List",items:[
+    {apiVersion:"v1",kind:"ServiceAccount",metadata:{name:"native-history-client",namespace:"orka-system"}},
+    {apiVersion:"rbac.authorization.k8s.io/v1",kind:"Role",metadata:{name:"native-history-client",namespace:"orka-system"},
+      rules:[{apiGroups:["core.orka.ai"],resources:["sessions"],resourceNames:["native-session"],verbs:["get"]}]},
+    {apiVersion:"rbac.authorization.k8s.io/v1",kind:"RoleBinding",metadata:{name:"native-history-client",namespace:"orka-system"},
+      roleRef:{apiGroup:"rbac.authorization.k8s.io",kind:"Role",name:"native-history-client"},
+      subjects:[{kind:"ServiceAccount",name:"native-history-client",namespace:"orka-system"}]}
+  ]}' | kubectl -n orka-system apply -f - || return 1
+  (
+    umask 077
+    rm -f "${TMP_ROOT}/native-history-token" "${TMP_ROOT}/native-history-header"
+    kubectl -n orka-system create token native-history-client --duration=15m >"${TMP_ROOT}/native-history-token" || exit 1
+    [[ -s "${TMP_ROOT}/native-history-token" ]] || exit 1
+    {
+      printf 'Authorization: Bearer '
+      cat "${TMP_ROOT}/native-history-token" || exit 1
+      printf '\n'
+    } >"${TMP_ROOT}/native-history-header"
+  ) || return 1
 }
 fixture_read() { service_read vekil-system vekil 1337 "$1"; }
 fixture_key() { printf '%s' "$1" | shasum -a 256 | awk '{print substr($1, 1, 16)}'; }
@@ -301,6 +328,7 @@ wait_fixture_request() {
   done
 }
 exercise_acp_lifecycle() {
+  create_history_api_identity || return 1
   log "Running cold execution, long streaming, suspend and checkpoint export"
   submit_task native-first native-session 'ORKA_HOLD_60S Reply exactly: ORKA_NATIVE_FIRST_OK'
   wait_field task native-first '.status.phase' Running
@@ -319,7 +347,7 @@ exercise_acp_lifecycle() {
   workspace="$(workspace_for_task native-first)"
   wait_field executionworkspace "${workspace}" '.status.state' Suspended
   [[ "$(kubectl_ate get actors --atespace orka-system -o json | jq '.actors|length')" == 0 ]]
-  service_read orka-system orka-api 8080 '/api/v1/sessions/native-session?namespace=orka-system' |
+  service_read orka-system orka-api 8080 '/api/v1/sessions/native-session?namespace=orka-system' "${TMP_ROOT}/native-history-header" |
     jq -e '.messageCount > 0 and (.transcript | contains("ORKA_NATIVE_FIRST_OK"))' >/dev/null
   [[ "$(kubectl_ate get actors --atespace orka-system -o json | jq '.actors|length')" == 0 ]]
   local workspace_uid
@@ -364,6 +392,7 @@ exercise_acp_lifecycle() {
   done
   [[ "$(kubectl_ate get actors --atespace orka-system -o json | jq '.actors|length')" == 0 ]]
   [[ "$(kubectl_ate get tags --atespace orka-system -o json | jq '.tags|length')" == 0 ]]
+  kubectl -n orka-system delete serviceaccount,role,rolebinding native-history-client
 }
 exercise_direct() {
   local image="$1"

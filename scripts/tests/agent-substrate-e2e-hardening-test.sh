@@ -6,6 +6,59 @@ test_root="$(mktemp -d "${TMPDIR:-/tmp}/orka-native-substrate-test.XXXXXX")"
 trap 'rm -rf "${test_root}"' EXIT
 source "${root}/scripts/agent-substrate-e2e.sh"
 
+# Dormant history uses a named read-only identity. Its token is passed through
+# a private header file, never process arguments or unauthenticated fixture reads.
+(
+  TMP_ROOT="${test_root}/history"
+  mkdir -p "${TMP_ROOT}"
+  token_failure=""
+  kubectl() {
+    case "$*" in
+      '-n orka-system apply -f -') cat >"${TMP_ROOT}/identity.json" ;;
+      '-n orka-system create token native-history-client --duration=15m')
+        [[ -z "${token_failure}" ]] || return 7
+        printf 'fixture-history-token\n'
+        ;;
+      *'port-forward '*) ;;
+      *) return 9 ;;
+    esac
+  }
+  curl() {
+    printf '%s\n' "$@" >"${TMP_ROOT}/curl-arguments"
+    printf '{"messageCount":1,"transcript":"fixture history"}\n'
+  }
+  kill() { return 0; }
+  create_history_api_identity
+  jq -e '
+    (.items | length) == 3 and
+    all(.items[]; .metadata.namespace == "orka-system") and
+    (.items[] | select(.kind == "Role") | .rules) == [{apiGroups:["core.orka.ai"],resources:["sessions"],resourceNames:["native-session"],verbs:["get"]}] and
+    (.items[] | select(.kind == "RoleBinding") | .subjects) == [{kind:"ServiceAccount",name:"native-history-client",namespace:"orka-system"}]
+  ' "${TMP_ROOT}/identity.json" >/dev/null
+  python3 - "${TMP_ROOT}" <<'PY'
+import pathlib, stat, sys
+for name in ('native-history-token', 'native-history-header'):
+    assert stat.S_IMODE((pathlib.Path(sys.argv[1]) / name).stat().st_mode) == 0o600
+PY
+  service_read orka-system orka-api 8080 '/api/v1/sessions/native-session?namespace=orka-system' "${TMP_ROOT}/native-history-header" >/dev/null
+  grep -Fxq -- "@${TMP_ROOT}/native-history-header" "${TMP_ROOT}/curl-arguments"
+  if grep -Fq 'fixture-history-token' "${TMP_ROOT}/curl-arguments"; then
+    echo 'native history credential entered curl arguments' >&2
+    exit 1
+  fi
+  fixture_read /fixture/marker-counts >/dev/null
+  if grep -Fq -- '--header' "${TMP_ROOT}/curl-arguments"; then
+    echo 'native history credential was sent to the model fixture' >&2
+    exit 1
+  fi
+  token_failure=failed
+  if create_history_api_identity; then
+    echo 'native history read continued after token creation failed' >&2
+    exit 1
+  fi
+  [[ ! -e "${TMP_ROOT}/native-history-header" ]]
+)
+
 # Direct egress changes exactly the supported deployment argument, even when
 # containers or arguments move. Ambiguous state and failed updates stop setup.
 (
