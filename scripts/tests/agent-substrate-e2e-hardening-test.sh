@@ -172,18 +172,20 @@ if wait_job unreadable 0; then
   exit 1
 fi
 
-# ACP provisioning failures must stop the phase wait before garbage collection
-# removes the pool's diagnostic status, while an expected failure still passes.
+# Terminal Tasks must stop an incompatible wait before garbage collection
+# removes the pool's diagnostic status, while an expected settlement still passes.
 runtime_diagnostics() { printf 'runtime status captured\n' >&2; }
-job_status='{"status":{"phase":"Failed"}}'
 kubectl() { printf '%s\n' "${job_status}"; }
-wait_field task failed '.status.phase' Failed
-if wait_field task failed '.status.phase' Running 600 2>"${test_root}/error"; then
-  echo 'failed ACP task passed its running wait' >&2
-  exit 1
-fi
-grep -Fq 'Task/failed failed' "${test_root}/error"
-grep -Fq 'runtime status captured' "${test_root}/error"
+for task_phase in Failed Succeeded Cancelled; do
+  job_status="$(jq -cn --arg phase "${task_phase}" '{status:{phase:$phase}}')"
+  wait_field task settled '.status.phase' "${task_phase}"
+  if wait_field task settled '.status.phase' Running 600 2>"${test_root}/error"; then
+    echo 'terminal ACP task passed its running wait' >&2
+    exit 1
+  fi
+  grep -Fq 'Task/settled settled' "${test_root}/error"
+  grep -Fq 'runtime status captured' "${test_root}/error"
+done
 job_status='{"status":{"state":"Failed"}}'
 wait_field executionworkspace failed '.status.state' Failed
 if wait_field executionworkspace failed '.status.state' Suspended 0 2>"${test_root}/error"; then
@@ -224,15 +226,48 @@ if wait_fixture_request missing ORKA_NATIVE_FIRST_OK 0 2>"${test_root}/error"; t
   exit 1
 fi
 grep -Fq 'never reached the provider fixture' "${test_root}/error"
-job_status='{"status":{"phase":"Failed"}}'
-if wait_fixture_request failed ORKA_NATIVE_FIRST_OK 600 2>"${test_root}/error"; then
-  echo 'failed inference passed the restart barrier' >&2
-  exit 1
-fi
-grep -Fq 'failed before reaching the provider fixture' "${test_root}/error"
+for task_phase in Failed Succeeded Cancelled; do
+  job_status="$(jq -cn --arg phase "${task_phase}" '{status:{phase:$phase}}')"
+  if wait_fixture_request settled ORKA_NATIVE_FIRST_OK 600 2>"${test_root}/error"; then
+    echo 'terminal Task without inference passed the fixture barrier' >&2
+    exit 1
+  fi
+  grep -Fq 'settled before reaching the provider fixture' "${test_root}/error"
+done
 fixture_read() { return 7; }
 if wait_fixture_request unreadable ORKA_NATIVE_FIRST_OK 0; then
   echo 'unreadable fixture passed the restart barrier' >&2
+  exit 1
+fi
+
+# A terminal Task alone cannot prove its provider request was cancelled. The
+# fixture must observe one disconnect and one request, including after cleanup.
+fixture_count=1
+fixture_disconnects=1
+fixture_read() {
+  case "$1" in
+    /fixture/marker-counts) jq -cn --arg key "${fixture_key_value}" --argjson count "${fixture_count}" '{($key):$count}' ;;
+    /fixture/marker-observations) jq -cn --arg key "${fixture_key_value}" --argjson count "${fixture_disconnects}" '{($key):{disconnects:$count}}' ;;
+    *) return 9 ;;
+  esac
+}
+wait_fixture_disconnect ORKA_NATIVE_FIRST_OK 0
+for fixture_disconnects in 0 2 '"invalid"' -1; do
+  if wait_fixture_disconnect ORKA_NATIVE_FIRST_OK 0 2>"${test_root}/error"; then
+    echo 'invalid disconnect evidence passed cancellation' >&2
+    exit 1
+  fi
+done
+fixture_disconnects=1
+for fixture_count in 0 2; do
+  if wait_fixture_disconnect ORKA_NATIVE_FIRST_OK 0; then
+    echo 'missing or replayed request passed cancellation' >&2
+    exit 1
+  fi
+done
+fixture_read() { return 7; }
+if wait_fixture_disconnect ORKA_NATIVE_FIRST_OK 0; then
+  echo 'unreadable fixture passed cancellation' >&2
   exit 1
 fi
 unset -f fixture_read

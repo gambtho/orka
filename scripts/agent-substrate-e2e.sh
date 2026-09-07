@@ -51,6 +51,7 @@ runtime_diagnostics() {
   kubectl -n orka-system --request-timeout=15s get tasks,runtimepools,executionworkspaces,executionworkspacecheckpoints -o json 2>/dev/null |
     jq '[.items[] | {kind, name: .metadata.name, phase: .status.phase, state: .status.state,
       lifecycle: .status.lifecycle, message: .status.message,
+      execution: (.status.execution | if . == null then null else {state, outcome, reason} end),
       conditions: [.status.conditions[]? | {type, status, reason, message}]}]' | redact >&2 || true
 }
 workload_logs() {
@@ -96,8 +97,8 @@ wait_field() {
   while true; do
     object="$(kubectl -n orka-system --request-timeout=15s get "${resource}" "${name}" -o json 2>/dev/null)" || return 1
     if [[ "$(jq -r "${expression}" <<<"${object}")" == "${expected}" ]]; then return 0; fi
-    if [[ "${resource}" == task ]] && jq -e '.status.phase == "Failed"' <<<"${object}" >/dev/null; then
-      printf 'Task/%s failed before %s = %s\n' "${name}" "${expression}" "${expected}" >&2
+    if [[ "${resource}" == task ]] && jq -e '.status.phase | . == "Failed" or . == "Succeeded" or . == "Cancelled"' <<<"${object}" >/dev/null; then
+      printf 'Task/%s settled before %s = %s\n' "${name}" "${expression}" "${expected}" >&2
       runtime_diagnostics
       return 1
     fi
@@ -314,14 +315,35 @@ wait_fixture_request() {
     fi
     if [[ "${count}" == 1 ]]; then return 0; fi
     object="$(kubectl -n orka-system --request-timeout=15s get task "${task_name}" -o json)" || return 1
-    if jq -e '.status.phase == "Failed"' <<<"${object}" >/dev/null; then
-      printf 'Task/%s failed before reaching the provider fixture\n' "${task_name}" >&2
+    if jq -e '.status.phase | . == "Failed" or . == "Succeeded" or . == "Cancelled"' <<<"${object}" >/dev/null; then
+      printf 'Task/%s settled before reaching the provider fixture\n' "${task_name}" >&2
       runtime_diagnostics
       return 1
     fi
     if (( $(date +%s) - start >= seconds )); then
       printf 'Task/%s never reached the provider fixture\n' "${task_name}" >&2
       runtime_diagnostics
+      return 1
+    fi
+    sleep 2
+  done
+}
+wait_fixture_disconnect() {
+  local marker="$1" seconds="${2:-60}" key count start
+  key="$(fixture_key "${marker}")"
+  start=$(date +%s)
+  while true; do
+    count="$(fixture_read /fixture/marker-observations | jq -er --arg key "${key}" '.[$key].disconnects // 0')" || return 1
+    if [[ ! "${count}" =~ ^[0-9]+$ ]] || (( count > 1 )); then
+      printf 'Invalid provider disconnect count\n' >&2
+      return 1
+    fi
+    if [[ "${count}" == 1 ]]; then
+      assert_fixture_count "${marker}" 1
+      return $?
+    fi
+    if (( $(date +%s) - start >= seconds )); then
+      printf 'Cancellation did not close the held provider stream\n' >&2
       return 1
     fi
     sleep 2
@@ -375,11 +397,20 @@ exercise_acp_lifecycle() {
   wait_absent executionworkspace "$(workspace_for_task native-fork)"
   log "Checking cancellation and timeout do not retain active compute"
   submit_task native-timeout timeout-session 'ORKA_HOLD_120S Reply exactly: ORKA_NATIVE_TIMEOUT_OK' 30s
-  wait_field task native-timeout '.status.phase' Failed
+  wait_fixture_request native-timeout ORKA_NATIVE_TIMEOUT_OK
+  wait_field task native-timeout '
+    .status.phase == "Cancelled" and .status.execution.state == "Cancelled" and
+    .status.execution.outcome == "Cancelled" and .status.execution.reason == "TaskTimeout" and
+    .status.execution.attempt == 1' true
+  wait_fixture_disconnect ORKA_NATIVE_TIMEOUT_OK
+  wait_field executionworkspace "$(workspace_for_task native-timeout)" '.status.state' Suspended
+  [[ "$(kubectl_ate get actors --atespace orka-system -o json | jq '.actors|length')" == 0 ]]
   submit_task native-cancel cancel-session 'ORKA_HOLD_120S Reply exactly: ORKA_NATIVE_CANCEL_OK'
   wait_field task native-cancel '.status.phase' Running
+  wait_fixture_request native-cancel ORKA_NATIVE_CANCEL_OK
   kubectl -n orka-system delete task native-cancel --wait=false
   wait_absent task native-cancel
+  wait_fixture_disconnect ORKA_NATIVE_CANCEL_OK
   [[ "${KUBECONFIG}" == "${TMP_ROOT}/kubeconfig" && "${KIND_CLUSTER}" == "${KIND_CLUSTER_NAME}" ]]
   kubectl -n orka-system delete executionworkspaces --all --wait=false
   kubectl -n orka-system wait --for=delete executionworkspaces --all --timeout=600s
@@ -392,6 +423,8 @@ exercise_acp_lifecycle() {
   done
   [[ "$(kubectl_ate get actors --atespace orka-system -o json | jq '.actors|length')" == 0 ]]
   [[ "$(kubectl_ate get tags --atespace orka-system -o json | jq '.tags|length')" == 0 ]]
+  assert_fixture_count ORKA_NATIVE_TIMEOUT_OK 1
+  assert_fixture_count ORKA_NATIVE_CANCEL_OK 1
   kubectl -n orka-system delete serviceaccount,role,rolebinding native-history-client
 }
 exercise_direct() {
