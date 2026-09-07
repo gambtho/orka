@@ -237,6 +237,7 @@ func newNativeRuntimeTestHarness(t *testing.T) *nativeRuntimeTestHarness {
 	h := &nativeRuntimeTestHarness{supervisor: &fakeRuntimePoolSupervisorClient{}, draining: map[string]bool{}}
 	h.r, h.pool = runtimePoolSubstrateTestReconciler(t, h.supervisor, &fakeSubstrateActorControl{})
 	h.r.SubstrateTemplates, h.r.SubstrateActorControlFactory = nil, nil
+	h.r.SubstrateConfig.DirectEgressEnabled = true
 	h.r.ControllerNamespace = "orka-system"
 	base, err := nativeSubstrateRuntimeTemplate(nativeSubstrateTestRender(t, h.r, "public-nonce"))
 	if err != nil {

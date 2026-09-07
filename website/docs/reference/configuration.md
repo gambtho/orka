@@ -982,6 +982,7 @@ below happens until you turn them on.
 | `--workspace-class-use-admission-enabled=true` | — | **Required.** The controller refuses to start without it. |
 | `--acp-workspace-dispatch-enabled` | — | Lets agent Tasks actually request a workspace. |
 | `--agent-sandbox-enabled` *or* `--substrate-enabled` | — | Picks the backend. Without one, workspace Tasks fail closed. |
+| `--substrate-direct-egress-enabled` | `ORKA_SUBSTRATE_DIRECT_EGRESS_ENABLED` | Required for native Substrate ACP admission. Acknowledges ateapi's `--egress-gateway-address=` configuration so worker NetworkPolicies see actual destinations. Defaults to `false`; suspension and cleanup still work. |
 | `--enable-fake-workspace-provider` | `ORKA_ENABLE_FAKE_WORKSPACE_PROVIDER` | Development only — see below. |
 
 The source Helm chart enables both admission gates for `harness-v2`. It does not expose
@@ -1111,7 +1112,7 @@ ADRs 0026–0030 carry the full contract.
 
 ### Agent Sandbox controller settings
 
-Workspace-provider-backed ACP RuntimeSession dispatch requires `--acp-workspace-dispatch-enabled` plus the matching provider flag (`--agent-sandbox-enabled` or `--substrate-enabled`); with either unset, `Task.spec.execution.workspace` agent Tasks fail closed. The Substrate backend also uses `--substrate-api-*`, `--substrate-router-url`, and `--substrate-actor-dns-suffix`. The agent-sandbox router, template, timeout, and cleanup settings below belong to the earlier worker-path prototype and are not used by the ACP RuntimePool backend, which renders its own sandbox templates:
+Workspace-provider-backed ACP RuntimeSession dispatch requires `--acp-workspace-dispatch-enabled` plus the matching provider flag (`--agent-sandbox-enabled` or `--substrate-enabled`); with either unset, `Task.spec.execution.workspace` agent Tasks fail closed. The Substrate backend also uses `--substrate-api-*`, `--substrate-router-url`, and `--substrate-actor-dns-suffix`. Native ACP additionally requires `--substrate-direct-egress-enabled`, available through Helm as `controller.substrate.directEgressEnabled`. See [Substrate setup](../concepts/substrate.md) for the provider configuration this acknowledges. The agent-sandbox router, template, timeout, and cleanup settings below belong to the earlier worker-path prototype and are not used by the ACP RuntimePool backend, which renders its own sandbox templates:
 
 | Flag | Environment variable | Helm value | Default |
 |------|----------------------|------------|---------|

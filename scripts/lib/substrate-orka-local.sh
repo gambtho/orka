@@ -283,6 +283,7 @@ deploy_orka() {
                   "--execution-workspace-default-provider=substrate",
                   "--agent-sandbox-enabled=false",
                   "--substrate-enabled=true",
+                  "--substrate-direct-egress-enabled=true",
                   "--substrate-api-endpoint=api.ate-system.svc:443",
                   "--substrate-api-ca-file=/run/substrate-server/trust-bundle.pem",
                   "--substrate-api-cert-file=/run/substrate-client/credential-bundle.pem",

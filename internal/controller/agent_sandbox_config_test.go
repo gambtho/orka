@@ -119,6 +119,7 @@ func TestSubstrateConfigFromEnv(t *testing.T) {
 		EnvSubstrateAPIEndpoint:               "api.ate-system.svc:443",
 		EnvSubstrateAPICAFile:                 "/var/run/orka/substrate/ca.crt",
 		EnvSubstrateAPIInsecureSkipVerify:     "true",
+		EnvSubstrateDirectEgressEnabled:       "true",
 		EnvSubstrateRouterURL:                 "http://atenet-router.ate-system.svc",
 		EnvSubstrateActorDNSSuffix:            "actors.resources.substrate.ate.dev",
 		EnvSubstrateDefaultTemplate:           "orka-codex",
@@ -145,6 +146,9 @@ func TestSubstrateConfigFromEnv(t *testing.T) {
 	}
 	if !cfg.APIInsecureSkipVerify {
 		t.Fatal("APIInsecureSkipVerify = false, want true")
+	}
+	if !cfg.DirectEgressEnabled {
+		t.Fatal("DirectEgressEnabled = false, want true")
 	}
 	if cfg.DefaultTemplate != "orka-codex" || cfg.DefaultTemplateNS != "ate-demo" {
 		t.Fatalf("unexpected substrate defaults: %#v", cfg)

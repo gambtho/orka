@@ -55,7 +55,31 @@ PY
     (cd "${SUBSTRATE_DIR}" && bash hack/create-kind-cluster.sh) || return 1
   fi
   (cd "${SUBSTRATE_DIR}" && bash hack/install-ate-kind.sh --deploy-ate-system) || return 1
+  substrate_configure_direct_egress || return 1
   substrate_require_clean_upstream "${SUBSTRATE_DIR}"
+}
+
+# The pinned provider supports direct Actor egress through an empty gateway
+# address. Use it on this dedicated cluster so worker NetworkPolicies see the
+# actual destinations. Do not patch source or relax a shared gateway's access.
+substrate_configure_direct_egress() {
+  local patch
+  patch="$(kubectl -n ate-system get deployment ate-api-server -o json | jq -ce '
+    [.spec.template.spec.containers | to_entries[] | select(.value.name == "ate-api-server")] as $containers |
+    if ($containers | length) != 1 then error("expected exactly one ate-api-server container") else
+      $containers[0] as $container |
+      [$container.value.args | to_entries[] | select(.value | startswith("--egress-gateway-address="))] as $args |
+      if ($args | length) != 1 then error("expected exactly one native egress gateway argument") else
+        [
+          {op:"test", path:"/metadata/uid", value:.metadata.uid},
+          {op:"test", path:"/metadata/resourceVersion", value:.metadata.resourceVersion},
+          {op:"replace", path:("/spec/template/spec/containers/" + ($container.key | tostring) + "/args/" + ($args[0].key | tostring)), value:"--egress-gateway-address="}
+        ]
+      end
+    end
+  ')" || return 1
+  kubectl -n ate-system patch deployment ate-api-server --type=json -p "${patch}" >/dev/null || return 1
+  kubectl -n ate-system rollout status deployment/ate-api-server --timeout=5m
 }
 
 substrate_require_clean_upstream() {

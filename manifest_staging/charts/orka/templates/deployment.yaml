@@ -351,6 +351,7 @@ spec:
             {{- if .enabled }}
             - --substrate-enabled=true
             {{- end }}
+            - --substrate-direct-egress-enabled={{ .directEgressEnabled | default false }}
             - {{ printf "--substrate-api-endpoint=%s" (.apiEndpoint | default "api.ate-system.svc:443") | quote }}
             {{- if $substrateCredentials.existingSecret }}
             {{- if $substrateCredentials.certKey }}

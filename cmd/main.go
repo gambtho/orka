@@ -560,6 +560,8 @@ func main() {
 		"Default agent sandbox workspace cleanup policy (delete, retain).")
 	flag.BoolVar(&substrateEnabled, "substrate-enabled", substrateEnabled,
 		"Enable experimental Substrate execution workspace provider for agent Tasks.")
+	flag.BoolVar(&substrateConfig.DirectEgressEnabled, "substrate-direct-egress-enabled", substrateConfig.DirectEgressEnabled,
+		"Acknowledge that Substrate ateapi uses --egress-gateway-address= so worker NetworkPolicies enforce ACP egress; required for native ACP admission, not cleanup.")
 	flag.StringVar(&substrateConfig.APIEndpoint, "substrate-api-endpoint", substrateConfig.APIEndpoint,
 		"Substrate native control API endpoint.")
 	flag.StringVar(&substrateConfig.APICAFile, "substrate-api-ca-file", substrateConfig.APICAFile,

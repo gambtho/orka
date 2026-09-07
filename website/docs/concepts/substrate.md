@@ -25,7 +25,8 @@ infrastructure template through `kubectl ate create actor-template -f`, with
 CRD. In Orka's `templateRef`, `namespace` names the native Atespace.
 
 ACP dispatch requires `--substrate-enabled` and
-`--acp-workspace-dispatch-enabled`. Class-backed suspension and checkpoint
+`--acp-workspace-dispatch-enabled`, plus the direct egress configuration below.
+Class-backed suspension and checkpoint
 restore also require `--enable-workspace-provider-api`, Task provenance and
 workspace-use admission, and the matching CRDs and webhooks.
 
@@ -50,6 +51,7 @@ Helm can mount control credentials from an existing Secret in the release namesp
 controller:
   substrate:
     enabled: true
+    directEgressEnabled: true
     apiCredentials:
       existingSecret: substrate-control
       certKey: tls.crt
@@ -96,6 +98,26 @@ without enough template provenance remain blocked rather than guessing an Atespa
 The WorkerPool must be dedicated to Orka ACP workloads. Orka needs Pod
 get/list/delete and NetworkPolicy access in its namespace. It confines worker
 egress before delivering credentials. Cross-cluster placement is unsupported.
+
+Configure the provider's ateapi with `--egress-gateway-address=` to use direct
+egress, and use a CNI that enforces Kubernetes NetworkPolicies. The provider
+sets this mode at boot, so drain and remove existing ACP Actors before changing
+it. Then acknowledge
+that configuration with Orka's `--substrate-direct-egress-enabled=true`,
+`ORKA_SUBSTRATE_DIRECT_EGRESS_ENABLED=true`, or Helm's
+`controller.substrate.directEgressEnabled: true`. Orka cannot inspect this
+server setting through the native API. The acknowledgement defaults to false
+and closes ACP admission before Actor creation or credential delivery. Disabling
+it still permits drain, suspension, and deletion with the existing credentials.
+
+The pinned provider's default transparent gateway hides Actor destinations from
+worker NetworkPolicies, and its Envoy handler does not enforce destination
+policies. That mode is unsupported for ACP confinement. Direct egress is a
+provider-wide setting, so use a dedicated provider instance if other workloads
+require the gateway. The bundled local installer changes only this supported
+deployment argument on its dedicated cluster and leaves provider source intact.
+Direct workspace and MCP admission do not require Orka's acknowledgement flag.
+
 The router's request timeout must cover the longest supported operation; the
 local suite sets `--route-timeout=30m` and uses Envoy info logging. Longer router
 shutdown survival also needs a suitable drain timeout and Pod termination grace.

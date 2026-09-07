@@ -6,6 +6,47 @@ test_root="$(mktemp -d "${TMPDIR:-/tmp}/orka-native-substrate-test.XXXXXX")"
 trap 'rm -rf "${test_root}"' EXIT
 source "${root}/scripts/agent-substrate-e2e.sh"
 
+# Direct egress changes exactly the supported deployment argument, even when
+# containers or arguments move. Ambiguous state and failed updates stop setup.
+(
+  deployment='{"metadata":{"uid":"api-uid","resourceVersion":"42"},"spec":{"template":{"spec":{"containers":[{"name":"sidecar","args":["--unrelated"]},{"name":"ate-api-server","args":["--unrelated","--egress-gateway-address=atenet-egress.ate-system.svc:443","--other"]}]}}}}'
+  egress_failure=""
+  kubectl() {
+    case "$*" in
+      '-n ate-system get deployment ate-api-server -o json')
+        [[ "${egress_failure}" != read ]] || return 7
+        printf '%s\n' "${deployment}"
+        ;;
+      '-n ate-system patch deployment ate-api-server --type=json -p '*)
+        [[ "${egress_failure}" != patch ]] || return 7
+        printf '%s\n' "${@: -1}" >"${test_root}/egress-patch.json"
+        ;;
+      '-n ate-system rollout status deployment/ate-api-server --timeout=5m')
+        [[ "${egress_failure}" != rollout ]] || return 7
+        ;;
+      *) return 9 ;;
+    esac
+  }
+  substrate_configure_direct_egress
+  jq -e '. == [
+    {op:"test",path:"/metadata/uid",value:"api-uid"},
+    {op:"test",path:"/metadata/resourceVersion",value:"42"},
+    {op:"replace",path:"/spec/template/spec/containers/1/args/1",value:"--egress-gateway-address="}
+  ]' "${test_root}/egress-patch.json" >/dev/null
+  for egress_failure in read patch rollout; do
+    if substrate_configure_direct_egress >"${test_root}/egress-error" 2>&1; then
+      echo 'Substrate setup ignored a failed direct egress configuration' >&2
+      exit 1
+    fi
+  done
+  egress_failure=""
+  deployment="$(jq '.spec.template.spec.containers[1].args += ["--egress-gateway-address=another:443"]' <<<"${deployment}")"
+  if substrate_configure_direct_egress >"${test_root}/egress-error" 2>&1; then
+    echo 'Substrate setup accepted ambiguous egress configuration' >&2
+    exit 1
+  fi
+)
+
 # The local installer must bind the same limited worker namespace access as
 # Helm, then test the installed controller identity before submitting Tasks.
 (

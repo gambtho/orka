@@ -163,6 +163,9 @@ func (r *RuntimePoolReconciler) reconcileNativeSubstrateRuntimePool(ctx context.
 	if !r.SubstrateEnabled {
 		return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, errors.New("native Substrate is disabled; runtime admission is closed"))
 	}
+	if !r.SubstrateConfig.DirectEgressEnabled {
+		return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, errors.New("native ACP requires --substrate-direct-egress-enabled=true after configuring ateapi with --egress-gateway-address=; worker NetworkPolicies cannot confine transparent gateway destinations"))
+	}
 	if pool.Spec.ExecutionWorkspace.Substrate.RestoreFrom != nil && record.OriginDigest == "" {
 		if err := r.importNativeSubstrateCheckpoint(ctx, pool, cm, record); err != nil {
 			return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, err)
@@ -416,7 +419,7 @@ func (r *RuntimePoolReconciler) reconcileNativeSubstrateRuntimePool(ctx context.
 	}
 	synthetic := substrateSyntheticInstancePod(pool, cfg, view, a.Name, route)
 	poolStatus := r.baseRuntimePoolStatus(pool, 1)
-	r.setRuntimePoolCondition(pool, &poolStatus, corev1alpha1.RuntimePoolConditionPodSecurityReady, metav1.ConditionTrue, "ProviderIsolated", "native gVisor Actor uses controller-enforced network confinement and process identity isolation")
+	r.setRuntimePoolCondition(pool, &poolStatus, corev1alpha1.RuntimePoolConditionPodSecurityReady, metav1.ConditionTrue, "ProviderIsolated", "native gVisor Actor uses worker NetworkPolicies with operator-configured direct egress and process identity isolation")
 	r.setRuntimePoolCondition(pool, &poolStatus, corev1alpha1.RuntimePoolConditionQuotaReady, metav1.ConditionTrue, "ResourcesAdmitted", "native worker admitted runtime resource limits")
 	postProbe := func(ctx context.Context, active *corev1alpha1.RuntimePoolActiveInstanceStatus) (ctrl.Result, bool, error) {
 		current, err := getNativeSubstrateActor(ctx, api.Control, record)

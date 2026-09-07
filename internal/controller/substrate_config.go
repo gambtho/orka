@@ -22,6 +22,7 @@ const (
 	EnvSubstrateAPIKeyFile                = "ORKA_SUBSTRATE_API_KEY_FILE"
 	EnvSubstrateAPIBearerTokenFile        = "ORKA_SUBSTRATE_API_BEARER_TOKEN_FILE"
 	EnvSubstrateAPIInsecureSkipVerify     = "ORKA_SUBSTRATE_API_INSECURE_SKIP_VERIFY"
+	EnvSubstrateDirectEgressEnabled       = "ORKA_SUBSTRATE_DIRECT_EGRESS_ENABLED"
 	EnvSubstrateRouterURL                 = "ORKA_SUBSTRATE_ROUTER_URL"
 	EnvSubstrateActorDNSSuffix            = "ORKA_SUBSTRATE_ACTOR_DNS_SUFFIX"
 	EnvSubstrateDefaultTemplate           = "ORKA_SUBSTRATE_DEFAULT_TEMPLATE"
@@ -59,8 +60,11 @@ type SubstrateConfig struct {
 	APIKeyFile         string
 	APIBearerTokenFile string
 	// Atespace is selected from the immutable workspace binding by the controller.
-	Atespace                  string
-	APIInsecureSkipVerify     bool
+	Atespace              string
+	APIInsecureSkipVerify bool
+	// DirectEgressEnabled acknowledges that ateapi has tunneled egress disabled.
+	// ACP requires worker-scoped NetworkPolicies to see the Actor's destinations.
+	DirectEgressEnabled       bool
 	RouterURL                 string
 	ActorDNSSuffix            string
 	DefaultTemplate           string
@@ -113,6 +117,9 @@ func SubstrateConfigFromEnv(getenv func(string) string) (SubstrateConfig, error)
 	}
 	if value := strings.TrimSpace(getenv(EnvSubstrateAPIInsecureSkipVerify)); value != "" {
 		cfg.APIInsecureSkipVerify = strings.EqualFold(value, "true")
+	}
+	if value := strings.TrimSpace(getenv(EnvSubstrateDirectEgressEnabled)); value != "" {
+		cfg.DirectEgressEnabled = strings.EqualFold(value, "true")
 	}
 	if value := strings.TrimSpace(getenv(EnvSubstrateRouterURL)); value != "" {
 		cfg.RouterURL = value

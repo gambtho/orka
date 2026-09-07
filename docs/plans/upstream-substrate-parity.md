@@ -9,6 +9,9 @@ local provider patches are outside this contract.
 
 - Native ate-api Actor, ActorTemplate, Atespace, Worker, and Tag resources.
 - Authenticated control calls with verified TLS and rotating client credentials.
+- Native ACP uses the provider's supported direct egress mode and enforced
+  worker NetworkPolicies. Admission requires an explicit operator acknowledgement;
+  disabling admission must not block suspension or cleanup.
 - Immutable compiled templates with explicit placement, readiness, capabilities,
   resource limits, durable-volume policy, and provider admission limits.
 - Direct workspaces, MCP actor pools, and workspace-backed ACP Tasks on the same
