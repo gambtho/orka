@@ -30,9 +30,20 @@ cleanup() {
     kubectl get pods -A 2>/dev/null || true
     job_diagnostics substrate-direct-conformance
     job_diagnostics native-mcp-client
+    workload_logs ate-system -l app=ate-api-server
+    workload_logs ate-demo -l ate.dev/worker-pool=orka-native
+    workload_logs orka-system -l control-plane=controller-manager
   fi
   if [[ "${KEEP_CLUSTER}" != 1 && "${CLUSTER_PREPARED:-0}" == 1 ]]; then kind delete cluster --name "${KIND_CLUSTER}"; fi
   exit "${rc}"
+}
+workload_logs() {
+  local namespace="$1" bootstrap_secret=""
+  shift
+  local ORKA_REDACT_SECRET_VARS=(bootstrap_secret)
+  if [[ -f "${TMP_ROOT}/bootstrap-token" ]]; then bootstrap_secret="$(<"${TMP_ROOT}/bootstrap-token")"; fi
+  kubectl -n "${namespace}" --request-timeout=15s logs "$@" --all-containers=true \
+    --prefix=true --tail=200 --pod-running-timeout=5s 2>&1 | redact >&2 || true
 }
 job_diagnostics() {
   local name="$1" bootstrap_secret=""
@@ -43,8 +54,7 @@ job_diagnostics() {
   kubectl -n orka-system --request-timeout=15s get pods -l "job-name=${name}" -o json 2>/dev/null |
     jq '[.items[] | {name: .metadata.name, phase: .status.phase, conditions: .status.conditions,
       containers: [.status.containerStatuses[]? | {name, state}]}]' | redact >&2 || true
-  kubectl -n orka-system --request-timeout=15s logs "job/${name}" --all-containers=true \
-    --prefix=true --tail=200 --pod-running-timeout=5s 2>&1 | redact >&2 || true
+  workload_logs orka-system "job/${name}"
 }
 wait_job() {
   local name="$1" seconds="$2" start status

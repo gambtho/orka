@@ -89,7 +89,7 @@ func (l *substrateTrackingListener) disconnect() {
 	l.connections = nil
 }
 
-func substrateTransportFixture(t *testing.T) (SubstrateConfig, *substrateTLSServer, *substrateTrackingListener, func(string)) {
+func substrateTransportFixture(t *testing.T, options ...grpc.ServerOption) (SubstrateConfig, *substrateTLSServer, *substrateTrackingListener, func(string)) {
 	t.Helper()
 	dir := t.TempDir()
 	caKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
@@ -145,7 +145,8 @@ func substrateTransportFixture(t *testing.T) (SubstrateConfig, *substrateTLSServ
 		t.Fatal(err)
 	}
 	tracking := &substrateTrackingListener{Listener: listener}
-	server := grpc.NewServer(grpc.Creds(credentials.NewTLS(&tls.Config{MinVersion: tls.VersionTLS12, Certificates: []tls.Certificate{serverPair}, ClientAuth: tls.VerifyClientCertIfGiven, ClientCAs: caPool})))
+	options = append(options, grpc.Creds(credentials.NewTLS(&tls.Config{MinVersion: tls.VersionTLS12, Certificates: []tls.Certificate{serverPair}, ClientAuth: tls.VerifyClientCertIfGiven, ClientCAs: caPool})))
+	server := grpc.NewServer(options...)
 	service := &substrateTLSServer{}
 	service.bearer.Store("initial-test-credential")
 	ateapipb.RegisterControlServer(server, service)

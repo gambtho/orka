@@ -103,10 +103,21 @@ func newSubstrateConnection(cfg SubstrateConfig, controlAuth bool) (*grpc.Client
 	return conn, nil
 }
 
-// Bound every control call, including discovery and cleanup. Callers may set
-// a shorter deadline; a stalled provider must not hold a reconcile forever.
+// Native lifecycle RPCs synchronously boot, restore, or checkpoint the Actor.
+// Give those operations a bounded window for image pulls and snapshot I/O,
+// while keeping discovery and metadata calls short. Caller deadlines and
+// cancellation still take precedence, and no failed mutation is replayed.
 func substrateRPCDeadline(ctx context.Context, method string, req, reply any, conn *grpc.ClientConn, invoke grpc.UnaryInvoker, opts ...grpc.CallOption) error {
-	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	timeout := 30 * time.Second
+	switch method {
+	case ateapipb.Control_ResumeActor_FullMethodName,
+		ateapipb.Control_SuspendActor_FullMethodName,
+		ateapipb.Control_PauseActor_FullMethodName,
+		ateapipb.Control_DeleteActor_FullMethodName,
+		ateapipb.Control_DeleteActorTemplate_FullMethodName:
+		timeout = 5 * time.Minute
+	}
+	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	return invoke(ctx, method, req, reply, conn, opts...)
 }
