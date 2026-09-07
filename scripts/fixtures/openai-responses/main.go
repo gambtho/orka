@@ -176,9 +176,10 @@ func handleMarkerObservations(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	type observation struct {
-		SawHistory     bool     `json:"sawHistory"`
-		Disconnects    uint64   `json:"disconnects"`
-		HistoryMarkers []string `json:"historyMarkers"`
+		SawHistory              bool     `json:"sawHistory"`
+		Disconnects             uint64   `json:"disconnects"`
+		HistoryMarkers          []string `json:"historyMarkers"`
+		WorkspaceCanaryVerified bool     `json:"workspaceCanaryVerified"`
 	}
 	observations := map[string]*observation{}
 	entry := func(marker string) *observation {
@@ -218,6 +219,12 @@ func handleMarkerObservations(w http.ResponseWriter, r *http.Request) {
 		counter, counterOK := value.(*atomic.Uint64)
 		if markerOK && counterOK {
 			entry(marker).Disconnects = counter.Load()
+		}
+		return true
+	})
+	workspaceCanaryResults.Range(func(key, _ any) bool {
+		if marker, ok := key.(string); ok {
+			entry(marker).WorkspaceCanaryVerified = true
 		}
 		return true
 	})
@@ -353,6 +360,9 @@ func handleResponses(w http.ResponseWriter, r *http.Request) {
 	log.Printf("responses request resolved marker_sha=%x marker_len=%d hold=%s roles=%s",
 		markerDigest[:8], len(text), hold, inputRoles(body))
 	responseID := fmt.Sprintf("resp_orka_fixture_%d", responseSequence.Add(1))
+	if handleWorkspaceCanary(w, request, body, text, responseID) {
+		return
+	}
 	itemID := "msg_" + responseID
 	item := map[string]any{
 		responseTypeField:   "message",

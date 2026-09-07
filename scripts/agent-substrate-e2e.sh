@@ -303,6 +303,14 @@ assert_fixture_count() {
   key="$(fixture_key "$1")"
   [[ "$(fixture_read /fixture/marker-counts | jq -r --arg key "${key}" '.[$key] // 0')" == "$2" ]]
 }
+assert_fixture_canary() {
+  local key
+  key="$(fixture_key "$1")"
+  # One request emits the shell call; the second must carry its verified output.
+  assert_fixture_count "$1" 2
+  fixture_read /fixture/marker-observations | jq -e --arg key "${key}" \
+    '.[$key].workspaceCanaryVerified == true' >/dev/null
+}
 wait_fixture_request() {
   local task_name="$1" marker="$2" seconds="${3:-180}" key count start object
   key="$(fixture_key "${marker}")"
@@ -372,13 +380,18 @@ exercise_acp_lifecycle() {
   service_read orka-system orka-api 8080 '/api/v1/sessions/native-session?namespace=orka-system' "${TMP_ROOT}/native-history-header" |
     jq -e '.messageCount > 0 and (.transcript | contains("ORKA_NATIVE_FIRST_OK"))' >/dev/null
   [[ "$(kubectl_ate get actors --atespace orka-system -o json | jq '.actors|length')" == 0 ]]
+  log "Writing a file through ACP before exporting the checkpoint"
+  submit_task native-write native-session 'Write the checkpoint canary file using the shell. Reply exactly: ORKA_NATIVE_FILE_WRITE_OK'
+  wait_field task native-write '.status.phase' Succeeded
+  assert_fixture_canary ORKA_NATIVE_FILE_WRITE_OK
+  wait_field executionworkspace "${workspace}" '.status.state' Suspended
   local workspace_uid
   workspace_uid="$(kubectl -n orka-system get executionworkspace "${workspace}" -o jsonpath='{.metadata.uid}')"
   jq -n --arg name "${workspace}" --arg uid "${workspace_uid}" '{apiVersion:"workspace.orka.ai/v1alpha1",kind:"ExecutionWorkspaceCheckpoint",metadata:{name:"native-save",namespace:"orka-system"},spec:{workspaceRef:{name:$name,uid:$uid}}}' | kubectl create -f -
   wait_field executionworkspacecheckpoint native-save '.status.phase' Ready
-  submit_task native-continue native-session 'Reply exactly: ORKA_NATIVE_CONTINUE_OK'
+  submit_task native-continue native-session 'Read the checkpoint canary file, then change it using the shell. Reply exactly: ORKA_NATIVE_CONTINUE_OK'
   wait_field task native-continue '.status.phase' Succeeded
-  assert_fixture_count ORKA_NATIVE_CONTINUE_OK 1
+  assert_fixture_canary ORKA_NATIVE_CONTINUE_OK
   local continued_key first_key
   continued_key="$(fixture_key ORKA_NATIVE_CONTINUE_OK)"
   first_key="$(fixture_key ORKA_NATIVE_FIRST_OK)"
@@ -391,8 +404,10 @@ exercise_acp_lifecycle() {
   digest="$(kubectl -n orka-system get executionworkspacecheckpoint native-save -o jsonpath='{.status.digest}')"
   kubectl -n orka-system delete executionworkspace "${workspace}" --wait=false
   wait_absent executionworkspace "${workspace}"
-  jq -n --arg uid "${checkpoint_uid}" --arg digest "${digest}" '{apiVersion:"core.orka.ai/v1alpha1",kind:"Task",metadata:{name:"native-fork",namespace:"orka-system"},spec:{type:"agent",agentRef:{name:"native-substrate"},timeout:"15m",execution:{workspace:{classRef:{name:"native-substrate"},onDetach:"Delete",restoreFrom:{name:"native-save",uid:$uid,digest:$digest}}},prompt:"Reply exactly: ORKA_NATIVE_FORK_OK"}}' | kubectl create -f -
+  log "Restoring the saved ACP file after changing and deleting the source workspace"
+  jq -n --arg uid "${checkpoint_uid}" --arg digest "${digest}" '{apiVersion:"core.orka.ai/v1alpha1",kind:"Task",metadata:{name:"native-fork",namespace:"orka-system"},spec:{type:"agent",agentRef:{name:"native-substrate"},timeout:"15m",execution:{workspace:{classRef:{name:"native-substrate"},onDetach:"Delete",restoreFrom:{name:"native-save",uid:$uid,digest:$digest}}},prompt:"Read the checkpoint canary file using the shell. Reply exactly: ORKA_NATIVE_FORK_OK"}}' | kubectl create -f -
   wait_field task native-fork '.status.phase' Succeeded
+  assert_fixture_canary ORKA_NATIVE_FORK_OK
   kubectl -n orka-system delete executionworkspacecheckpoint native-save
   wait_absent executionworkspace "$(workspace_for_task native-fork)"
   log "Checking cancellation and timeout do not retain active compute"
