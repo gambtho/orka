@@ -258,6 +258,8 @@ Restore requires `use` on the checkpoint and the class. Namespace, class and
 provider revisions, runtime profile/image, and durable layout must match.
 The target acquires its own durable reference before Actor creation. Deleting
 the public checkpoint cannot invalidate a restore that already acquired data.
+Deleting it before acquisition can make a queued restore fail. Task acceptance
+alone does not retain checkpoint data.
 Continuation Tasks in that restored Session must preserve the original
 `restoreFrom` binding. To branch from another checkpoint, create a new Session.
 

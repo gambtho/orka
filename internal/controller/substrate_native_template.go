@@ -16,7 +16,10 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
-const substrateNativeStartupShell = "/bin/sh"
+const (
+	substrateNativeStartupShell    = "/bin/sh"
+	substrateNativePodNamespaceEnv = "ORKA_ACP_POD_NAMESPACE"
+)
 
 // nativeSubstrateRuntimeTemplate is a pure compiler. Kubernetes-only mounts,
 // references, probes and resource fields never reach the provider's API.
@@ -83,9 +86,6 @@ func nativeSubstrateRuntimeTemplate(object *unstructured.Unstructured) (*ateapip
 }
 
 func nativeSubstrateSupervisorContainer(container corev1.Container) (*ateapipb.Container, error) {
-	if len(container.Env) > 32 {
-		return nil, fmt.Errorf("substrate supervisor has %d environment entries; upstream admits at most 32", len(container.Env))
-	}
 	if len(container.Command) == 0 || container.Command[0] == "" {
 		return nil, fmt.Errorf("substrate supervisor requires an explicit command")
 	}
@@ -113,7 +113,15 @@ func nativeSubstrateSupervisorContainer(container corev1.Container) (*ateapipb.C
 			return nil, fmt.Errorf("substrate environment entry %q exceeds the upstream size limit", env.Name)
 		}
 		seen[env.Name] = true
+		// Native Actor identity comes from the mounted SystemInfo volume.
+		// The supervisor does not consume the Kubernetes Pod namespace.
+		if env.Name == substrateNativePodNamespaceEnv {
+			continue
+		}
 		compiled.Env = append(compiled.Env, &ateapipb.EnvVar{Name: env.Name, Value: env.Value})
+	}
+	if len(compiled.Env) > 32 {
+		return nil, fmt.Errorf("substrate supervisor has %d environment entries; upstream admits at most 32", len(compiled.Env))
 	}
 	for _, name := range []corev1.ResourceName{corev1.ResourceCPU, corev1.ResourceMemory} {
 		if quantity, present := container.Resources.Limits[name]; present {

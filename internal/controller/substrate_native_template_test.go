@@ -53,6 +53,9 @@ func TestNativeSubstrateDataTemplateUsesStableWorkspaceKey(t *testing.T) {
 	r, _ := runtimePoolSubstrateTestReconciler(t, nil, &fakeSubstrateActorControl{})
 	r.SubstrateTemplates = nil
 	r.SubstrateActorControlFactory = nil
+	// Exercise the full live-conformance environment, including its optional
+	// replay fault marker, against the provider's environment-entry limit.
+	r.E2EPromptWriteAmbiguityMarker = "ORKA_E2E_PROMPT_WRITE_AMBIGUITY"
 	pool := runtimePoolSubstrateTestObject()
 	pool.Spec.ExecutionWorkspace.Substrate.SuspendMode = string(acpworkspacev1alpha1.SubstrateSuspendModeDataOnly)
 	native, err := nativeSubstrateRuntimeTemplate(nativeSubstrateTestRenderPool(t, r, pool, "nonce"))
@@ -66,6 +69,9 @@ func TestNativeSubstrateDataTemplateUsesStableWorkspaceKey(t *testing.T) {
 	if env["ORKA_ACP_DURABLE_WORKSPACE_KEY"] != "workspace" ||
 		env["ORKA_ACP_DURABLE_WORKSPACE_DIR"] != substrateDurableWorkspaceMountPath {
 		t.Fatal("native DataOnly template did not bind the checkpoint to its dedicated workspace directory")
+	}
+	if _, present := env[substrateNativePodNamespaceEnv]; present {
+		t.Fatal("unused Kubernetes Pod namespace consumed a native environment slot")
 	}
 }
 

@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	workspacev1alpha1 "github.com/orka-agents/orka/api/workspace/v1alpha1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -18,6 +19,8 @@ func TestAgentExecutionBindingPreservesCheckpointRestore(t *testing.T) {
 		t.Run(string(reuse), func(t *testing.T) {
 			ctx := context.Background()
 			fixture := suspendableSubstrateFixture(t)
+			fixture.provider.Status.SupportedFeatures = append(fixture.provider.Status.SupportedFeatures,
+				workspacev1alpha1.WorkspaceFeatureRestore)
 			task := bindingTestTask()
 			checkpoint := &corev1alpha1.WorkspaceCheckpointReference{
 				Name: "saved-workspace", UID: "checkpoint-uid", Digest: "sha256:" + strings.Repeat("b", 64),
