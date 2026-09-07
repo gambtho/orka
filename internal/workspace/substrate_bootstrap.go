@@ -33,6 +33,9 @@ func (e *SubstrateWorkspaceExecutor) seedNativeWorkspaceCredential(ctx context.C
 	if actor == nil || actor.ActorUID == "" || actor.Status != substrateStatusRunning {
 		return fmt.Errorf("native bootstrap requires an exact running Actor")
 	}
+	if (e.sessionIdentity != nil || e.sessionIdentityToken != "") && e.cacheSessionIdentityHandoff(actorID, actor, "") != token {
+		return fmt.Errorf("native workspace credential belongs to another Actor or Pod lifetime")
+	}
 	ref, err := substrateObjectRef(actorID, actor.Atespace)
 	if err != nil {
 		return err
@@ -60,6 +63,17 @@ func (e *SubstrateWorkspaceExecutor) seedNativeWorkspaceCredential(ctx context.C
 	_ = response.Body.Close()
 	if response.StatusCode != http.StatusOK || decodeErr != nil {
 		return fmt.Errorf("native workspace did not provide a sealed bootstrap challenge")
+	}
+	// The provider projects Actor identity but not Pod identity into the
+	// process. A read after the challenge binds its process key to the observed
+	// assignment; later rerouting cannot decrypt this process's envelope.
+	observed, err := e.control.GetActor(ctx, actorID)
+	if err != nil {
+		return err
+	}
+	if observed == nil || observed.ActorUID != actor.ActorUID || observed.ActorVersion != actor.ActorVersion ||
+		observed.PodUID != actor.PodUID || observed.Status != substrateStatusRunning {
+		return fmt.Errorf("native Actor lifetime changed before credential bootstrap")
 	}
 	payload, err := json.Marshal(harnessv2.WorkspaceBootstrapRequest{HandoffToken: token})
 	if err != nil {
@@ -89,7 +103,7 @@ func (e *SubstrateWorkspaceExecutor) seedNativeWorkspaceCredential(ctx context.C
 	if response.StatusCode != http.StatusNoContent {
 		return fmt.Errorf("native workspace rejected sealed bootstrap with HTTP %d", response.StatusCode)
 	}
-	observed, err := e.control.GetActor(ctx, actorID)
+	observed, err = e.control.GetActor(ctx, actorID)
 	if err != nil {
 		return err
 	}

@@ -71,8 +71,8 @@ spec:
                 type: integer
               templateRef:
                 description: |-
-                  TemplateRef is the ActorTemplate used for pool members. Its namespace
-                  selects the native Atespace and is immutable so cleanup retains ownership.
+                  TemplateRef is the immutable ActorTemplate reference used for pool members.
+                  Its namespace selects the native Atespace. Create another pool to change it.
                 properties:
                   name:
                     description: Name is the name of the workspace template.
@@ -100,11 +100,9 @@ spec:
             - templateRef
             type: object
             x-kubernetes-validations:
-            - message: templateRef.namespace is immutable; create another pool to
-                change Atespace
-              rule: has(self.templateRef.__namespace__) == has(oldSelf.templateRef.__namespace__)
-                && (!has(self.templateRef.__namespace__) || self.templateRef.__namespace__
-                == oldSelf.templateRef.__namespace__)
+            - message: templateRef is immutable; create another pool to change the
+                template or Atespace
+              rule: self.templateRef == oldSelf.templateRef
           status:
             description: SubstrateActorPoolStatus reports safe pool telemetry.
             properties:

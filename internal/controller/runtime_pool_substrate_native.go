@@ -403,7 +403,7 @@ func (r *RuntimePoolReconciler) reconcileNativeSubstrateRuntimePool(ctx context.
 	view := nativeSubstrateRuntimeActorView(actor)
 	route := substrateActorRouteHost(workspace.SubstrateActorKey(record.Atespace, a.Name), r.SubstrateConfig.ActorDNSSuffix)
 	if !a.Seeded {
-		complete, err := r.seedNativeSubstrateRuntime(ctx, cm, record, actor, route, auth, provider)
+		complete, err := r.seedNativeSubstrateRuntime(ctx, api.Control, pool, cm, record, actor, route, auth, provider)
 		if err != nil {
 			if errors.Is(err, errSubstrateCredentialFenceConflict) || errors.Is(err, errSubstrateCredentialConflict) {
 				return r.failNativeSubstrateRuntime(ctx, pool, cfg, cm, record, "native bootstrap process changed or rejected its credential binding")
@@ -515,7 +515,11 @@ func nativeSubstrateRuntimeActorView(actor *ateapipb.Actor) *workspace.Substrate
 	}
 }
 
-func (r *RuntimePoolReconciler) seedNativeSubstrateRuntime(ctx context.Context, cm *corev1.ConfigMap, record *substrateNativeState, actor *ateapipb.Actor, route string, auth, provider *corev1.Secret) (bool, error) {
+func (r *RuntimePoolReconciler) seedNativeSubstrateRuntime(
+	ctx context.Context, api ateapipb.ControlClient, pool *corev1alpha1.RuntimePool,
+	cm *corev1.ConfigMap, record *substrateNativeState, actor *ateapipb.Actor,
+	route string, auth, provider *corev1.Secret,
+) (bool, error) {
 	request := harnessv2.CredentialBootstrapRequest{ControllerToken: string(auth.Data[runtimePoolControllerTokenKey]), CapabilitySecret: string(auth.Data[runtimePoolCapabilitySecretKey]), ProviderToken: string(provider.Data[runtimePoolProviderTokenKey])}
 	if err := request.Validate(); err != nil {
 		return false, err
@@ -540,6 +544,28 @@ func (r *RuntimePoolReconciler) seedNativeSubstrateRuntime(ctx context.Context, 
 	defer cancel()
 	identity := harnessv2.SubstrateActorIdentity{Atespace: record.Atespace, Name: record.Attempt.Name, UID: actor.GetMetadata().GetUid()}
 	return seedSealedSubstrateCredentials(ctx, transport, "http://"+route+harnessv2.CredentialBootstrapPath, nonce, seed, body, identity, func(challenge harnessv2.SealedBootstrapChallenge) error {
+		// SystemInfo exposes Actor identity, not worker identity. Recheck the
+		// authoritative placement AFTER receiving the process key and BEFORE
+		// committing it or sending credentials. Version equality rejects an
+		// assignment ABA; worker and Pod reads retain the exact placement fence.
+		// A subsequent reroute cannot decrypt this process's sealed payload.
+		observed, err := getNativeSubstrateActor(ctx, api, record)
+		if err != nil {
+			return err
+		}
+		if observed == nil || observed.GetMetadata().GetVersion() != actor.GetMetadata().GetVersion() ||
+			observed.GetStatus().GetState() != ateapipb.ActorState_ACTOR_STATE_RUNNING ||
+			observed.GetStatus().GetCurrentActorTemplateUid() != record.Attempt.Template.UID ||
+			!proto.Equal(observed.GetStatus().GetWorkerAssignment(), actor.GetStatus().GetWorkerAssignment()) {
+			return errSubstrateCredentialFenceConflict
+		}
+		worker, err := r.nativeSubstrateWorker(ctx, api, pool, observed)
+		if err != nil {
+			return err
+		}
+		if record.Attempt.Worker == nil || *record.Attempt.Worker != *worker {
+			return errSubstrateCredentialFenceConflict
+		}
 		data, err := json.Marshal(challenge)
 		if err != nil {
 			return err

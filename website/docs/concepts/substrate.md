@@ -206,9 +206,9 @@ Actor scale-to-zero does not imply WorkerPool Pod scale-to-zero. Upstream
 currently provides one Actor slot per worker. Worker capacity and autoscaling
 remain operator responsibilities.
 
-`SubstrateActorPool.spec.templateRef.namespace` is immutable because it selects
-the Atespace where pool members live. Create another pool to move Atespaces;
-the original pool retains responsibility for cleaning up its Actors.
+`SubstrateActorPool.spec.templateRef` is immutable. Existing deterministic pool
+members keep their template and Atespace, so create another pool to change either.
+The original pool retains responsibility for cleaning up its Actors.
 
 ## Checkpoints, forks, and recovery
 

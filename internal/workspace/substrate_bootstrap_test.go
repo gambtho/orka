@@ -1,7 +1,10 @@
 package workspace
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -12,6 +15,116 @@ import (
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 	"github.com/stretchr/testify/require"
 )
+
+type substrateBootstrapRoundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f substrateBootstrapRoundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) {
+	return f(r)
+}
+
+type substrateBootstrapRecoveryControl struct {
+	*recordingSubstrateControlClient
+	actor       substrateActor
+	unavailable bool
+}
+
+func (c *substrateBootstrapRecoveryControl) GetActor(context.Context, string) (*substrateActor, error) {
+	if c.unavailable {
+		c.unavailable = false
+		return nil, errors.New("Actor observation temporarily unavailable")
+	}
+	actor := c.actor
+	return &actor, nil
+}
+
+func TestNativeSubstrateWorkspaceBootstrapRetriesMintedCredential(t *testing.T) {
+	for _, failure := range []string{"lost response", "failed observation", "replaced Actor", "replaced Pod", "changed during challenge"} {
+		t.Run(failure, func(t *testing.T) {
+			const secret = "fixture-signing-secret"
+			key, err := harnessv2.WorkspaceBootstrapPublicKey(secret)
+			require.NoError(t, err)
+			identity := harnessv2.SubstrateActorIdentity{Atespace: "ate-demo", Name: "direct", UID: "first-actor-uid"}
+			receiver, err := harnessv2.NewCredentialBootstrapReceiver(harnessv2.WorkspaceBootstrapNonce(key), identity)
+			require.NoError(t, err)
+			control := &substrateBootstrapRecoveryControl{actor: substrateActor{
+				Atespace: identity.Atespace, ActorID: identity.Name, ActorUID: identity.UID,
+				PodUID: "first-pod-uid", Status: substrateStatusRunning,
+			}}
+			mint := &recordingSubstrateSessionIdentityClient{jwt: "first-minted-credential"}
+			installed, puts := "", 0
+			transport := substrateBootstrapRoundTripFunc(func(request *http.Request) (*http.Response, error) {
+				var body []byte
+				statusCode := http.StatusOK
+				if request.Method == http.MethodGet {
+					if failure == "changed during challenge" {
+						control.actor.PodUID = "replacement-pod-uid"
+					}
+					body, err = json.Marshal(receiver.Challenge)
+					require.NoError(t, err)
+				} else {
+					puts++
+					var envelope harnessv2.SealedCredentialBootstrap
+					require.NoError(t, json.NewDecoder(request.Body).Decode(&envelope))
+					plain, err := receiver.Open(envelope)
+					require.NoError(t, err)
+					var payload harnessv2.WorkspaceBootstrapRequest
+					require.NoError(t, json.Unmarshal(plain, &payload))
+					statusCode = http.StatusNoContent
+					if installed != "" && installed != payload.HandoffToken {
+						statusCode = http.StatusConflict
+					} else {
+						installed = payload.HandoffToken
+					}
+					if puts == 1 {
+						mint.jwt = "second-minted-credential"
+						if failure == "failed observation" {
+							control.unavailable = true
+						} else {
+							return nil, errors.New("bootstrap response was lost")
+						}
+					}
+				}
+				return &http.Response{StatusCode: statusCode, Body: io.NopCloser(bytes.NewReader(body)), Header: make(http.Header)}, nil
+			})
+			executor, err := NewSubstrateExecutor(SubstrateConfig{
+				RouterURL: "http://router.test", ActorDNSSuffix: "actors.test", BootstrapToken: secret,
+				SealedBootstrap: true, ControlClient: control, HTTPClient: &http.Client{Transport: transport},
+				SessionIdentityRequired: true, SessionIdentityToken: "fixture-session-identity", SessionIdentityClient: mint,
+			})
+			require.NoError(t, err)
+			request := UploadRequest{Ref: WorkspaceRef{ID: "direct.ate-demo"}, BootstrapHandoff: true,
+				Artifacts: []UploadArtifact{{Path: substrateHandoffTokenUploadPath, Data: []byte("fixture-handoff")}}}
+			_, err = executor.Upload(t.Context(), request)
+			require.Error(t, err)
+			if failure == "changed during challenge" {
+				require.Zero(t, puts, "changed placement must fail before sending bootstrap credentials")
+				return
+			}
+			require.Equal(t, "first-minted-credential", installed)
+			if failure == "replaced Actor" || failure == "replaced Pod" {
+				control.actor.PodUID = "second-pod-uid"
+				if failure == "replaced Actor" {
+					control.actor.ActorUID = "second-actor-uid"
+				}
+				identity.UID = control.actor.ActorUID
+				receiver, err = harnessv2.NewCredentialBootstrapReceiver(harnessv2.WorkspaceBootstrapNonce(key), identity)
+				require.NoError(t, err)
+				installed = ""
+			}
+			_, err = executor.Upload(t.Context(), request)
+			require.NoError(t, err, "retry must confirm the same installed credential")
+			_, err = executor.Upload(t.Context(), request)
+			require.NoError(t, err, "confirmed bootstrap remains idempotent")
+			if failure == "replaced Actor" || failure == "replaced Pod" {
+				require.Equal(t, 2, mint.calls)
+				require.Equal(t, "second-minted-credential", installed)
+			} else {
+				require.Equal(t, 1, mint.calls)
+				require.Equal(t, "first-minted-credential", installed)
+			}
+		})
+	}
+}
 
 func TestNativeSubstrateWorkspaceSealedBootstrap(t *testing.T) {
 	for _, mismatch := range []bool{false, true} {
@@ -51,7 +164,7 @@ func TestNativeSubstrateWorkspaceSealedBootstrap(t *testing.T) {
 			}))
 			defer router.Close()
 			executor, err := NewSubstrateExecutor(SubstrateConfig{RouterURL: router.URL, ActorDNSSuffix: "actors.test", BootstrapToken: secret, SealedBootstrap: true,
-				ControlClient: &recordingSubstrateControlClient{getStatuses: []string{substrateStatusRunning, substrateStatusRunning}}})
+				ControlClient: &recordingSubstrateControlClient{getStatuses: []string{substrateStatusRunning, substrateStatusRunning, substrateStatusRunning}}})
 			require.NoError(t, err)
 			_, err = executor.Upload(t.Context(), UploadRequest{Ref: WorkspaceRef{ID: "direct.ate-demo"}, BootstrapHandoff: true, Timeout: time.Second,
 				Artifacts: []UploadArtifact{{Path: substrateHandoffTokenUploadPath, Data: []byte("fixture-handoff")}}})

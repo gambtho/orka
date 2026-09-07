@@ -14,7 +14,7 @@ import (
 	"sigs.k8s.io/yaml"
 )
 
-func TestSubstrateActorPoolAtespaceAdmission(t *testing.T) {
+func TestSubstrateActorPoolTemplateAdmission(t *testing.T) {
 	raw, err := os.ReadFile(filepath.Join("..", "..", "config", "crd", "bases", "core.orka.ai_substrateactorpools.yaml"))
 	if err != nil {
 		t.Fatal(err)
@@ -61,6 +61,7 @@ func TestSubstrateActorPoolAtespaceAdmission(t *testing.T) {
 	}
 	for _, test := range []struct {
 		name, before, after string
+		afterTemplate       string
 		create, wantError   bool
 	}{
 		{name: "create", after: "team-a", create: true},
@@ -69,13 +70,18 @@ func TestSubstrateActorPoolAtespaceAdmission(t *testing.T) {
 		{name: "move Atespace", before: "team-a", after: "team-b", wantError: true},
 		{name: "remove explicit Atespace", before: "team-a", wantError: true},
 		{name: "replace implicit Atespace", after: "team-b", wantError: true},
+		{name: "change template in same Atespace", before: "team-a", after: "team-a", afterTemplate: "another-template", wantError: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			var oldSpec any = makeSpec(test.before, 1)
 			if test.create {
 				oldSpec = nil
 			}
-			errs, _ := validator.Validate(t.Context(), nil, structural, makeSpec(test.after, 2), oldSpec,
+			newSpec := makeSpec(test.after, 2)
+			if test.afterTemplate != "" {
+				newSpec["templateRef"].(map[string]any)["name"] = test.afterTemplate
+			}
+			errs, _ := validator.Validate(t.Context(), nil, structural, newSpec, oldSpec,
 				celconfig.RuntimeCELCostBudget)
 			if (len(errs) != 0) != test.wantError {
 				t.Fatalf("Atespace admission errors = %v, want rejection %t", errs, test.wantError)

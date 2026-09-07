@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/orka-agents/orka/internal/workspace/daemonprotocol"
@@ -166,7 +167,17 @@ type SubstrateWorkspaceExecutor struct {
 	sessionIdentityAppID    string
 	sessionIdentityUserID   string
 	sessionIdentityRequired bool
-	now                     func() time.Time
+	// Native bootstrap retries must use the JWT already delivered to this
+	// Actor/Pod lifetime. Keep it in memory before a possibly ambiguous PUT.
+	sessionIdentityHandoffMu sync.Mutex
+	sessionIdentityHandoffs  map[string]substrateSessionIdentityHandoff
+	now                      func() time.Time
+}
+
+type substrateSessionIdentityHandoff struct {
+	actorUID string
+	podUID   string
+	token    string
 }
 
 var _ WorkspaceExecutor = (*SubstrateWorkspaceExecutor)(nil)
@@ -343,6 +354,7 @@ func validateSubstrateActorTemplateForOp(op string, actor *substrateActor, templ
 
 // Close releases network resources owned by this executor.
 func (e *SubstrateWorkspaceExecutor) Close() error {
+	e.forgetSessionIdentityHandoff("")
 	var closeErr error
 	if closer, ok := e.control.(interface{ Close() error }); ok {
 		closeErr = errors.Join(closeErr, closer.Close())
@@ -633,6 +645,11 @@ func (e *SubstrateWorkspaceExecutor) mintSessionIdentityHandoffToken(ctx context
 	if actor == nil || strings.TrimSpace(actor.ActorUID) == "" {
 		return "", NewError("mint actor identity", ErrorKindFailedPrecondition, "Substrate Actor identity is unavailable", false, nil)
 	}
+	if e.sealedBootstrap {
+		if prior := e.cacheSessionIdentityHandoff(actorID, actor, ""); prior != "" {
+			return prior, nil
+		}
+	}
 	actorRef, err := substrateObjectRef(actorID, ref.Namespace)
 	if err != nil {
 		return "", err
@@ -651,7 +668,35 @@ func (e *SubstrateWorkspaceExecutor) mintSessionIdentityHandoffToken(ctx context
 	if token == "" {
 		return "", NewError("mint session identity", ErrorKindFailedPrecondition, "Substrate SessionIdentity returned an empty JWT", false, nil)
 	}
+	if e.sealedBootstrap {
+		token = e.cacheSessionIdentityHandoff(actorID, actor, token)
+	}
 	return token, nil
+}
+
+func (e *SubstrateWorkspaceExecutor) cacheSessionIdentityHandoff(actorID string, actor *substrateActor, minted string) string {
+	e.sessionIdentityHandoffMu.Lock()
+	defer e.sessionIdentityHandoffMu.Unlock()
+	if prior, ok := e.sessionIdentityHandoffs[actorID]; ok && prior.actorUID == actor.ActorUID && prior.podUID == actor.PodUID {
+		return prior.token
+	}
+	if minted != "" {
+		if e.sessionIdentityHandoffs == nil {
+			e.sessionIdentityHandoffs = make(map[string]substrateSessionIdentityHandoff)
+		}
+		e.sessionIdentityHandoffs[actorID] = substrateSessionIdentityHandoff{actorUID: actor.ActorUID, podUID: actor.PodUID, token: minted}
+	}
+	return minted
+}
+
+func (e *SubstrateWorkspaceExecutor) forgetSessionIdentityHandoff(actorID string) {
+	e.sessionIdentityHandoffMu.Lock()
+	defer e.sessionIdentityHandoffMu.Unlock()
+	if actorID == "" {
+		clear(e.sessionIdentityHandoffs)
+	} else {
+		delete(e.sessionIdentityHandoffs, actorID)
+	}
 }
 
 func replaceSubstrateHandoffUploadToken(files []daemonprotocol.UploadFile, token string) {
@@ -745,6 +790,7 @@ func (e *SubstrateWorkspaceExecutor) Release(ctx context.Context, req ReleaseReq
 		}
 		return nil, err
 	}
+	e.forgetSessionIdentityHandoff(actorID)
 	if req.Retain {
 		return &ReleaseResult{Ref: substrateRef(req.Ref.Namespace, actor), Retained: true, Phase: PhaseRetained, Message: releaseMessage(req.Reason, "workspace retained")}, nil
 	}
@@ -762,6 +808,7 @@ func (e *SubstrateWorkspaceExecutor) Delete(ctx context.Context, req DeleteReque
 	actor, err := e.control.GetActor(ctx, actorID)
 	if err != nil {
 		if IsKind(err, ErrorKindNotFound) {
+			e.forgetSessionIdentityHandoff(actorID)
 			return &DeleteResult{Ref: req.Ref, Deleted: false, Phase: PhaseDeleted, Message: "workspace already deleted"}, nil
 		}
 		return nil, err
@@ -786,6 +833,7 @@ func (e *SubstrateWorkspaceExecutor) Delete(ctx context.Context, req DeleteReque
 		}
 		return nil, err
 	}
+	e.forgetSessionIdentityHandoff(actorID)
 	return &DeleteResult{Ref: substrateRef(req.Ref.Namespace, actor), Deleted: true, Phase: PhaseDeleted, Message: releaseMessage(req.Reason, "workspace deleted")}, nil
 }
 
