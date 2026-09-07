@@ -108,7 +108,7 @@ native_template_manifest() {
   jq -n --arg name "${name}" --arg image "${image}" --arg publicKey "${public_key}" '
     {metadata:{atespace:"orka-system",name:$name},workerSelector:{matchLabels:{"orka.ai/native-pool":"conformance"}},
      containers:[{name:"server",image:$image,env:([{name:"ORKA_WORKSPACE_AGENT_LISTEN_ADDR",value:":80"}] + (if $name == "orka-direct" then [{name:"ORKA_WORKSPACE_BOOTSTRAP_PUBLIC_KEY",value:$publicKey}] else [] end)),
-       readyz:{httpGet:{path:"/healthz",port:80}},
+       readyz:{httpGet:{path:(if $name == "orka-direct" then "/v1/health" else "/healthz" end),port:80}},
        securityContext:{capabilities:{drop:["ALL"],add:["NET_BIND_SERVICE","SETUID","SETGID","CHOWN","KILL"]}},
        volumeMounts:(if $name == "orka-direct" then [{name:"identity",mountPath:"/run/orka-substrate-identity"},{name:"workspace",mountPath:"/workspace"}] else [] end)}],
      volumes:(if $name == "orka-direct" then [{name:"workspace",durableDir:{}},{name:"identity",systemInfo:{dataSources:[{actorMetadata:{items:[{field:"ACTOR_METADATA_FIELD_ATESPACE",path:"atespace"},{field:"ACTOR_METADATA_FIELD_NAME",path:"name"},{field:"ACTOR_METADATA_FIELD_UID",path:"uid"}]}}]}}] else [] end),
