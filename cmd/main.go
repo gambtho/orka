@@ -548,14 +548,20 @@ func main() {
 	flag.BoolVar(&substrateEnabled, "substrate-enabled", substrateEnabled,
 		"Enable experimental Substrate execution workspace provider for agent Tasks.")
 	flag.StringVar(&substrateConfig.APIEndpoint, "substrate-api-endpoint", substrateConfig.APIEndpoint,
-		"Substrate control API endpoint used by worker Jobs.")
+		"Substrate native control API endpoint.")
 	flag.StringVar(&substrateConfig.APICAFile, "substrate-api-ca-file", substrateConfig.APICAFile,
 		"CA bundle file for the Substrate control API.")
+	flag.StringVar(&substrateConfig.APICertFile, "substrate-api-cert-file", substrateConfig.APICertFile,
+		"Rotating client certificate file for authenticated Substrate control calls.")
+	flag.StringVar(&substrateConfig.APIKeyFile, "substrate-api-key-file", substrateConfig.APIKeyFile,
+		"Rotating client private-key file for authenticated Substrate control calls.")
+	flag.StringVar(&substrateConfig.APIBearerTokenFile, "substrate-api-bearer-token-file", substrateConfig.APIBearerTokenFile,
+		"Rotating bearer token file for Substrate control calls (alternative to client TLS).")
 	flag.BoolVar(&substrateConfig.APIInsecureSkipVerify, "substrate-api-insecure-skip-verify",
 		substrateConfig.APIInsecureSkipVerify,
 		"Skip Substrate control API certificate verification. Only for local smoke tests.")
 	flag.StringVar(&substrateConfig.RouterURL, "substrate-router-url", substrateConfig.RouterURL,
-		"Substrate router base URL used by worker Jobs for actor daemon calls.")
+		"Substrate router base URL for Actor traffic.")
 	flag.StringVar(&substrateConfig.ActorDNSSuffix, "substrate-actor-dns-suffix", substrateConfig.ActorDNSSuffix,
 		"DNS suffix used to route HTTP requests to active Substrate actors.")
 	flag.StringVar(&substrateConfig.DefaultTemplate, "substrate-default-template", substrateConfig.DefaultTemplate,
@@ -1433,6 +1439,12 @@ func main() {
 		}
 		if err := runtimePoolReconciler.SetupWithManager(mgr); err != nil {
 			setupLog.Error(err, "unable to create controller", "controller", "RuntimePool")
+			os.Exit(1)
+		}
+		// Keep reference and template cleanup running when new workspace
+		// admission is disabled, just like RuntimePool finalization.
+		if err := (&controller.SubstrateCheckpointReconciler{RuntimePools: runtimePoolReconciler}).SetupWithManager(mgr); err != nil {
+			setupLog.Error(err, "unable to create controller", "controller", "SubstrateCheckpoint")
 			os.Exit(1)
 		}
 	}

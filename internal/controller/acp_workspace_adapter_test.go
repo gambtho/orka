@@ -9,6 +9,7 @@ package controller
 import (
 	"context"
 	"errors"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -175,7 +176,7 @@ func TestACPWorkspaceProviderAdapterAdvertisesSuspend(t *testing.T) {
 	}
 }
 
-func TestACPWorkspaceProviderAdapterDoesNotAdvertiseSubstrateSuspend(t *testing.T) {
+func TestACPWorkspaceProviderAdapterAdvertisesNativeSubstrateDataRecovery(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	provider := acpAdapterProvider()
@@ -194,9 +195,13 @@ func TestACPWorkspaceProviderAdapterDoesNotAdvertiseSubstrateSuspend(t *testing.
 	if err := c.Get(ctx, types.NamespacedName{Name: provider.Name}, current); err != nil {
 		t.Fatalf("get provider: %v", err)
 	}
-	for _, feature := range current.Status.SupportedFeatures {
-		if feature == workspacev1alpha1.WorkspaceFeatureSuspend {
-			t.Fatal("Substrate Suspend was advertised without production checkpoint and resume fencing")
+	for _, feature := range []workspacev1alpha1.ExecutionWorkspaceFeature{
+		workspacev1alpha1.WorkspaceFeatureSuspend,
+		workspacev1alpha1.WorkspaceFeatureCheckpoint,
+		workspacev1alpha1.WorkspaceFeatureRestore,
+	} {
+		if !slices.Contains(current.Status.SupportedFeatures, feature) {
+			t.Fatalf("native Substrate DataOnly capability %q was not advertised", feature)
 		}
 	}
 }

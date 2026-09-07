@@ -119,7 +119,7 @@ func TestSubstrateClaimReattachesAfterConcurrentCreateAlreadyExists(t *testing.T
 	if !got.Reused || got.Created {
 		t.Fatalf("Claim() reused=%t created=%t, want reused existing actor", got.Reused, got.Created)
 	}
-	if got.Ref.ID != actorID || got.ReuseKey != reuseKey {
+	if got.Ref.ID != SubstrateActorKey("ate-demo", actorID) || got.ReuseKey != reuseKey {
 		t.Fatalf("Claim() ref=%#v reuseKey=%q, want %s/%s", got.Ref, got.ReuseKey, actorID, reuseKey)
 	}
 }
@@ -585,7 +585,7 @@ func TestSubstrateBootstrapHandoffUploadUsesBootstrapToken(t *testing.T) {
 	}
 
 	_, err := executor.Upload(t.Context(), UploadRequest{
-		Ref:              WorkspaceRef{ID: "actor-1"},
+		Ref:              WorkspaceRef{Namespace: "ate-demo", ID: "actor-1"},
 		BootstrapHandoff: true,
 		Artifacts: []UploadArtifact{{
 			Path: substrateHandoffTokenUploadPath,
@@ -647,6 +647,7 @@ func TestSubstrateBootstrapHandoffUploadUsesMintedSessionIdentity(t *testing.T) 
 		actorDNSSuffix:          "actors.test",
 		handoffToken:            substrateTestToken,
 		bootstrapToken:          "bootstrap-token",
+		control:                 &recordingSubstrateControlClient{},
 		sessionIdentity:         identity,
 		sessionIdentityToken:    "worker-sa-token",
 		sessionIdentityAudience: []string{substrateDefaultIdentityAudience},
@@ -655,7 +656,7 @@ func TestSubstrateBootstrapHandoffUploadUsesMintedSessionIdentity(t *testing.T) 
 	}
 
 	_, err := executor.Upload(t.Context(), UploadRequest{
-		Ref:              WorkspaceRef{ID: "actor-1"},
+		Ref:              WorkspaceRef{Namespace: "ate-demo", ID: "actor-1"},
 		BootstrapHandoff: true,
 		Artifacts: []UploadArtifact{{
 			Path: substrateHandoffTokenUploadPath,
@@ -676,9 +677,9 @@ func TestSubstrateBootstrapHandoffUploadUsesMintedSessionIdentity(t *testing.T) 
 	if identity.bearerToken != "worker-sa-token" {
 		t.Fatalf("MintJWT bearer token = %q, want worker-sa-token", identity.bearerToken)
 	}
-	if identity.req.SessionID != "actor-1" ||
-		identity.req.AppID != substrateDefaultIdentityAppID ||
-		identity.req.UserID != substrateDefaultIdentityUserID ||
+	if identity.req.ActorName != "actor-1" ||
+		identity.req.Atespace != "ate-demo" ||
+		identity.req.ActorUID != "test-actor-uid" ||
 		!slices.Equal(identity.req.Audience, []string{substrateDefaultIdentityAudience}) {
 		t.Fatalf("MintJWT request = %#v, want default Orka identity for actor-1", identity.req)
 	}
@@ -733,7 +734,7 @@ func TestSubstrateBootstrapHandoffRequiredSessionIdentityFailsClosedWithoutCrede
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			_, err := tt.executor.Upload(t.Context(), UploadRequest{
-				Ref:              WorkspaceRef{ID: "actor-1"},
+				Ref:              WorkspaceRef{Namespace: "ate-demo", ID: "actor-1"},
 				BootstrapHandoff: true,
 				Artifacts: []UploadArtifact{{
 					Path: substrateHandoffTokenUploadPath,
@@ -782,12 +783,13 @@ func TestSubstrateBootstrapHandoffConfiguredSessionIdentityFailsClosed(t *testin
 				routerURL:            server.URL,
 				actorDNSSuffix:       "actors.test",
 				bootstrapToken:       "bootstrap-token",
+				control:              &recordingSubstrateControlClient{},
 				sessionIdentity:      tt.identity,
 				sessionIdentityToken: "session-identity-bearer",
 			}
 
 			_, err := executor.Upload(t.Context(), UploadRequest{
-				Ref:              WorkspaceRef{ID: "actor-1"},
+				Ref:              WorkspaceRef{Namespace: "ate-demo", ID: "actor-1"},
 				BootstrapHandoff: true,
 				Artifacts: []UploadArtifact{{
 					Path: substrateHandoffTokenUploadPath,
@@ -928,9 +930,9 @@ func TestSubstrateWaitReadyReportsPlacementAndResumeLatency(t *testing.T) {
 		workers: []substrateWorker{{
 			WorkerNamespace: "ate-demo",
 			WorkerPool:      "codex-pool",
-			WorkerPod:       "ateom-worker-1",
+			WorkerPod:       "ateom-pod-1",
 			ActorID:         "actor-1",
-			IP:              "10.244.0.42",
+			IP:              "10.244.0.10",
 		}},
 		actors: []substrateActor{
 			{ActorID: "actor-1", Status: substrateStatusRunning},
@@ -970,8 +972,8 @@ func TestSubstrateWaitReadyReportsPlacementAndResumeLatency(t *testing.T) {
 	wantPlacement := Placement{
 		WorkerNamespace: "ate-demo",
 		WorkerPool:      "codex-pool",
-		WorkerPodName:   "ateom-worker-1",
-		PodIP:           "10.244.0.42",
+		WorkerPodName:   "ateom-pod-1",
+		PodIP:           "10.244.0.10",
 	}
 	if got.Placement != wantPlacement {
 		t.Fatalf("placement = %#v, want %#v", got.Placement, wantPlacement)
@@ -1623,6 +1625,7 @@ func (c *recordingSubstrateControlClient) GetActor(ctx context.Context, actorID 
 	}
 	return &substrateActor{
 		ActorID:           actorID,
+		ActorUID:          "test-actor-uid",
 		TemplateNamespace: templateNamespace,
 		TemplateName:      templateName,
 		Status:            status,
@@ -1648,6 +1651,7 @@ func (c *recordingSubstrateControlClient) ResumeActor(ctx context.Context, actor
 	}
 	return &substrateActor{
 		ActorID:           actorID,
+		ActorUID:          "test-actor-uid",
 		TemplateNamespace: "ate-demo",
 		TemplateName:      "orka-codex-ci",
 		Status:            substrateStatusResuming,
@@ -1668,6 +1672,7 @@ func (c *recordingSubstrateControlClient) SuspendActor(ctx context.Context, acto
 	}
 	return &substrateActor{
 		ActorID:           actorID,
+		ActorUID:          "test-actor-uid",
 		TemplateNamespace: "ate-demo",
 		TemplateName:      "orka-codex-ci",
 		Status:            status,

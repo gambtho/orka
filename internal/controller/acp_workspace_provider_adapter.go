@@ -86,15 +86,16 @@ func (r *ACPWorkspaceProviderAdapterReconciler) Reconcile(ctx context.Context, r
 		workspacev1alpha1.WorkspaceFeatureReset,
 		workspacev1alpha1.WorkspaceFeatureTLS,
 	}
-	// Agent Sandbox provides the complete controller-enforced DataOnly
-	// suspension contract. The production Substrate control protocol cannot yet
-	// atomically fence checkpoint and resume operations, so advertising Suspend
-	// there would admit classes whose Tasks are guaranteed to fail after
-	// materialization.
-	if backend == acpworkspacev1alpha1.RuntimeProviderBackendAgentSandbox {
+	// Both adapters implement DataOnly cold suspension. Substrate journals
+	// observed native lifecycle transitions and verifies immutable Tags; it
+	// does not claim provider-side fencing for Suspend/Resume.
+	if backend == acpworkspacev1alpha1.RuntimeProviderBackendAgentSandbox || backend == acpworkspacev1alpha1.RuntimeProviderBackendSubstrate {
 		provider.Status.SupportedFeatures = append(
 			provider.Status.SupportedFeatures, workspacev1alpha1.WorkspaceFeatureSuspend,
 		)
+	}
+	if backend == acpworkspacev1alpha1.RuntimeProviderBackendSubstrate {
+		provider.Status.SupportedFeatures = append(provider.Status.SupportedFeatures, workspacev1alpha1.WorkspaceFeatureCheckpoint, workspacev1alpha1.WorkspaceFeatureRestore)
 	}
 	heartbeat := metav1.NewTime(now)
 	provider.Status.LastHeartbeat = &heartbeat

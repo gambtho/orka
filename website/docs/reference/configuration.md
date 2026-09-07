@@ -1074,7 +1074,7 @@ slot-scoped.
 | `onDetach` | agent-sandbox | Substrate |
 | --- | --- | --- |
 | `Delete` | Works | Works |
-| `Suspend` | Works, when the profile sets `agentSandbox.suspend` | **Fails closed** — see below |
+| `Suspend` | Works, when the profile sets `agentSandbox.suspend` | Works with a DataOnly Substrate profile and the native provider pin |
 
 `Delete` is always executable.
 
@@ -1086,16 +1086,12 @@ Sandbox to `operatingMode: Suspended` so its Pod terminates while the PVC surviv
 Resume rotates the bootstrap material, refreshes the Sandbox blueprint, and returns the
 Sandbox to `Running` against the preserved volume.
 
-Substrate suspension is **contract-only today**. A session-reused class may declare
-`substrate.suspend.mode: DataOnly`, and the derived ActorTemplate does carry a
-controller-owned `DurableDir` volume with an explicit `onPause: Data`, `onCommit: Data`,
-`onResume.fromData: ColdBoot` policy — but the in-tree client rejects such pools before it
-creates an actor, because it cannot produce the proof the contract demands: an immutable
-Actor and ActorSnapshot UID/version with observed `Data` scope, compared atomically
-against the resume mutation. Pools suspended by an older controller without that proof
-stay quarantined; Orka never infers consent from a later observation. Full-memory restore
-is disabled outright — only repository and workspace data may survive, never process
-memory or credentials. ADR 0030 records the protocol requirement.
+Substrate DataOnly suspension uses verified native Tags, exact worker Pod
+termination, and fresh Actors for cold continuation. Its native lifecycle calls
+have no UID/version preconditions; Orka journals its own operation intents and
+requires fresh authenticated admission. Full-memory restore remains disabled.
+See [Substrate workspaces](../concepts/substrate.md) for the trusted provider
+boundary, checkpoint export, restore authorization, and explicit recovery.
 
 #### Expiry
 

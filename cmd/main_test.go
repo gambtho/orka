@@ -87,6 +87,8 @@ func TestValidateEnabledSubstrateConfigSelectsActivePathRequirements(t *testing.
 	cfg := controller.SubstrateConfig{
 		APIEndpoint:           "api.ate-system.svc:443",
 		APIInsecureSkipVerify: true,
+		APICertFile:           "/run/substrate-client/credential-bundle.pem",
+		APIKeyFile:            "/run/substrate-client/credential-bundle.pem",
 		RouterURL:             "http://atenet-router.ate-system.svc",
 		ActorDNSSuffix:        "actors.resources.substrate.ate.dev",
 	}
@@ -103,6 +105,8 @@ func TestValidateDisabledSubstrateRecoveryConfig(t *testing.T) {
 	validConfig := controller.SubstrateConfig{
 		APIEndpoint:           "api.ate-system.svc:443",
 		APIInsecureSkipVerify: true,
+		APICertFile:           "/run/substrate-client/credential-bundle.pem",
+		APIKeyFile:            "/run/substrate-client/credential-bundle.pem",
 		RouterURL:             "http://atenet-router.ate-system.svc",
 		ActorDNSSuffix:        "actors.resources.substrate.ate.dev",
 	}

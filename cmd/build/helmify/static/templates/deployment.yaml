@@ -350,6 +350,15 @@ spec:
             - --substrate-enabled=true
             {{- end }}
             - {{ printf "--substrate-api-endpoint=%s" (.apiEndpoint | default "api.ate-system.svc:443") | quote }}
+            {{- if .apiCertFile }}
+            - {{ printf "--substrate-api-cert-file=%s" .apiCertFile | quote }}
+            {{- end }}
+            {{- if .apiKeyFile }}
+            - {{ printf "--substrate-api-key-file=%s" .apiKeyFile | quote }}
+            {{- end }}
+            {{- if .apiBearerTokenFile }}
+            - {{ printf "--substrate-api-bearer-token-file=%s" .apiBearerTokenFile | quote }}
+            {{- end }}
             {{- if .apiCAFile }}
             - {{ printf "--substrate-api-ca-file=%s" .apiCAFile | quote }}
             {{- end }}

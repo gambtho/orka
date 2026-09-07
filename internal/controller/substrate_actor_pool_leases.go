@@ -98,6 +98,10 @@ func setSubstrateMCPToolLeaseHolder(lease *coordinationv1.Lease, tool *corev1alp
 	lease.Labels[labels.LabelManaged] = managedLabelValue
 	lease.Labels[labels.LabelPurpose] = purpose
 	lease.Labels[substratePoolActorLeaseActorIDLabel] = labels.SelectorValue(actorID)
+	if lease.Annotations == nil {
+		lease.Annotations = map[string]string{}
+	}
+	lease.Annotations["orka.ai/substrate-actor-ref"] = actorID
 	lease.Labels[substratePoolActorLeaseHolderUIDLabel] = labels.SelectorValue(string(tool.UID))
 	if lease.Annotations == nil {
 		lease.Annotations = map[string]string{}
@@ -137,6 +141,9 @@ func substrateMCPToolActorLeaseHeldByTool(lease *coordinationv1.Lease, tool *cor
 }
 
 func substratePoolActorLeaseActorID(lease *coordinationv1.Lease) string {
+	if lease != nil && lease.Annotations["orka.ai/substrate-actor-ref"] != "" {
+		return lease.Annotations["orka.ai/substrate-actor-ref"]
+	}
 	if lease == nil {
 		return ""
 	}
@@ -149,6 +156,9 @@ func substratePoolActorLeaseActorID(lease *coordinationv1.Lease) string {
 }
 
 func substrateMCPToolActorLeaseActorID(lease *coordinationv1.Lease) string {
+	if lease != nil && lease.Annotations["orka.ai/substrate-actor-ref"] != "" {
+		return lease.Annotations["orka.ai/substrate-actor-ref"]
+	}
 	if lease == nil {
 		return ""
 	}
@@ -161,6 +171,7 @@ func substrateMCPToolActorLeaseActorID(lease *coordinationv1.Lease) string {
 }
 
 func substratePoolActorLeaseName(actorID string) string {
+	actorID, _, _ = strings.Cut(strings.TrimSpace(actorID), ".")
 	return strings.TrimSpace(actorID)
 }
 
@@ -303,7 +314,7 @@ func (r *SubstrateActorPoolReconciler) activeSubstratePoolActorLeaseCount(
 }
 
 func substratePoolActorOrdinalFromID(actorID string, prefix string) (int, bool) {
-	actorID = strings.TrimSpace(actorID)
+	actorID, _, _ = strings.Cut(strings.TrimSpace(actorID), ".")
 	prefix = strings.Trim(strings.TrimSpace(prefix), "-")
 	suffix, ok := strings.CutPrefix(actorID, prefix+"-")
 	if !ok || len(suffix) != 5 {
@@ -320,7 +331,7 @@ func substratePoolActorOrdinalFromID(actorID string, prefix string) (int, bool) 
 }
 
 func substratePoolActorPrefixAndOrdinal(actorID string) (string, int, bool) {
-	actorID = strings.TrimSpace(actorID)
+	actorID, _, _ = strings.Cut(strings.TrimSpace(actorID), ".")
 	separator := strings.LastIndex(actorID, "-")
 	if separator <= 0 || separator == len(actorID)-1 || len(actorID)-separator-1 != 5 {
 		return "", 0, false

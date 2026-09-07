@@ -381,6 +381,7 @@ func runtimePoolWorkspaceResumeSettled(pool *corev1alpha1.RuntimePool, foreign b
 		pool.Status.AdmissionState == corev1alpha1.RuntimePoolAdmissionAccepting &&
 		pool.Status.ObservedGeneration == pool.Generation &&
 		strings.TrimSpace(pool.Annotations[sandboxSuspendedAnnotation]) == "" &&
+		strings.TrimSpace(pool.Annotations[substrateNativeCheckpointConsent]) == "" &&
 		strings.TrimSpace(pool.Annotations[substrateActorSuspendedAnnotation]) == ""
 }
 

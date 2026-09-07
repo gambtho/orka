@@ -82,7 +82,8 @@ type ToolReconciler struct {
 	OutboundAccessTrust         outboundaccess.TrustConfig
 
 	// SubstrateExecutorFactory is injectable for tests.
-	SubstrateExecutorFactory func(SubstrateConfig) (workspace.WorkspaceExecutor, error)
+	SubstrateTemplateValidator func(context.Context, *ExecutionWorkspaceRequest) error
+	SubstrateExecutorFactory   func(SubstrateConfig) (workspace.WorkspaceExecutor, error)
 }
 
 // +kubebuilder:rbac:groups=core.orka.ai,resources=tools,verbs=get;list;watch;create;update;patch;delete
@@ -306,7 +307,13 @@ func (r *ToolReconciler) validateSubstrateMCPTool(ctx context.Context, tool *cor
 			tool.Namespace,
 		)
 	}
-	if err := validateSubstrateMCPActorTemplateResource(ctx, r.Client, templateRequest); err != nil {
+	validator := r.SubstrateTemplateValidator
+	if validator == nil {
+		validator = func(ctx context.Context, request *ExecutionWorkspaceRequest) error {
+			return validateNativeSubstrateRoutableTemplate(ctx, r.SubstrateConfig, request)
+		}
+	}
+	if err := validator(ctx, templateRequest); err != nil {
 		return err
 	}
 	if _, _, _, err := r.resolveSubstrateMCPActorPool(ctx, tool, templateRequest); err != nil {
@@ -349,7 +356,7 @@ func (r *ToolReconciler) reconcileSubstrateMCPTool(ctx context.Context, tool *co
 			templateRequest.TemplateNamespace,
 			templateRequest.TemplateName,
 		)
-		actorID = deterministicSubstratePoolActorID(prefix, ordinal)
+		actorID = workspace.SubstrateActorKey(templateRequest.TemplateNamespace, deterministicSubstratePoolActorID(prefix, ordinal))
 		poolRef = &corev1alpha1.SubstrateActorPoolReference{Name: poolName, Namespace: poolNamespace}
 		if assignedActorID := assignedSubstrateMCPPoolActorID(tool, poolName, poolNamespace, prefix, int(pool.Spec.TargetActors)); assignedActorID != "" {
 			actorID = assignedActorID
@@ -400,13 +407,7 @@ func (r *ToolReconciler) reconcileSubstrateMCPTool(ctx context.Context, tool *co
 	executorFactory := r.SubstrateExecutorFactory
 	if executorFactory == nil {
 		executorFactory = func(cfg SubstrateConfig) (workspace.WorkspaceExecutor, error) {
-			return workspace.NewSubstrateExecutor(workspace.SubstrateConfig{
-				APIEndpoint:           cfg.APIEndpoint,
-				APICAFile:             cfg.APICAFile,
-				APIInsecureSkipVerify: cfg.APIInsecureSkipVerify,
-				RouterURL:             cfg.RouterURL,
-				ActorDNSSuffix:        cfg.ActorDNSSuffix,
-			})
+			return workspace.NewSubstrateExecutor(cfg.WorkspaceClientConfig())
 		}
 	}
 	executor, err := executorFactory(cfg)
@@ -612,13 +613,7 @@ func (r *ToolReconciler) finalizeSubstrateMCPTool(ctx context.Context, tool *cor
 	executorFactory := r.SubstrateExecutorFactory
 	if executorFactory == nil {
 		executorFactory = func(cfg SubstrateConfig) (workspace.WorkspaceExecutor, error) {
-			return workspace.NewSubstrateExecutor(workspace.SubstrateConfig{
-				APIEndpoint:           cfg.APIEndpoint,
-				APICAFile:             cfg.APICAFile,
-				APIInsecureSkipVerify: cfg.APIInsecureSkipVerify,
-				RouterURL:             cfg.RouterURL,
-				ActorDNSSuffix:        cfg.ActorDNSSuffix,
-			})
+			return workspace.NewSubstrateExecutor(cfg.WorkspaceClientConfig())
 		}
 	}
 	poolRefs := substrateMCPPoolActorLeaseRefs(tool)
@@ -1080,7 +1075,8 @@ func (r *ToolReconciler) reserveSubstrateMCPPoolActor(
 	}
 	for offset := range target {
 		ordinal := (startOrdinal + offset) % target
-		actorID := deterministicSubstratePoolActorID(prefix, ordinal)
+		_, atespace, _ := strings.Cut(startActorID, ".")
+		actorID := workspace.SubstrateActorKey(atespace, deterministicSubstratePoolActorID(prefix, ordinal))
 		reserved, err := r.tryReserveSubstrateMCPPoolActor(ctx, tool, leaseNamespace, actorID)
 		if err != nil {
 			return "", false, err
@@ -1662,7 +1658,7 @@ func deterministicSubstrateToolActorID(namespace, name, templateNamespace, templ
 		strings.TrimSpace(templateName),
 	}
 	sum := sha256.Sum256([]byte(strings.Join(parts, "\x00")))
-	return "orka-tool-" + hex.EncodeToString(sum[:])[:32]
+	return workspace.SubstrateActorKey(templateNamespace, "orka-tool-"+hex.EncodeToString(sum[:])[:32])
 }
 
 func (r *ToolReconciler) requestsForOutboundAccessPolicy(ctx context.Context, object client.Object) []reconcile.Request {

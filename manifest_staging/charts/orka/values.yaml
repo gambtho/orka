@@ -143,6 +143,9 @@ controller:
   substrate:
     enabled: false
     apiEndpoint: api.ate-system.svc:443
+    apiCertFile: ""
+    apiKeyFile: ""
+    apiBearerTokenFile: ""
     apiCAFile: ""
     apiInsecureSkipVerify: false
     routerUrl: http://atenet-router.ate-system.svc

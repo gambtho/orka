@@ -38,6 +38,9 @@ type ForkTaskRequest struct {
 	AgentRef    *corev1alpha1.AgentReference  `json:"agentRef,omitempty"`
 	Prompt      string                        `json:"prompt,omitempty"`
 	Workspace   *corev1alpha1.WorkspaceConfig `json:"workspace,omitempty"`
+	// ExecutionCheckpoint explicitly selects workspace data. AfterSeq selects
+	// transcript context independently and is not a filesystem checkpoint.
+	ExecutionCheckpoint *corev1alpha1.WorkspaceCheckpointReference `json:"executionCheckpoint,omitempty"`
 }
 
 type ForkTaskResponse struct {
@@ -127,6 +130,9 @@ func (h *Handlers) ForkTask(c fiber.Ctx) error {
 
 	spec := *source.Spec.DeepCopy()
 	applyForkRequestOverrides(&spec, req)
+	if err := applyForkExecutionCheckpoint(&spec, req.ExecutionCheckpoint, newName); err != nil {
+		return fiber.NewError(fiber.StatusBadRequest, err.Error())
+	}
 	if err := applyForkContextToSpec(&spec, forkCtx); err != nil {
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to encode fork context: %v", err))
 	}
@@ -201,6 +207,31 @@ func (h *Handlers) ForkTask(c fiber.Ctx) error {
 	h.appendForkTimelineEvents(c.Context(), namespace, sourceName, newName, afterSeq, sourceSessionName, forkedSessionName)
 
 	return c.Status(fiber.StatusCreated).JSON(ForkTaskResponse{Namespace: namespace, SourceTaskName: sourceName, NewTaskName: newName, AfterSeq: afterSeq, ForkContext: forkCtx})
+}
+
+func applyForkExecutionCheckpoint(spec *corev1alpha1.TaskSpec, checkpoint *corev1alpha1.WorkspaceCheckpointReference, forkName string) error {
+	if spec.Execution == nil || spec.Execution.Workspace == nil {
+		if checkpoint != nil {
+			return fmt.Errorf("executionCheckpoint requires a source Task with a Substrate workspace class")
+		}
+		return nil
+	}
+	ws := spec.Execution.Workspace
+	// A fork must never attach to the source Session's writable filesystem or
+	// silently reapply that Session's original restore point.
+	spec.SessionRef = nil
+	if ws.ReusePolicy == corev1alpha1.WorkspaceReusePolicySession {
+		// Preserve a Session-only class's reuse contract, with a new identity
+		// so subsequent turns continue the fork's data instead of its source.
+		spec.SessionRef = &corev1alpha1.SessionReference{Name: forkName, Create: true, Append: true}
+	} else if ws.ClassRef != nil {
+		ws.OnDetach = corev1alpha1.WorkspaceOnDetachDelete
+	}
+	ws.RestoreFrom = checkpoint.DeepCopy()
+	if checkpoint != nil && ws.ClassRef == nil {
+		return fmt.Errorf("executionCheckpoint requires a class-backed DataOnly workspace")
+	}
+	return nil
 }
 
 // maxForkedTaskSerializedBytes bounds the serialized forked Task well under the
@@ -403,28 +434,28 @@ func (h *Handlers) resolveForkSessionNames(
 	}
 	if gatewayOwned {
 		detachGatewayFork(forked)
+		forkedSessionName = sessionNameForTask(forked)
 	}
 	if sourceSessionName == "" || h.sessionStore == nil {
-		if gatewayOwned {
-			return sourceSessionName, "", nil
-		}
 		return sourceSessionName, forkedSessionName, nil
 	}
 
 	sessionType, err := transcriptSessionType(ctx, h.sessionStore, namespace, sourceSessionName)
 	if errors.Is(err, store.ErrNotFound) {
-		forked.Spec.SessionRef = nil
-		if gatewayOwned {
-			return sourceSessionName, "", nil
+		if forked.Spec.SessionRef != nil && forked.Spec.SessionRef.Name == sourceSessionName {
+			forked.Spec.SessionRef = nil
 		}
-		return "", "", nil
+		if gatewayOwned {
+			return sourceSessionName, sessionNameForTask(forked), nil
+		}
+		return "", sessionNameForTask(forked), nil
 	}
 	if err != nil {
 		return "", "", fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to get source session: %v", err))
 	}
 	if sessionType == store.SessionTypeGateway {
 		detachGatewayFork(forked)
-		return sourceSessionName, "", nil
+		return sourceSessionName, sessionNameForTask(forked), nil
 	}
 	return sourceSessionName, forkedSessionName, nil
 }
@@ -450,6 +481,10 @@ func detachGatewayFork(forked *corev1alpha1.Task) {
 		return
 	}
 	forked.Spec.SessionRef = nil
+	if forked.Spec.Execution != nil && forked.Spec.Execution.Workspace != nil &&
+		forked.Spec.Execution.Workspace.ReusePolicy == corev1alpha1.WorkspaceReusePolicySession {
+		forked.Spec.SessionRef = &corev1alpha1.SessionReference{Name: forked.Name, Create: true, Append: true}
+	}
 	forked.Spec.RequestedBy = nil
 	forked.Spec.Transaction = nil
 	for _, key := range []string{

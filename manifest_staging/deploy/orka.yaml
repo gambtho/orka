@@ -1082,7 +1082,7 @@ rules:
 - apiGroups:
   - ate.dev
   resources:
-  - actortemplates
+  - workerpools
   verbs:
   - get
   - list
@@ -1341,6 +1341,38 @@ rules:
 - apiGroups:
   - workspace.orka.ai
   resources:
+  - executionworkspacecheckpoints
+  - executionworkspaceproviders
+  verbs:
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - workspace.orka.ai
+  resources:
+  - executionworkspacecheckpoints/finalizers
+  - executionworkspaceclasses/finalizers
+  - executionworkspaceproviders/finalizers
+  - executionworkspaces/finalizers
+  verbs:
+  - update
+- apiGroups:
+  - workspace.orka.ai
+  resources:
+  - executionworkspacecheckpoints/status
+  - executionworkspaceclasses/status
+  - executionworkspacepools/status
+  - executionworkspaceproviders/status
+  - executionworkspaces/status
+  verbs:
+  - get
+  - patch
+  - update
+- apiGroups:
+  - workspace.orka.ai
+  resources:
   - executionworkspaceclasses
   verbs:
   - create
@@ -1354,39 +1386,10 @@ rules:
 - apiGroups:
   - workspace.orka.ai
   resources:
-  - executionworkspaceclasses/finalizers
-  - executionworkspaceproviders/finalizers
-  - executionworkspaces/finalizers
-  verbs:
-  - update
-- apiGroups:
-  - workspace.orka.ai
-  resources:
-  - executionworkspaceclasses/status
-  - executionworkspacepools/status
-  - executionworkspaceproviders/status
-  - executionworkspaces/status
-  verbs:
-  - get
-  - patch
-  - update
-- apiGroups:
-  - workspace.orka.ai
-  resources:
   - executionworkspacepools
   verbs:
   - get
   - list
-  - watch
-- apiGroups:
-  - workspace.orka.ai
-  resources:
-  - executionworkspaceproviders
-  verbs:
-  - get
-  - list
-  - patch
-  - update
   - watch
 - apiGroups:
   - workspace.orka.ai
@@ -3193,6 +3196,33 @@ spec:
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicy
 metadata:
+  name: orka-checkpoint-source-use.orka.ai
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+    - apiGroups:
+      - workspace.orka.ai
+      apiVersions:
+      - v1alpha1
+      operations:
+      - CREATE
+      resources:
+      - executionworkspacecheckpoints
+  validations:
+  - expression: |-
+      authorizer.group('workspace.orka.ai')
+
+        .resource('executionworkspaces')
+        .namespace(request.namespace)
+        .name(object.spec.workspaceRef.name)
+        .check('use').allowed()
+    message: caller is not authorized to export the selected ExecutionWorkspace
+    reason: Forbidden
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
   name: orka-executionworkspace-core-admission.orka.ai
 spec:
   failurePolicy: Fail
@@ -3371,6 +3401,15 @@ spec:
         .check('use').allowed()
     message: caller is not authorized to use the selected ExecutionWorkspaceClass
     reason: Forbidden
+  - expression: |-
+      !has(object.spec.execution) || !has(object.spec.execution.workspace) || !has(object.spec.execution.workspace.restoreFrom) || authorizer.group('workspace.orka.ai')
+
+        .resource('executionworkspacecheckpoints')
+        .namespace(request.namespace)
+        .name(object.spec.execution.workspace.restoreFrom.name)
+        .check('use').allowed()
+    message: caller is not authorized to restore the selected ExecutionWorkspaceCheckpoint
+    reason: Forbidden
 ---
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicy
@@ -3399,6 +3438,15 @@ spec:
         .check('use').allowed()
     message: caller is not authorized to use the selected ExecutionWorkspaceClass
     reason: Forbidden
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: orka-checkpoint-source-use.orka.ai
+spec:
+  policyName: orka-checkpoint-source-use.orka.ai
+  validationActions:
+  - Deny
 ---
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicyBinding

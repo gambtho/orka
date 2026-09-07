@@ -77,6 +77,7 @@ func TestSubstrateActorPoolReconcilerPrecreatesActorsAndUpdatesDensity(t *testin
 			return executor, nil
 		},
 	}
+	reconciler.SubstrateTemplateValidator = substrateFixtureTemplateValidator(reconciler.Client)
 
 	req := ctrl.Request{NamespacedName: types.NamespacedName{Name: "codex-pool", Namespace: "default"}}
 	if _, err := reconciler.Reconcile(context.Background(), req); err != nil {
@@ -142,6 +143,7 @@ func TestSubstrateActorPoolReconcilerAcceptsMCPOnlyTemplate(t *testing.T) {
 			return executor, nil
 		},
 	}
+	reconciler.SubstrateTemplateValidator = substrateFixtureTemplateValidator(reconciler.Client)
 
 	req := ctrl.Request{NamespacedName: types.NamespacedName{Name: "mcp-pool", Namespace: "default"}}
 	if _, err := reconciler.Reconcile(context.Background(), req); err != nil {
@@ -189,6 +191,7 @@ func TestSubstrateActorPoolReconcilerPrecreatesZeroTarget(t *testing.T) {
 			return executor, nil
 		},
 	}
+	reconciler.SubstrateTemplateValidator = substrateFixtureTemplateValidator(reconciler.Client)
 
 	req := ctrl.Request{NamespacedName: types.NamespacedName{Name: "codex-pool", Namespace: "default"}}
 	if _, err := reconciler.Reconcile(context.Background(), req); err != nil {
@@ -224,6 +227,7 @@ func TestSubstrateActorPoolReconcilerRejectsOversizedTargetBeforeConverge(t *tes
 			return executor, nil
 		},
 	}
+	reconciler.SubstrateTemplateValidator = substrateFixtureTemplateValidator(reconciler.Client)
 
 	req := ctrl.Request{NamespacedName: types.NamespacedName{Name: "codex-pool", Namespace: "default"}}
 	if _, err := reconciler.Reconcile(context.Background(), req); err != nil {
@@ -273,6 +277,7 @@ func TestSubstrateActorPoolReconcilerPrunesActorsWithoutPrecreate(t *testing.T) 
 			return executor, nil
 		},
 	}
+	reconciler.SubstrateTemplateValidator = substrateFixtureTemplateValidator(reconciler.Client)
 
 	req := ctrl.Request{NamespacedName: types.NamespacedName{Name: "codex-pool", Namespace: "default"}}
 	if _, err := reconciler.Reconcile(context.Background(), req); err != nil {
@@ -323,6 +328,7 @@ func TestSubstrateActorPoolReconcilerFinalizesPrecreatedActors(t *testing.T) {
 			return executor, nil
 		},
 	}
+	reconciler.SubstrateTemplateValidator = substrateFixtureTemplateValidator(reconciler.Client)
 
 	if _, err := reconciler.finalizeSubstrateActorPool(context.Background(), pool, deterministicSubstratePoolActorPrefix(pool.Namespace, pool.Name)); err != nil {
 		t.Fatalf("finalizeSubstrateActorPool() error = %v", err)
@@ -378,6 +384,7 @@ func TestSubstrateActorPoolReconcilerDefersScaleDownWithActiveLease(t *testing.T
 			return executor, nil
 		},
 	}
+	reconciler.SubstrateTemplateValidator = substrateFixtureTemplateValidator(reconciler.Client)
 
 	req := ctrl.Request{NamespacedName: types.NamespacedName{Name: "codex-pool", Namespace: "default"}}
 	if _, err := reconciler.Reconcile(context.Background(), req); err != nil {
@@ -420,6 +427,7 @@ func TestSubstrateActorPoolReconcilerFinalizerWaitsForActiveLeases(t *testing.T)
 			return executor, nil
 		},
 	}
+	reconciler.SubstrateTemplateValidator = substrateFixtureTemplateValidator(reconciler.Client)
 
 	result, err := reconciler.finalizeSubstrateActorPool(context.Background(), pool, prefix)
 	if err != nil {
@@ -463,6 +471,7 @@ func TestSubstrateActorPoolReconcilerFinalizerWaitsForActiveToolLease(t *testing
 			return executor, nil
 		},
 	}
+	reconciler.SubstrateTemplateValidator = substrateFixtureTemplateValidator(reconciler.Client)
 
 	result, err := reconciler.finalizeSubstrateActorPool(context.Background(), pool, prefix)
 	if err != nil {

@@ -274,38 +274,23 @@ The live GitHub OIDC workflow (`.github/workflows/live-github-oidc-e2e.yml`) run
 - top-level `requestedBy` and nested `spec.requestedBy` client tampering are rejected with `400`
 - the OIDC token does not appear in controller logs
 
-The Agent Substrate workflow (`.github/workflows/agent-substrate-e2e.yml`) is secret-free and runs `scripts/agent-substrate-e2e.sh` against a fresh Kind cluster. It pins the Substrate checkout with `SUBSTRATE_REF`, verifies and applies the reviewed patches in `hack/agent-substrate/`, initializes the local RustFS snapshot bucket, builds the local Orka controller and archived workspace-provider images, then validates:
-
-- the injected upstream unit tests for authorization redaction and bounded, fail-closed `runsc delete` recovery
-- direct Substrate Actor create/resume/router/daemon exec/suspend/delete
-- live proof that `atenet-router` logs an explicit redaction marker without either bootstrap or handoff bearer credentials
-- worker-Pod deletion, store removal, Deployment replacement, lost-Actor settlement, and successful direct routing on the replacement fleet
-- repeated checkpoint/delete cycles with no Actor left in `STATUS_SUSPENDING`
-- Orka `SubstrateActorPool` reconciliation and density reporting
-- MCP Actor-backed `Tool` execution through a pooled Substrate Actor
-- MCP Actor reuse across forced Tool reconciles without rebooting an already booted Actor
-- pool scale-down plus Tool, lease, bound Actor, and precreated Actor cleanup
-
-The workflow also validates a successful workspace-backed ACP Task by booting
-the real Codex supervisor in a gVisor Actor, routing a prompt through the local
-Responses-compatible fixture, waiting for `Succeeded`, checking provider-
-neutral status, and cleaning up the pool. Broader runtime coverage and
-clean-room publication remain responsibilities of the live ACP workflows.
-
-The patches are source-blob pinned and fail closed when `SUBSTRATE_REF` changes or a patch touches an undeclared path. See `hack/agent-substrate/README.md` for the patch contracts and review procedure. Run the fast static checks with:
+The Agent Substrate workflow runs the official pin in
+`hack/agent-substrate/upstream.env` without provider source patches. Every run
+includes direct sealed execution and files, MCP, ACP, controller restart,
+DataOnly suspension, cold continuation, checkpoint export and restore,
+cancellation, timeout, and cleanup. Native unit tests cover TLS and credential
+rotation, lost responses, source identity changes, reference races, and explicit
+recovery. Tests do not supply fork-only lifecycle preconditions.
 
 ```bash
-bash scripts/tests/agent-substrate-patches-test.sh
+bash scripts/tests/agent-substrate-e2e-hardening-test.sh
+KEEP_CLUSTER=1 bash scripts/agent-substrate-e2e.sh
 ```
 
-Run the full destructive Kind validation locally with:
-
-```bash
-PATH="$(go env GOPATH)/bin:$PATH" \
-SUBSTRATE_E2E_EXTENDED=1 \
-KEEP_CLUSTER=1 \
-bash scripts/agent-substrate-e2e.sh
-```
+Use a new dedicated `KIND_CLUSTER` or explicitly select
+`SUBSTRATE_REUSE_CLUSTER=1`. The installer never recreates an existing cluster.
+The provider owns its gVisor kind setup; the kubeconfig stays under the run's
+`bin/` directory. Live conformance requires a working Docker engine.
 
 ### Frontend tests
 

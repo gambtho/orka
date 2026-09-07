@@ -171,6 +171,7 @@ func TestSubstrateConfigFromEnv(t *testing.T) {
 
 func TestSubstrateConfigValidateRequiresExplicitTrust(t *testing.T) {
 	cfg := DefaultSubstrateConfig()
+	cfg.APIBearerTokenFile = "/run/substrate/control-token"
 	err := cfg.Validate()
 	if err == nil {
 		t.Fatal("expected missing API trust error")
@@ -202,6 +203,7 @@ func TestSubstrateConfigValidateRequiresExplicitTrust(t *testing.T) {
 
 func TestSubstrateConfigValidateACPRuntimePoolDoesNotRequireLegacyBootstrapSecret(t *testing.T) {
 	cfg := DefaultSubstrateConfig()
+	cfg.APIBearerTokenFile = "/run/substrate/control-token"
 	cfg.APIInsecureSkipVerify = true
 
 	if err := cfg.ValidateACPRuntimePool(); err != nil {
@@ -214,6 +216,7 @@ func TestSubstrateConfigValidateACPRuntimePoolDoesNotRequireLegacyBootstrapSecre
 
 func TestSubstrateConfigValidateACPRuntimePoolRejectsNonPositiveClaimTimeout(t *testing.T) {
 	cfg := DefaultSubstrateConfig()
+	cfg.APIBearerTokenFile = "/run/substrate/control-token"
 	cfg.APIInsecureSkipVerify = true
 	cfg.ClaimTimeout = -time.Second
 
@@ -235,6 +238,7 @@ func TestSubstrateConfigValidateACPRuntimePoolRejectsInvalidRouting(t *testing.T
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			cfg := DefaultSubstrateConfig()
+			cfg.APIBearerTokenFile = "/run/substrate/control-token"
 			cfg.APIInsecureSkipVerify = true
 			cfg.RouterURL = tt.routerURL
 			cfg.ActorDNSSuffix = tt.dnsSuffix
@@ -247,6 +251,7 @@ func TestSubstrateConfigValidateACPRuntimePoolRejectsInvalidRouting(t *testing.T
 
 func TestSubstrateConfigValidateRequiresSessionIdentitySecretWhenRequired(t *testing.T) {
 	cfg := DefaultSubstrateConfig()
+	cfg.APIBearerTokenFile = "/run/substrate/control-token"
 	cfg.APIInsecureSkipVerify = true
 	cfg.BootstrapSecretName = testSubstrateBootstrapSecretName
 	cfg.SessionIdentityRequired = true
@@ -270,6 +275,7 @@ func TestSubstrateConfigValidateRequiresSessionIdentitySecretWhenRequired(t *tes
 
 func TestSubstrateConfigValidateRejectsSessionIdentityCertificateMinting(t *testing.T) {
 	cfg := DefaultSubstrateConfig()
+	cfg.APIBearerTokenFile = "/run/substrate/control-token"
 	cfg.APIInsecureSkipVerify = true
 	cfg.BootstrapSecretName = testSubstrateBootstrapSecretName
 	cfg.SessionIdentitySecretName = testSubstrateSessionIdentitySecretName

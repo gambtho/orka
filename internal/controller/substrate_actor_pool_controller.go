@@ -45,7 +45,8 @@ type SubstrateActorPoolReconciler struct {
 	SubstrateEnabled bool
 	SubstrateConfig  SubstrateConfig
 
-	SubstrateExecutorFactory func(SubstrateConfig) (SubstratePoolExecutor, error)
+	SubstrateTemplateValidator func(context.Context, *ExecutionWorkspaceRequest) error
+	SubstrateExecutorFactory   func(SubstrateConfig) (SubstratePoolExecutor, error)
 }
 
 // +kubebuilder:rbac:groups=core.orka.ai,resources=substrateactorpools,verbs=get;list;watch;create;update;patch;delete
@@ -83,7 +84,13 @@ func (r *SubstrateActorPoolReconciler) Reconcile(ctx context.Context, req ctrl.R
 		return r.updateSubstrateActorPoolStatus(ctx, pool, corev1alpha1.SubstrateActorPoolPhaseFailed, workspace.Density{}, err.Error())
 	}
 	cfg := r.SubstrateConfig.WithDefaults()
-	if err := validateSubstrateRoutableActorTemplateResource(ctx, r.Client, &ExecutionWorkspaceRequest{
+	validator := r.SubstrateTemplateValidator
+	if validator == nil {
+		validator = func(ctx context.Context, request *ExecutionWorkspaceRequest) error {
+			return validateNativeSubstrateRoutableTemplate(ctx, cfg, request)
+		}
+	}
+	if err := validator(ctx, &ExecutionWorkspaceRequest{
 		TemplateName:                 template.Name,
 		TemplateNamespace:            template.Namespace,
 		SubstrateBootstrapSecretName: cfg.BootstrapSecretName,
@@ -111,7 +118,7 @@ func (r *SubstrateActorPoolReconciler) Reconcile(ctx context.Context, req ctrl.R
 			fmt.Sprintf("waiting for %d active actor lease(s) before scaling pool to %d actors", blocked, pool.Spec.TargetActors),
 		)
 	}
-	executor, err := r.substratePoolExecutor()
+	executor, err := r.substratePoolExecutor(pool)
 	if err != nil {
 		return r.updateSubstrateActorPoolStatus(ctx, pool, corev1alpha1.SubstrateActorPoolPhaseFailed, workspace.Density{}, err.Error())
 	}
@@ -161,7 +168,7 @@ func (r *SubstrateActorPoolReconciler) finalizeSubstrateActorPool(
 		logger.Info("waiting for active substrate pool actor leases before deleting actors", "pool", pool.Name, "activeLeases", blocked)
 		return ctrl.Result{RequeueAfter: substrateActorPoolRequeue}, nil
 	}
-	executor, err := r.substratePoolExecutor()
+	executor, err := r.substratePoolExecutor(pool)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
@@ -180,16 +187,16 @@ func (r *SubstrateActorPoolReconciler) finalizeSubstrateActorPool(
 	return ctrl.Result{}, nil
 }
 
-func (r *SubstrateActorPoolReconciler) substratePoolExecutor() (SubstratePoolExecutor, error) {
+func (r *SubstrateActorPoolReconciler) substratePoolExecutor(pool *corev1alpha1.SubstrateActorPool) (SubstratePoolExecutor, error) {
 	cfg := r.SubstrateConfig.WithDefaults()
+	cfg.Atespace = pool.Spec.TemplateRef.Namespace
+	if cfg.Atespace == "" {
+		cfg.Atespace = pool.Namespace
+	}
 	if r.SubstrateExecutorFactory != nil {
 		return r.SubstrateExecutorFactory(cfg)
 	}
-	return workspace.NewSubstrateActorPoolExecutor(workspace.SubstrateConfig{
-		APIEndpoint:           cfg.APIEndpoint,
-		APICAFile:             cfg.APICAFile,
-		APIInsecureSkipVerify: cfg.APIInsecureSkipVerify,
-	})
+	return workspace.NewSubstrateActorPoolExecutor(cfg.WorkspaceClientConfig())
 }
 
 func closeSubstratePoolExecutor(ctx context.Context, executor SubstratePoolExecutor) {

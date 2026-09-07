@@ -1407,6 +1407,7 @@ func (r *TaskReconciler) ensureACPRuntimePoolWithPolicy(
 					BaseTemplateNamespace: plan.Workspace.TemplateNamespace,
 					BaseTemplateName:      plan.Workspace.TemplateName,
 					SuspendMode:           acpSubstratePoolSuspendMode(plan.Workspace),
+					RestoreFrom:           plan.Workspace.RestoreFrom.DeepCopy(),
 				}
 			}
 			if plan.Workspace.Provider == corev1alpha1.WorkspaceProviderAgentSandbox &&
