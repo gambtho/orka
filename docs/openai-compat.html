@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="generator" content="Docusaurus v3.10.1">
 <title data-rh="true">OpenAI-compatible API | Orka</title><meta data-rh="true" name="viewport" content="width=device-width,initial-scale=1"><meta data-rh="true" name="twitter:card" content="summary_large_image"><meta data-rh="true" property="og:url" content="https://orka-agents.github.io/orka/docs/openai-compat"><meta data-rh="true" property="og:locale" content="en"><meta data-rh="true" name="docusaurus_locale" content="en"><meta data-rh="true" name="docsearch:language" content="en"><meta data-rh="true" name="docusaurus_version" content="current"><meta data-rh="true" name="docusaurus_tag" content="docs-default-current"><meta data-rh="true" name="docsearch:version" content="current"><meta data-rh="true" name="docsearch:docusaurus_tag" content="docs-default-current"><meta data-rh="true" property="og:title" content="OpenAI-compatible API | Orka"><meta data-rh="true" name="description" content="Pointing OpenAI-compatible clients at Orka&#x27;s chat completions endpoint."><meta data-rh="true" property="og:description" content="Pointing OpenAI-compatible clients at Orka&#x27;s chat completions endpoint."><link data-rh="true" rel="canonical" href="https://orka-agents.github.io/orka/docs/openai-compat"><link data-rh="true" rel="alternate" href="https://orka-agents.github.io/orka/docs/openai-compat" hreflang="en"><link data-rh="true" rel="alternate" href="https://orka-agents.github.io/orka/docs/openai-compat" hreflang="x-default"><script data-rh="true" type="application/ld+json">{"@context":"https://schema.org","@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"OpenAI-compatible API","item":"https://orka-agents.github.io/orka/docs/openai-compat"}]}</script><link rel="stylesheet" href="/orka/assets/css/styles.62ee04a5.css">
-<script src="/orka/assets/js/runtime~main.c5ec22a8.js" defer="defer"></script>
+<script src="/orka/assets/js/runtime~main.be156cd9.js" defer="defer"></script>
 <script src="/orka/assets/js/main.b04f374a.js" defer="defer"></script>
 </head>
 <body>
@@ -83,13 +83,14 @@ proxy.</p>
 <p>Orka then runs the tool loop itself and returns the final answer.</p>
 <p>The 18 injected tools:</p>
 <table><thead><tr><th>Group</th><th>Tools</th></tr></thead><tbody><tr><td>Built-in</td><td><code>web_search</code>, <code>web_fetch</code>, <code>code_exec</code>, <code>file_read</code>, <code>file_write</code></td></tr><tr><td>Create work</td><td><code>create_agent</code>, <code>create_agent_task</code>, <code>create_ai_task</code>, <code>create_container_task</code>, <code>create_pr_monitor</code></td></tr><tr><td>Track work</td><td><code>check_task_progress</code>, <code>fetch_task_output</code>, <code>wait_for_task</code>, <code>cancel_task</code>, <code>list_agents</code>, <code>list_tasks</code></td></tr><tr><td>Pull requests</td><td><code>create_pull_request</code>, <code>check_pull_request_ci</code></td></tr></tbody></table>
-<p>Custom <code>Tool</code> CRDs in the namespace that define <code>parameters</code> are also advertised to the
-model, but the compatibility loop cannot execute their HTTP requests. Calling one returns
-<code>tool &quot;...&quot; not found</code>. Use the built-ins listed above for coordinator requests.</p>
+<p>Orka advertises only the tools listed above that are registered for server-side execution.
+Custom Kubernetes <code>Tool</code> resources are not advertised or executed by either compatibility
+endpoint. A custom <code>Tool</code> with a built-in name cannot replace or duplicate its definition.</p>
 <h3 class="anchor anchorTargetStickyNavbar_Vzrq" id="turning-it-off">Turning it off<a href="#turning-it-off" class="hash-link" aria-label="Direct link to Turning it off" title="Direct link to Turning it off" translate="no">​</a></h3>
 <div class="language-text codeBlockContainer_Ckt0 theme-code-block" style="--prism-color:#393A34;--prism-background-color:#f6f8fa"><div class="codeBlockContent_QJqH"><pre tabindex="0" class="prism-code language-text codeBlock_bY9V thin-scrollbar" style="color:#393A34;background-color:#f6f8fa"><code class="codeBlockLines_e6Vv"><div class="token-line" style="color:#393A34"><span class="token plain">X-Orka-Tools: disabled</span><br></div></code></pre></div></div>
-<p>This header disables the coordinator rewrite and Orka&#x27;s tool loop. Your client manages
-its own tools and tool loop. Requests still pass through Orka&#x27;s OpenAI request conversion;
+<p>This header disables the coordinator rewrite and Orka&#x27;s tool loop. Your client&#x27;s tool
+definitions pass through unchanged, and your client manages its own tool execution.
+Requests still pass through Orka&#x27;s OpenAI request conversion;
 for example, <code>top_p</code>, <code>frequency_penalty</code>, and <code>presence_penalty</code> are not forwarded to the
 provider. Provider resolution and credential handling are unchanged.</p>
 <p>Use <code>disabled</code> when you want Orka only for centralized credentials and model routing. Leave
