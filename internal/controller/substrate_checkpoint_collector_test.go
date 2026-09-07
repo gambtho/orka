@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -16,6 +17,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/apiutil"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
@@ -51,17 +53,19 @@ func (a *nativeCollectorTestAPI) DeleteActorTemplate(
 
 func nativeCollectorJournals(t *testing.T, h *nativeRuntimeTestHarness) (*corev1.ConfigMap, *corev1.ConfigMap) {
 	t.Helper()
+	ws := nativeCheckpointWorkspace(t, h, "collector-source")
 	h.until(t, nativeTestServing)
 	substrateSuspendTestPoolIntent(t, h.r, h.pool, true)
 	h.until(t, nativeTestSuspended)
-	catalog, artifact, err := h.r.readSubstrateCheckpointArtifact(t.Context(), h.record(t).Checkpoint.Digest)
+	checkpoint := nativeExportCheckpoint(t, h, ws, false)
+	nativeDeletePool(t, h, h.pool)
+	catalog, artifact, err := h.r.readSubstrateCheckpointArtifact(t.Context(), checkpoint.Status.Digest)
 	require.NoError(t, err)
-	// This is the durable state left after the source pool releases its final
-	// reference. The watcher must finish native and Kubernetes collection.
-	artifact.Owners, artifact.Deleting = map[string]bool{}, true
-	data, err := json.Marshal(artifact)
-	require.NoError(t, err)
-	catalog.Data[substrateCatalogKey] = string(data)
+	// Source deletion leaves the public checkpoint as the last owner. If its
+	// API is removed, the watcher must repair this reference before collection.
+	require.NotNil(t, artifact)
+	require.Equal(t, map[string]bool{substratePublicCheckpointOwner(checkpoint): true}, artifact.Owners)
+	require.False(t, artifact.Deleting)
 	bindings := &corev1.ConfigMapList{}
 	require.NoError(t, h.r.List(t.Context(), bindings, client.MatchingLabels{
 		substrateTemplateBindingLabel: substrateOwnedLabelValue,
@@ -70,14 +74,56 @@ func nativeCollectorJournals(t *testing.T, h *nativeRuntimeTestHarness) (*corev1
 	template := bindings.Items[0].DeepCopy()
 	binding := &substrateTemplateBinding{}
 	require.NoError(t, json.Unmarshal([]byte(template.Data["binding.json"]), binding))
-	binding.Retired = true
-	data, err = json.Marshal(binding)
-	require.NoError(t, err)
-	template.Data["binding.json"] = string(data)
+	require.True(t, binding.Retired)
 	for _, object := range []*corev1.ConfigMap{catalog, template} {
 		object.ResourceVersion, object.UID = "", ""
 	}
 	return catalog, template
+}
+
+type nativeCollectorCheckpointErrorReader struct {
+	client.Reader
+	err error
+}
+
+func (r *nativeCollectorCheckpointErrorReader) Get(ctx context.Context, key client.ObjectKey, object client.Object, opts ...client.GetOption) error {
+	if _, checkpoint := object.(*workspacev1alpha1.ExecutionWorkspaceCheckpoint); checkpoint && r.err != nil {
+		return r.err
+	}
+	return r.Reader.Get(ctx, key, object, opts...)
+}
+
+func TestNativeSubstrateCollectorPreservesUncertainCheckpointOwners(t *testing.T) {
+	resource := workspacev1alpha1.GroupVersion.WithResource("executionworkspacecheckpoints").GroupResource()
+	for _, test := range []struct {
+		name    string
+		readErr error
+	}{
+		{name: "checkpoint API installed after startup"},
+		{name: "forbidden", readErr: apierrors.NewForbidden(resource, "checkpoint", errors.New("denied"))},
+		{name: "discovery unavailable", readErr: &apiutil.ErrResourceDiscoveryFailed{
+			workspacev1alpha1.GroupVersion: apierrors.NewServiceUnavailable("discovery unavailable"),
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			h := newNativeRuntimeTestHarness(t)
+			catalog, _ := nativeCollectorJournals(t, h)
+			h.r.APIReader = &nativeCollectorCheckpointErrorReader{Reader: h.r.Client, err: test.readErr}
+			collector := &SubstrateCheckpointReconciler{RuntimePools: h.r, CheckpointAPIInstalled: false}
+			_, err := collector.Reconcile(t.Context(), ctrl.Request{NamespacedName: types.NamespacedName{
+				Namespace: catalog.Namespace, Name: "catalog/" + catalog.Name,
+			}})
+			if test.readErr != nil {
+				require.ErrorIs(t, err, test.readErr)
+			} else {
+				require.NoError(t, err)
+			}
+			current := &corev1.ConfigMap{}
+			require.NoError(t, h.r.Get(t.Context(), client.ObjectKeyFromObject(catalog), current))
+			require.Equal(t, catalog.Data, current.Data, "unconfirmed owner absence must preserve the catalog")
+			require.Len(t, h.api.tags, 1, "unconfirmed owner absence must preserve native data")
+		})
+	}
 }
 
 func TestNativeSubstrateCollectorRunsWithoutCheckpointAPI(t *testing.T) {

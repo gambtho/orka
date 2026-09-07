@@ -237,10 +237,13 @@ func (r *SubstrateCheckpointReconciler) collect(ctx context.Context, req ctrl.Re
 			return ctrl.Result{}, fmt.Errorf("checkpoint owner kind is invalid")
 		}
 		err := pools.nativeSubstrateReader().Get(ctx, types.NamespacedName{Namespace: namespace, Name: name}, object)
-		if err != nil && !apierrors.IsNotFound(err) {
+		// Discovery confirms removal of the optional checkpoint API. The
+		// startup flag can be stale, and uncertain read failures must retain data.
+		absent := apierrors.IsNotFound(err) || kind == "checkpoint" && meta.IsNoMatchError(err)
+		if err != nil && !absent {
 			return ctrl.Result{}, err
 		}
-		if apierrors.IsNotFound(err) || string(object.GetUID()) != uid {
+		if absent || string(object.GetUID()) != uid {
 			delete(artifact.Owners, owner)
 			return ctrl.Result{RequeueAfter: time.Millisecond}, pools.saveSubstrateCheckpointArtifact(ctx, cm, artifact)
 		}
