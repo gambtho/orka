@@ -689,6 +689,36 @@ func TestWorkspaceCleanupAPIsInstalled(t *testing.T) {
 	}
 }
 
+func TestSubstrateCheckpointAPIInstalled(t *testing.T) {
+	mapper := meta.NewDefaultRESTMapper([]schema.GroupVersion{workspacev1alpha1.GroupVersion})
+	// Existing workspace CRDs do not imply that the newer checkpoint API exists.
+	mapper.Add(workspacev1alpha1.GroupVersion.WithKind("ExecutionWorkspace"), meta.RESTScopeNamespace)
+	installed, err := substrateCheckpointAPIInstalled(mapper)
+	if err != nil || installed {
+		t.Fatalf("missing checkpoint API = %v, %v; want false, nil", installed, err)
+	}
+	mapper.Add(workspacev1alpha1.GroupVersion.WithKind("ExecutionWorkspaceCheckpoint"), meta.RESTScopeNamespace)
+	installed, err = substrateCheckpointAPIInstalled(mapper)
+	if err != nil || !installed {
+		t.Fatalf("installed checkpoint API = %v, %v; want true, nil", installed, err)
+	}
+	// A discovery outage is not absence and must still fail controller startup.
+	failure := errors.New("discovery unavailable")
+	installed, err = substrateCheckpointAPIInstalled(checkpointDiscoveryFailureMapper{RESTMapper: mapper, err: failure})
+	if installed || !errors.Is(err, failure) {
+		t.Fatalf("failed checkpoint discovery = %v, %v; want false and original error", installed, err)
+	}
+}
+
+type checkpointDiscoveryFailureMapper struct {
+	meta.RESTMapper
+	err error
+}
+
+func (m checkpointDiscoveryFailureMapper) RESTMapping(schema.GroupKind, ...string) (*meta.RESTMapping, error) {
+	return nil, m.err
+}
+
 func TestManagerWebhookAdmissionEnabled(t *testing.T) {
 	tests := []struct {
 		name              string

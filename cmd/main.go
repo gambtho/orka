@@ -175,6 +175,17 @@ func workspaceCleanupAPIsInstalled(mapper meta.RESTMapper) (bool, error) {
 	return true, nil
 }
 
+func substrateCheckpointAPIInstalled(mapper meta.RESTMapper) (bool, error) {
+	gvk := workspacev1alpha1.GroupVersion.WithKind("ExecutionWorkspaceCheckpoint")
+	if _, err := mapper.RESTMapping(gvk.GroupKind(), gvk.Version); err != nil {
+		if meta.IsNoMatchError(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("discover %s: %w", gvk.String(), err)
+	}
+	return true, nil
+}
+
 func managerWebhookAdmissionEnabled(taskProvenanceEnabled, workspaceClassUseEnabled bool) bool {
 	return taskProvenanceEnabled || workspaceClassUseEnabled
 }
@@ -1445,10 +1456,20 @@ func main() {
 			os.Exit(1)
 		}
 		// Keep reference and template cleanup running when new workspace
-		// admission is disabled, just like RuntimePool finalization.
-		if err := (&controller.SubstrateCheckpointReconciler{RuntimePools: runtimePoolReconciler}).SetupWithManager(mgr); err != nil {
-			setupLog.Error(err, "unable to create controller", "controller", "SubstrateCheckpoint")
+		// admission is disabled, just like RuntimePool finalization. Minimal
+		// and controller-first upgrades may not have the optional checkpoint CRD.
+		checkpointAPIInstalled, err := substrateCheckpointAPIInstalled(mgr.GetRESTMapper())
+		if err != nil {
+			setupLog.Error(err, "unable to discover substrate checkpoint API")
 			os.Exit(1)
+		}
+		if checkpointAPIInstalled {
+			if err := (&controller.SubstrateCheckpointReconciler{RuntimePools: runtimePoolReconciler}).SetupWithManager(mgr); err != nil {
+				setupLog.Error(err, "unable to create controller", "controller", "SubstrateCheckpoint")
+				os.Exit(1)
+			}
+		} else {
+			setupLog.Info("checkpoint CRD is not installed; skipping substrate checkpoint controller")
 		}
 	}
 
