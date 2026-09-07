@@ -408,8 +408,10 @@ spec:
         - {name: ORKA_TOOL_EXPECT_RESULT, value: 'mcp-e2e-ok:native-mcp:native'}
 YAML
   wait_job native-mcp-client 180
-  kubectl -n orka-system delete tool native-mcp
-  kubectl -n orka-system delete substrateactorpool native-mcp
+  kubectl -n orka-system delete tool native-mcp --wait=false
+  wait_absent tool native-mcp
+  kubectl -n orka-system delete substrateactorpool native-mcp --wait=false
+  wait_absent substrateactorpool native-mcp
   kubectl -n orka-system delete job,role,rolebinding,serviceaccount native-mcp-client
 }
 main() {

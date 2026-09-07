@@ -176,6 +176,7 @@ type substrateControlClient interface {
 	CreateActor(ctx context.Context, actorID, templateNamespace, templateName string) (*substrateActor, error)
 	ResumeActor(ctx context.Context, actorID string, boot bool) (*substrateActor, error)
 	SuspendActor(ctx context.Context, actorID string) (*substrateActor, error)
+	// DeleteActor terminates in any state without creating a snapshot.
 	DeleteActor(ctx context.Context, actorID string) error
 	ListWorkers(ctx context.Context) ([]substrateWorker, error)
 	ListActors(ctx context.Context) ([]substrateActor, error)
@@ -765,40 +766,14 @@ func (e *SubstrateWorkspaceExecutor) Delete(ctx context.Context, req DeleteReque
 		}
 		return nil, err
 	}
-	scrubbed := false
 	var scrubErr error
 	if actor.Status == substrateStatusRunning && !req.SkipScrub {
-		if err := e.scrubDaemon(ctx, actorID); err != nil {
-			scrubErr = err
-		} else {
-			scrubbed = true
-		}
+		scrubErr = e.scrubDaemon(ctx, actorID)
 	}
-	if actor.Status != substrateStatusSuspended {
-		if actor, err = e.suspendActorAndWait(ctx, actorID); err != nil {
-			if scrubbed {
-				if restoreErr := e.restoreHandoffToken(ctx, actorID); restoreErr != nil {
-					return nil, NewError(
-						"delete",
-						ErrorKindFailedPrecondition,
-						"failed to restore workspace handoff token after delete failure",
-						true,
-						errors.Join(err, restoreErr),
-					)
-				}
-			}
-			if scrubErr != nil {
-				return nil, NewError(
-					"delete",
-					ErrorKindFailedPrecondition,
-					"failed to delete workspace after scrub failed",
-					true,
-					errors.Join(scrubErr, err),
-				)
-			}
-			return nil, err
-		}
-	}
+	// Native AnyState deletion terminates the workload. Suspending first would
+	// create an unwanted snapshot and prevents stateless MCP Actors from being
+	// deleted when their template's Data policy has no durable volume.
+	// An uncertain delete must not restore credentials or report completion.
 	if err := e.control.DeleteActor(ctx, actorID); err != nil {
 		if scrubErr != nil {
 			return nil, NewError(

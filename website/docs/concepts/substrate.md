@@ -102,6 +102,11 @@ five additional seconds to collect the final exit status. A caller context can
 impose a tighter overall deadline or cancel the wait. Timeout conformance requires
 the daemon's exit code 124; connection or authentication failures do not count.
 
+Direct workspace and MCP deletion use upstream `DeleteActor(anyState=true)` to
+terminate workloads without creating snapshots. This also permits cleanup of
+stateless MCP Actors and failed suspension attempts. ACP teardown continues to
+require its controller-owned journal and worker termination proof.
+
 Upstream currently authenticates control clients but does not implement native
 resource authorization/RBAC. Treat its control API, router, template operators,
 and worker namespace as a trusted infrastructure boundary. Kubernetes `use`
