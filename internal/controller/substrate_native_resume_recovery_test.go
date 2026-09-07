@@ -3,13 +3,89 @@ package controller
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 
+	"github.com/stretchr/testify/require"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	ateapipb "github.com/orka-agents/orka/internal/substratepb"
+	"github.com/orka-agents/orka/internal/workspace"
 )
+
+type nativeResumeRejectionAPI struct {
+	*nativeRuntimeTestAPI
+	rejection error
+	calls     int
+}
+
+func (a *nativeResumeRejectionAPI) ResumeActor(ctx context.Context, req *ateapipb.ResumeActorRequest, opts ...grpc.CallOption) (*ateapipb.ResumeActorResponse, error) {
+	a.calls++
+	if a.rejection != nil {
+		return nil, a.rejection
+	}
+	return a.nativeRuntimeTestAPI.ResumeActor(ctx, req, opts...)
+}
+
+func TestNativeSubstrateBootRecoversOnlyDefinitiveAuthenticationRejection(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		err   error
+		retry bool
+	}{
+		{name: "expired credential", err: status.Error(codes.Unauthenticated, "invalid bearer token"), retry: true},
+		{name: "missing credential", err: status.Error(codes.Unauthenticated, "missing bearer token"), retry: true},
+		{name: "untrusted issuer", err: status.Error(codes.Unauthenticated, `token issuer "untrusted" not trusted`), retry: true},
+		{name: "worker credential", err: fmt.Errorf("while creating workload from spec: %w", status.Error(codes.Unauthenticated, "invalid bearer token"))},
+		{name: "unavailable", err: status.Error(codes.Unavailable, "boot outcome unknown")},
+		{name: "deadline", err: status.Error(codes.DeadlineExceeded, "boot outcome unknown")},
+		{name: "permission denied", err: status.Error(codes.PermissionDenied, "worker refused request")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newNativeRuntimeTestHarness(t)
+			api := &nativeResumeRejectionAPI{nativeRuntimeTestAPI: h.api, rejection: tc.err}
+			h.r.SubstrateNativeClientFactory = func(SubstrateConfig) (*workspace.SubstrateNativeClient, error) {
+				return &workspace.SubstrateNativeClient{Control: api}, nil
+			}
+			h.until(t, func(_ *corev1alpha1.RuntimePool, _ *substrateNativeState) bool { return api.calls == 1 })
+			record := h.record(t)
+			require.Equal(t, !tc.retry, record.Attempt.BootRequested)
+			require.Empty(t, h.seeds, "a rejected boot must not receive runtime credentials")
+			attemptUID := record.Attempt.UID
+			api.rejection = nil
+			// Recovery uses the saved journal, not an in-memory retry flag.
+			old := h.r
+			h.r = &RuntimePoolReconciler{
+				Client: old.Client, APIReader: old.APIReader, Scheme: old.Scheme,
+				RuntimeNamespace: old.RuntimeNamespace, ControllerNamespace: old.ControllerNamespace,
+				ControllerAPIURL: old.ControllerAPIURL, ControllerAPIPort: old.ControllerAPIPort,
+				ControllerEpoch: old.ControllerEpoch, AllowedImages: old.AllowedImages,
+				WorkspaceArtifactMaxBytes: old.WorkspaceArtifactMaxBytes,
+				ProviderProxy:             old.ProviderProxy, SubstrateEnabled: old.SubstrateEnabled,
+				SubstrateConfig: old.SubstrateConfig, SubstrateNativeClientFactory: old.SubstrateNativeClientFactory,
+				SubstrateCredentialSeeder: old.SubstrateCredentialSeeder, SupervisorClient: old.SupervisorClient,
+				Rand: old.Rand, Now: old.Now,
+			}
+			if tc.retry {
+				h.until(t, nativeTestServing)
+				require.Equal(t, 2, api.calls)
+				require.Equal(t, 1, h.api.resumes)
+				require.Equal(t, attemptUID, h.record(t).Attempt.UID)
+				return
+			}
+			for range 4 {
+				h.step(t)
+			}
+			require.Equal(t, 1, api.calls, "an ambiguous boot must not be replayed after a negative Actor read")
+			require.Empty(t, h.seeds)
+		})
+	}
+}
 
 type nativeConsentPatchFailureClient struct {
 	client.Client

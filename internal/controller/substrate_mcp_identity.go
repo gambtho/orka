@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	coordinationv1 "k8s.io/api/coordination/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -13,6 +14,41 @@ import (
 	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/workspace"
 )
+
+func (r *ToolReconciler) substrateMCPFinalizerMigrationContext(
+	ctx context.Context, tool *corev1alpha1.Tool,
+) (*ExecutionWorkspaceRequest, *corev1alpha1.SubstrateActorPool, error) {
+	if tool.Spec.MCP == nil || tool.Spec.MCP.SubstrateActor == nil {
+		return nil, nil, nil
+	}
+	request := r.substrateMCPTemplateRequest(tool)
+	if request.TemplateName == "" {
+		return nil, nil, nil
+	}
+	poolName, poolNamespace := substrateActorPoolReference(tool.Spec.MCP.SubstrateActor.PoolRef, tool.Namespace)
+	if poolName == "" {
+		// The dedicated Actor name hashes this complete binding. An edited
+		// template cannot qualify an Actor belonging to the previous spec.
+		return request, nil, nil
+	}
+	pool := &corev1alpha1.SubstrateActorPool{}
+	if err := r.Get(ctx, client.ObjectKey{Namespace: poolNamespace, Name: poolName}, pool); err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil, nil, nil // recorded status may still supply provenance
+		}
+		return nil, nil, err
+	}
+	atespace := strings.TrimSpace(pool.Spec.TemplateRef.Namespace)
+	if atespace == "" {
+		atespace = pool.Namespace
+	}
+	if atespace != request.TemplateNamespace || strings.TrimSpace(pool.Spec.TemplateRef.Name) != request.TemplateName {
+		return nil, nil, nil
+	}
+	// Pool Atespace is immutable. Cleanup can use this binding even while the
+	// pool is deleting or its native template is gone; admission is unnecessary.
+	return request, pool, nil
+}
 
 // migrateSubstrateMCPIdentities qualifies legacy IDs using recorded template
 // provenance or the validated current binding. It never deletes/recreates an

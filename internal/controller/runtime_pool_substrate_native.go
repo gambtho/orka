@@ -361,6 +361,12 @@ func (r *RuntimePoolReconciler) reconcileNativeSubstrateRuntimePool(ctx context.
 		}
 		_, err := api.Control.ResumeActor(ctx, &ateapipb.ResumeActorRequest{Actor: nativeSubstrateActorRef(record), Boot: record.Checkpoint == nil})
 		if err != nil {
+			if nativeSubstrateBootAuthenticationRejected(err) {
+				a.BootRequested = false
+				if saveErr := r.saveNativeSubstrateState(ctx, cm, record); saveErr != nil {
+					return ctrl.Result{}, saveErr
+				}
+			}
 			return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, fmt.Errorf("native Actor boot awaits observation: %w", err))
 		}
 		return r.nativeSubstrateProgress(ctx, pool, corev1alpha1.RuntimePoolLifecycleStarting, "native Actor cold boot requested; waiting for its exact worker")
@@ -436,6 +442,18 @@ func (r *RuntimePoolReconciler) reconcileNativeSubstrateRuntimePool(ctx context.
 		return ctrl.Result{}, false, nil
 	}
 	return r.reconcileRuntimePoolServingWithPostProbeFence(ctx, pool, cfg, []corev1.Pod{*synthetic}, []corev1.Pod{*synthetic}, auth, poolStatus, postProbe)
+}
+
+func nativeSubstrateBootAuthenticationRejected(err error) bool {
+	if status.Code(err) != codes.Unauthenticated {
+		return false
+	}
+	// These are the pinned ate-api authentication interceptor's pre-handler
+	// rejections. Resume can also propagate a worker authentication failure
+	// after assigning compute; its wrapped error must not authorize a replay.
+	message := status.Convert(err).Message()
+	return message == "missing bearer token" || message == "invalid bearer token" ||
+		(strings.HasPrefix(message, "token issuer ") && strings.HasSuffix(message, " not trusted"))
 }
 
 func (r *RuntimePoolReconciler) nativeSubstrateDesiredTemplate(ctx context.Context, pool *corev1alpha1.RuntimePool, cfg runtimePoolConfig, record *substrateNativeState, auth *corev1.Secret) (*unstructured.Unstructured, substrateRuntimeTemplateRender, error) {

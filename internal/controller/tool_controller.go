@@ -620,7 +620,11 @@ func (r *ToolReconciler) finalizeSubstrateMCPTool(ctx context.Context, tool *cor
 	if !controllerutil.ContainsFinalizer(tool, substrateMCPToolActorFinalizer) {
 		return ctrl.Result{}, nil
 	}
-	if changed, err := r.migrateSubstrateMCPIdentities(ctx, tool, nil, nil); err != nil {
+	request, pool, err := r.substrateMCPFinalizerMigrationContext(ctx, tool)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if changed, err := r.migrateSubstrateMCPIdentities(ctx, tool, request, pool); err != nil {
 		return ctrl.Result{}, err
 	} else if changed {
 		return ctrl.Result{RequeueAfter: time.Second}, nil

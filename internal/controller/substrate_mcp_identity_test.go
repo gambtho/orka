@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
 	coordinationv1 "k8s.io/api/coordination/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -190,5 +191,75 @@ func TestSubstrateMCPIdentityMigrationUsesRecordedTemplateForCleanup(t *testing.
 	}
 	if tool.Status.Actor.ActorID != "historical-actor.original-space" {
 		t.Fatalf("cleanup rebound to a new Atespace: %s", tool.Status.Actor.ActorID)
+	}
+}
+
+func TestSubstrateMCPLegacyFinalizationBeforeActorStatus(t *testing.T) {
+	for _, mode := range []string{"dedicated", "pooled", "deleting-pool"} {
+		t.Run(mode, func(t *testing.T) {
+			template := corev1alpha1.WorkspaceTemplateReference{Name: "mcp-template", Namespace: "ate-demo"}
+			tool := &corev1alpha1.Tool{
+				ObjectMeta: metav1.ObjectMeta{Name: "mcp-tool", Namespace: defaultNS, UID: "pending-tool", Finalizers: []string{substrateMCPToolActorFinalizer}},
+				Spec: corev1alpha1.ToolSpec{Description: "MCP tool", MCP: &corev1alpha1.MCPToolServer{
+					SubstrateActor: &corev1alpha1.SubstrateMCPActor{TemplateRef: template},
+				}},
+			}
+			qualified := deterministicSubstrateToolActorID(tool.Namespace, tool.Name, template.Namespace, template.Name)
+			var pool *corev1alpha1.SubstrateActorPool
+			objects := []client.Object{tool}
+			if mode != "dedicated" {
+				pool = &corev1alpha1.SubstrateActorPool{
+					ObjectMeta: metav1.ObjectMeta{Name: testMCPPoolName, Namespace: tool.Namespace, UID: "original-pool", Finalizers: []string{substrateActorPoolFinalizer}},
+					Spec:       corev1alpha1.SubstrateActorPoolSpec{TemplateRef: template, TargetActors: 1},
+				}
+				tool.Spec.MCP.SubstrateActor.PoolRef = &corev1alpha1.SubstrateActorPoolReference{Name: pool.Name}
+				qualified = workspace.SubstrateActorKey(template.Namespace, deterministicSubstratePoolActorID(deterministicSubstratePoolActorPrefix(pool.Namespace, pool.Name), 0))
+				objects = append(objects, pool)
+			}
+			legacy, _, _ := strings.Cut(qualified, ".")
+			tool.Annotations = map[string]string{substrateMCPToolActorIDAnno: legacy}
+			lease := newSubstrateMCPToolActorLease(tool, tool.Namespace, legacy)
+			if pool != nil {
+				tool.Annotations[substrateMCPToolActorPoolNameAnno] = pool.Name
+				tool.Annotations[substrateMCPToolActorPoolNamespaceAnno] = pool.Namespace
+				lease = newSubstrateMCPPoolActorLease(tool, pool.Namespace, legacy, legacy)
+			}
+			delete(lease.Annotations, "orka.ai/substrate-actor-ref")
+			objects = append(objects, lease)
+			scheme := newToolScheme()
+			c := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.Tool{}).WithObjects(objects...).Build()
+			require.NoError(t, c.Delete(t.Context(), tool))
+			if mode == "deleting-pool" {
+				require.NoError(t, c.Delete(t.Context(), pool))
+			}
+			executor := &recordingToolWorkspaceExecutor{}
+			deleted := false
+			for range 12 {
+				// Native template availability and new admission are irrelevant
+				// to cleanup; reconstruct the controller between durable writes.
+				r := &ToolReconciler{Client: c, Scheme: scheme,
+					SubstrateTemplateValidator: func(context.Context, *ExecutionWorkspaceRequest) error {
+						t.Fatal("finalization tried to validate native template admission")
+						return nil
+					},
+					SubstrateExecutorFactory: func(SubstrateConfig) (workspace.WorkspaceExecutor, error) { return executor, nil },
+				}
+				_, err := r.Reconcile(t.Context(), mcpToolRequest())
+				require.NoError(t, err)
+				current := &corev1alpha1.Tool{}
+				if err := c.Get(t.Context(), mcpToolRequest().NamespacedName, current); apierrors.IsNotFound(err) {
+					deleted = true
+					break
+				} else {
+					require.NoError(t, err)
+					require.Nil(t, current.Status.Actor)
+				}
+			}
+			require.True(t, deleted)
+			require.Equal(t, []string{qualified}, executor.deletedActorIDs)
+			leases := &coordinationv1.LeaseList{}
+			require.NoError(t, c.List(t.Context(), leases))
+			require.Empty(t, leases.Items)
+		})
 	}
 }

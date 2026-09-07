@@ -34,7 +34,7 @@ func TestForkWorkspaceUsesIndependentSessionAndExplicitData(t *testing.T) {
 		}
 		var ref *corev1alpha1.WorkspaceCheckpointReference
 		if selected {
-			ref = &corev1alpha1.WorkspaceCheckpointReference{Name: "selected", UID: "checkpoint-uid", Digest: "sha256:fixture"}
+			ref = &corev1alpha1.WorkspaceCheckpointReference{Name: "selected", UID: "checkpoint-uid", Digest: "sha256:" + strings.Repeat("a", 64)}
 		}
 		require.NoError(t, applyForkExecutionCheckpoint(&spec, ref, "new-fork"))
 		require.Equal(t, "new-fork", spec.SessionRef.Name)
@@ -42,6 +42,50 @@ func TestForkWorkspaceUsesIndependentSessionAndExplicitData(t *testing.T) {
 		require.Equal(t, corev1alpha1.WorkspaceReusePolicySession, spec.Execution.Workspace.ReusePolicy)
 		require.Equal(t, corev1alpha1.WorkspaceOnDetachSuspend, spec.Execution.Workspace.OnDetach)
 		require.Equal(t, ref, spec.Execution.Workspace.RestoreFrom)
+	}
+}
+
+func TestForkWorkspaceRejectsMalformedCheckpointBeforeWriting(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		field string
+		value string
+	}{
+		{name: "empty name", field: "name"},
+		{name: "invalid name", field: "name", value: "invalid/name"},
+		{name: "long name", field: "name", value: strings.Repeat("a", 254)},
+		{name: "empty UID", field: "uid"},
+		{name: "blank UID", field: "uid", value: " "},
+		{name: "long UID", field: "uid", value: strings.Repeat("a", 129)},
+		{name: "short digest", field: "digest", value: "sha256:abcd"},
+		{name: "invalid digest", field: "digest", value: "sha256:" + strings.Repeat("z", 64)},
+		{name: "uppercase digest", field: "digest", value: "sha256:" + strings.Repeat("A", 64)},
+		{name: "missing digest prefix", field: "digest", value: strings.Repeat("a", 64)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			eventStore := storetest.NewFakeExecutionEventStore()
+			appendTestTaskEvent(t, eventStore, "source", events.ExecutionEventTypeTaskStarted)
+			source := testTask("default", "source")
+			source.Spec.Execution = &corev1alpha1.ExecutionSpec{Workspace: &corev1alpha1.ExecutionWorkspaceSpec{
+				ClassRef: &corev1alpha1.WorkspaceClassReference{Name: "substrate-data"},
+			}}
+			h, app := setupPostP0Handlers(t, eventStore, nil, source)
+			app.Post("/api/v1/tasks/:id/fork", h.ForkTask)
+			checkpoint := map[string]string{"name": "selected-data", "uid": "checkpoint-uid", "digest": "sha256:" + strings.Repeat("a", 64)}
+			checkpoint[tc.field] = tc.value
+			resp := testJSONRequest(t, app, http.MethodPost, "/api/v1/tasks/source/fork?namespace=default", map[string]any{
+				"afterSeq": 1, "newTaskName": "invalid-fork", "executionCheckpoint": checkpoint,
+			})
+			require.Equal(t, http.StatusBadRequest, resp.StatusCode)
+			err := h.client.Get(t.Context(), types.NamespacedName{Namespace: "default", Name: "invalid-fork"}, &corev1alpha1.Task{})
+			require.True(t, apierrors.IsNotFound(err), "invalid input must not create a Task even with a client that skips CRD validation")
+			forkEvents, err := eventStore.ListExecutionEvents(t.Context(), store.ExecutionEventFilter{Namespace: "default", StreamID: "invalid-fork"})
+			require.NoError(t, err)
+			require.Empty(t, forkEvents)
+			sourceEvents, err := eventStore.ListExecutionEvents(t.Context(), store.ExecutionEventFilter{Namespace: "default", StreamID: "source"})
+			require.NoError(t, err)
+			require.Len(t, sourceEvents, 1, "invalid input must not append a fork event to the source")
+		})
 	}
 }
 

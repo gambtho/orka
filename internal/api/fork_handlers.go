@@ -22,6 +22,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/validation"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/events"
@@ -196,6 +197,8 @@ func (h *Handlers) ForkTask(c fiber.Ctx) error {
 			return fiber.NewError(fiber.StatusConflict, "forked task already exists")
 		case apierrors.IsRequestEntityTooLargeError(err):
 			return fiber.NewError(fiber.StatusRequestEntityTooLarge, "forked task is too large; fork from an earlier checkpoint or shorten the prompt")
+		case apierrors.IsInvalid(err):
+			return fiber.NewError(fiber.StatusBadRequest, "forked task is invalid")
 		default:
 			return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to create forked task: %v", err))
 		}
@@ -210,6 +213,13 @@ func (h *Handlers) ForkTask(c fiber.Ctx) error {
 }
 
 func applyForkExecutionCheckpoint(spec *corev1alpha1.TaskSpec, checkpoint *corev1alpha1.WorkspaceCheckpointReference, forkName string) error {
+	if checkpoint != nil {
+		digest, err := hex.DecodeString(strings.TrimPrefix(checkpoint.Digest, "sha256:"))
+		if len(validation.IsDNS1123Subdomain(checkpoint.Name)) != 0 || strings.TrimSpace(checkpoint.UID) == "" || len(checkpoint.UID) > 128 ||
+			!strings.HasPrefix(checkpoint.Digest, "sha256:") || err != nil || len(digest) != sha256.Size || strings.ToLower(checkpoint.Digest) != checkpoint.Digest {
+			return fmt.Errorf("executionCheckpoint requires a valid checkpoint name, exact UID, and SHA-256 digest")
+		}
+	}
 	if spec.Execution == nil || spec.Execution.Workspace == nil {
 		if checkpoint != nil {
 			return fmt.Errorf("executionCheckpoint requires a source Task with a Substrate workspace class")
