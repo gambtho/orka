@@ -6,6 +6,43 @@ test_root="$(mktemp -d "${TMPDIR:-/tmp}/orka-native-substrate-test.XXXXXX")"
 trap 'rm -rf "${test_root}"' EXIT
 source "${root}/scripts/agent-substrate-e2e.sh"
 
+# The local installer must bind the same limited worker namespace access as
+# Helm, then test the installed controller identity before submitting Tasks.
+(
+  ORKA_NAMESPACE=isolated-controller
+  rbac_failure=""
+  kubectl() {
+    printf '%s\n' "$*" >>"${test_root}/rbac-calls"
+    case "$*" in
+      '-n ate-demo apply -f -') cat >"${test_root}/worker-rbac.json" ;;
+      *'auth can-i '*) ;;
+      *) return 9 ;;
+    esac
+    [[ -z "${rbac_failure}" || "$*" != *"${rbac_failure}"* ]]
+  }
+  grant_substrate_worker_access
+  jq -e '
+    .items as $items |
+    ($items | map(select(.kind == "Role")) | .[0]) as $role |
+    ($items | map(select(.kind == "RoleBinding")) | .[0]) as $binding |
+    ($items | length) == 2 and
+    all($items[]; .metadata.namespace == "ate-demo") and
+    ($role.rules | length) == 2 and
+    any($role.rules[]; .apiGroups == [""] and .resources == ["pods"] and (.verbs | sort) == ["delete", "get", "list"]) and
+    any($role.rules[]; .apiGroups == ["networking.k8s.io"] and .resources == ["networkpolicies"] and (.verbs | sort) == ["create", "delete", "get", "list", "patch", "update", "watch"]) and
+    $binding.roleRef == {apiGroup:"rbac.authorization.k8s.io",kind:"Role",name:$role.metadata.name} and
+    $binding.subjects == [{kind:"ServiceAccount",name:"orka-controller-manager",namespace:"isolated-controller"}]
+  ' "${test_root}/worker-rbac.json" >/dev/null
+  rg -Fxq -- 'auth can-i list workerpools.ate.dev --as=system:serviceaccount:isolated-controller:orka-controller-manager --quiet' "${test_root}/rbac-calls"
+  rg -Fxq -- '-n ate-demo auth can-i delete pods --as=system:serviceaccount:isolated-controller:orka-controller-manager --quiet' "${test_root}/rbac-calls"
+  for rbac_failure in 'apply -f -' 'list workerpools.ate.dev' 'delete pods' 'create networkpolicies'; do
+    if grant_substrate_worker_access >"${test_root}/rbac-error" 2>&1; then
+      echo 'Substrate setup ignored missing controller permissions' >&2
+      exit 1
+    fi
+  done
+)
+
 # A failed API read is not proof of deletion.
 kubectl() { return 7; }
 if wait_absent task gone; then

@@ -75,6 +75,35 @@ YAML
   kubectl -n vekil-system rollout status deployment/vekil --timeout=2m
 }
 
+grant_substrate_worker_access() {
+  # Match the production chart's worker namespace permissions. The generated
+  # manager RoleBinding applies only in the controller's tenant namespace.
+  jq -n --arg namespace "${ORKA_NAMESPACE}" '{apiVersion:"v1",kind:"List",items:[
+    {apiVersion:"rbac.authorization.k8s.io/v1",kind:"Role",
+      metadata:{name:"orka-substrate-worker",namespace:"ate-demo"},rules:[
+        {apiGroups:[""],resources:["pods"],verbs:["get","list","delete"]},
+        {apiGroups:["networking.k8s.io"],resources:["networkpolicies"],verbs:["get","list","watch","create","update","patch","delete"]}]},
+    {apiVersion:"rbac.authorization.k8s.io/v1",kind:"RoleBinding",
+      metadata:{name:"orka-substrate-worker",namespace:"ate-demo"},
+      roleRef:{apiGroup:"rbac.authorization.k8s.io",kind:"Role",name:"orka-substrate-worker"},
+      subjects:[{kind:"ServiceAccount",name:"orka-controller-manager",namespace:$namespace}]}]}' |
+    kubectl -n ate-demo apply -f - || return 1
+
+  local controller_user="system:serviceaccount:${ORKA_NAMESPACE}:orka-controller-manager" permission verb resource
+  if ! kubectl auth can-i list workerpools.ate.dev --as="${controller_user}" --quiet; then
+    printf 'Orka lacks cluster-wide WorkerPool discovery permission\n' >&2
+    return 1
+  fi
+  for permission in get:pods list:pods delete:pods get:networkpolicies list:networkpolicies watch:networkpolicies create:networkpolicies update:networkpolicies patch:networkpolicies delete:networkpolicies; do
+    verb="${permission%%:*}"
+    resource="${permission#*:}"
+    if ! kubectl -n ate-demo auth can-i "${verb}" "${resource}" --as="${controller_user}" --quiet; then
+      printf 'Orka lacks %s on %s in the dedicated Substrate worker namespace\n' "${verb}" "${resource}" >&2
+      return 1
+    fi
+  done
+}
+
 deploy_orka() {
   local controller_image="$1"
   local codex_runtime_actor_ref="${2:-}"
@@ -146,6 +175,7 @@ deploy_orka() {
   bash "${ROOT_DIR}/scripts/lib/ensure-static-mode-namespace.sh" \
     kubectl "${ORKA_NAMESPACE}" harness-v2
   "${ROOT_DIR}/bin/kustomize" build "${tmp_config}/config/acp-workload" | kubectl apply -f -
+  grant_substrate_worker_access
   if [[ "${SUBSTRATE_E2E_SUSPEND_RESUME}" == "1" ]]; then
     log "Deploying the dedicated fail-closed admission runtime"
     orka_e2e_deploy_admission "${controller_image}" kubectl "${ORKA_NAMESPACE}"

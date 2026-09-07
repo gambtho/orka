@@ -1727,7 +1727,7 @@ rules:
 - apiGroups:
   - ate.dev
   resources:
-  - actortemplates
+  - workerpools
   verbs:
   - get
   - list
