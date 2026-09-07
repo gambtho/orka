@@ -71,8 +71,7 @@ func (e *SubstrateWorkspaceExecutor) seedNativeWorkspaceCredential(ctx context.C
 	if err != nil {
 		return err
 	}
-	if observed == nil || observed.ActorUID != actor.ActorUID || observed.ActorVersion != actor.ActorVersion ||
-		observed.PodUID != actor.PodUID || observed.Status != substrateStatusRunning {
+	if !nativeWorkspaceBootstrapLifetimeMatches(actor, observed) || observed.ActorVersion != actor.ActorVersion {
 		return fmt.Errorf("native Actor lifetime changed before credential bootstrap")
 	}
 	payload, err := json.Marshal(harnessv2.WorkspaceBootstrapRequest{HandoffToken: token})
@@ -107,8 +106,13 @@ func (e *SubstrateWorkspaceExecutor) seedNativeWorkspaceCredential(ctx context.C
 	if err != nil {
 		return err
 	}
-	if observed == nil || observed.ActorUID != actor.ActorUID || observed.PodUID != actor.PodUID || observed.Status != substrateStatusRunning {
+	if !nativeWorkspaceBootstrapLifetimeMatches(actor, observed) {
 		return fmt.Errorf("native Actor lifetime changed during credential bootstrap")
 	}
 	return nil
+}
+
+func nativeWorkspaceBootstrapLifetimeMatches(expected, observed *substrateActor) bool {
+	return expected != nil && observed != nil && observed.ActorUID == expected.ActorUID &&
+		observed.PodUID == expected.PodUID && observed.Status == substrateStatusRunning
 }
