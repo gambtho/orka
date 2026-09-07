@@ -883,6 +883,13 @@ func (s *Server) createSession(
 	// source content.
 	materialize := true
 	resumedFromCheckpoint := false
+	// A dedicated provider workspace keeps the same data key when a checkpoint
+	// seeds a new RuntimeSession. Runtime identities and their UID/GID allocator
+	// remain independent; only the workspace directory has a stable name.
+	sessionComponent := s.cfg.DurableWorkspaceKey
+	if sessionComponent == "" {
+		sessionComponent = string(request.Metadata.Fence.RuntimeSessionUID)
+	}
 	if request.Workspace.ExpectDurableResume && s.cfg.DurableWorkspaceDir == "" {
 		// The controller asserts this session resumes a committed durable
 		// checkpoint; a runtime without a durable root cannot possibly hold
@@ -891,7 +898,6 @@ func (s *Server) createSession(
 			errors.New("controller expects a committed durable checkpoint, but this runtime has no durable workspace root"))
 	}
 	if s.cfg.DurableWorkspaceDir != "" {
-		sessionComponent := string(request.Metadata.Fence.RuntimeSessionUID)
 		sessionIdentityHighWater := s.cfg.UIDAllocator.Capacity() - s.cfg.UIDAllocator.Remaining()
 		workspaceDir, committed, durableErr := acp.PrepareDurableSessionWorkspace(
 			s.cfg.DurableWorkspaceDir, sessionComponent, sessionIdentityHighWater,
@@ -1117,7 +1123,7 @@ func (s *Server) createSession(
 		// it must: the child may have modified the repository. The
 		// successful commit below restores the marker.
 		if err := acp.MarkDurableSessionWorkspaceResumePending(
-			s.cfg.DurableWorkspaceDir, string(request.Metadata.Fence.RuntimeSessionUID),
+			s.cfg.DurableWorkspaceDir, sessionComponent,
 		); err != nil {
 			return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationFailed("durable workspace pending mark", err)
 		}
@@ -1157,7 +1163,7 @@ func (s *Server) createSession(
 		// here, retiring its pending record.
 		if commitErr := acp.CommitDurableSessionWorkspace(
 			s.cfg.DurableWorkspaceDir,
-			string(request.Metadata.Fence.RuntimeSessionUID),
+			sessionComponent,
 			acp.DurableWorkspaceBinding{
 				RepositoryIdentity: request.Workspace.Baseline.RepositoryIdentity,
 				Revision:           request.Workspace.Baseline.Revision,

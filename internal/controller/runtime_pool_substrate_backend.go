@@ -79,6 +79,7 @@ const (
 	substrateObjectSpecField                   = "spec"
 	substrateObjectLabelsField                 = "labels"
 	substrateActorTemplateAPIVersion           = "v1alpha1"
+	substrateDurableWorkspaceDirectoryKey      = "workspace"
 
 	// substrateActorBootedAnnotation records the exact actor ID whose workload
 	// this pool booted from scratch. It makes boot idempotent across controller
@@ -4970,6 +4971,13 @@ func (r *RuntimePoolReconciler) renderSubstrateRuntimeTemplate(
 		container.Env = append(container.Env, corev1.EnvVar{
 			Name: "ORKA_ACP_DURABLE_WORKSPACE_DIR", Value: substrateDurableWorkspaceMountPath,
 		})
+		if r.usesNativeSubstrate() {
+			// This Actor owns one execution workspace. Its checkpoint must be
+			// readable after an independent restore changes the RuntimeSession UID.
+			container.Env = append(container.Env, corev1.EnvVar{
+				Name: "ORKA_ACP_DURABLE_WORKSPACE_KEY", Value: substrateDurableWorkspaceDirectoryKey,
+			})
+		}
 	}
 
 	containerMap, err := k8sruntime.DefaultUnstructuredConverter.ToUnstructured(&container)

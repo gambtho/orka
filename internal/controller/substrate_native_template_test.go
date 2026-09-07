@@ -49,6 +49,26 @@ func nativeSubstrateTestRenderPool(t *testing.T, r *RuntimePoolReconciler, pool 
 	return rendered.object
 }
 
+func TestNativeSubstrateDataTemplateUsesStableWorkspaceKey(t *testing.T) {
+	r, _ := runtimePoolSubstrateTestReconciler(t, nil, &fakeSubstrateActorControl{})
+	r.SubstrateTemplates = nil
+	r.SubstrateActorControlFactory = nil
+	pool := runtimePoolSubstrateTestObject()
+	pool.Spec.ExecutionWorkspace.Substrate.SuspendMode = string(acpworkspacev1alpha1.SubstrateSuspendModeDataOnly)
+	native, err := nativeSubstrateRuntimeTemplate(nativeSubstrateTestRenderPool(t, r, pool, "nonce"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	env := map[string]string{}
+	for _, item := range native.GetContainers()[0].GetEnv() {
+		env[item.GetName()] = item.GetValue()
+	}
+	if env["ORKA_ACP_DURABLE_WORKSPACE_KEY"] != "workspace" ||
+		env["ORKA_ACP_DURABLE_WORKSPACE_DIR"] != substrateDurableWorkspaceMountPath {
+		t.Fatal("native DataOnly template did not bind the checkpoint to its dedicated workspace directory")
+	}
+}
+
 func TestNativeSubstrateCompilerPreservesSupervisorContract(t *testing.T) {
 	r, _ := runtimePoolSubstrateTestReconciler(t, nil, &fakeSubstrateActorControl{})
 	object := nativeSubstrateTestRender(t, r, "nonce-1")
