@@ -90,14 +90,16 @@ func (r *SubstrateActorPoolReconciler) Reconcile(ctx context.Context, req ctrl.R
 			return validateNativeSubstrateRoutableTemplate(ctx, cfg, request)
 		}
 	}
-	if err := validator(ctx, &ExecutionWorkspaceRequest{
+	templateRequest := &ExecutionWorkspaceRequest{
 		TemplateName:                 template.Name,
 		TemplateNamespace:            template.Namespace,
 		SubstrateBootstrapSecretName: cfg.BootstrapSecretName,
 		SubstrateBootstrapSecretKey:  cfg.BootstrapSecretKey,
-	}); err != nil {
+	}
+	if err := validator(ctx, templateRequest); err != nil {
 		return r.updateSubstrateActorPoolStatus(ctx, pool, corev1alpha1.SubstrateActorPoolPhaseFailed, workspace.Density{}, err.Error())
 	}
+	template.UID = templateRequest.TemplateUID
 	if !controllerutil.ContainsFinalizer(pool, substrateActorPoolFinalizer) {
 		controllerutil.AddFinalizer(pool, substrateActorPoolFinalizer)
 		if err := r.Update(ctx, pool); err != nil {

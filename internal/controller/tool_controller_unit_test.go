@@ -297,7 +297,10 @@ func TestToolReconcilerMCPSubstrateActorPublishesEndpoint(t *testing.T) {
 			return executor, nil
 		},
 	}
-	r.SubstrateTemplateValidator = substrateFixtureTemplateValidator(r.Client)
+	r.SubstrateTemplateValidator = func(ctx context.Context, request *ExecutionWorkspaceRequest) error {
+		request.TemplateUID = "validated-native-template-uid"
+		return substrateFixtureTemplateValidator(r.Client)(ctx, request)
+	}
 
 	if _, err := r.Reconcile(context.Background(), mcpToolRequest()); err != nil {
 		t.Fatalf("Reconcile() error = %v", err)
@@ -322,6 +325,9 @@ func TestToolReconcilerMCPSubstrateActorPublishesEndpoint(t *testing.T) {
 	}
 	if !executor.waitReadyBoot {
 		t.Fatal("WaitReady Boot = false, want true for newly-created MCP actor")
+	}
+	if executor.claimTemplate.UID != "validated-native-template-uid" || executor.waitReadyTemplate != executor.claimTemplate {
+		t.Fatal("native template identity was dropped before actor claim or readiness")
 	}
 	if !executor.waitReadySkipDaemonHealthCheck {
 		t.Fatal("WaitReady SkipDaemonHealthCheck = false, want true for MCP actor readiness")
@@ -2711,12 +2717,14 @@ func mcpToolRequest() ctrl.Request {
 
 type recordingToolWorkspaceExecutor struct {
 	claimName                      string
+	claimTemplate                  workspace.TemplateRef
 	claimCreated                   bool
 	claimCreateds                  []bool
 	waitReadyCalled                bool
 	waitReadyBoot                  bool
 	waitReadyBoots                 []bool
 	waitReadySkipDaemonHealthCheck bool
+	waitReadyTemplate              workspace.TemplateRef
 	waitReadyErrs                  []error
 	closeCalled                    bool
 	deletedActorIDs                []string
@@ -2726,6 +2734,7 @@ type recordingToolWorkspaceExecutor struct {
 
 func (e *recordingToolWorkspaceExecutor) Claim(ctx context.Context, req workspace.ClaimRequest) (*workspace.ClaimResult, error) {
 	e.claimName = req.ClaimName
+	e.claimTemplate = req.Template
 	created := e.claimCreated
 	if len(e.claimCreateds) > 0 {
 		created = e.claimCreateds[0]
@@ -2748,6 +2757,7 @@ func (e *recordingToolWorkspaceExecutor) WaitReady(ctx context.Context, req work
 	e.waitReadyBoot = req.Boot
 	e.waitReadyBoots = append(e.waitReadyBoots, req.Boot)
 	e.waitReadySkipDaemonHealthCheck = req.SkipDaemonHealthCheck
+	e.waitReadyTemplate = req.Template
 	if len(e.waitReadyErrs) > 0 {
 		err := e.waitReadyErrs[0]
 		e.waitReadyErrs = e.waitReadyErrs[1:]

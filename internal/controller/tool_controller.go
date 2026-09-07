@@ -307,19 +307,20 @@ func (r *ToolReconciler) validateSubstrateMCPTool(ctx context.Context, tool *cor
 			tool.Namespace,
 		)
 	}
-	validator := r.SubstrateTemplateValidator
-	if validator == nil {
-		validator = func(ctx context.Context, request *ExecutionWorkspaceRequest) error {
-			return validateNativeSubstrateRoutableTemplate(ctx, r.SubstrateConfig, request)
-		}
-	}
-	if err := validator(ctx, templateRequest); err != nil {
+	if err := r.validateSubstrateMCPTemplate(ctx, templateRequest); err != nil {
 		return err
 	}
 	if _, _, _, err := r.resolveSubstrateMCPActorPool(ctx, tool, templateRequest); err != nil {
 		return err
 	}
 	return nil
+}
+
+func (r *ToolReconciler) validateSubstrateMCPTemplate(ctx context.Context, request *ExecutionWorkspaceRequest) error {
+	if r.SubstrateTemplateValidator != nil {
+		return r.SubstrateTemplateValidator(ctx, request)
+	}
+	return validateNativeSubstrateRoutableTemplate(ctx, r.SubstrateConfig, request)
 }
 
 func (r *ToolReconciler) substrateMCPTemplateRequest(tool *corev1alpha1.Tool) *ExecutionWorkspaceRequest {
@@ -340,6 +341,9 @@ func (r *ToolReconciler) substrateMCPTemplateRequest(tool *corev1alpha1.Tool) *E
 func (r *ToolReconciler) reconcileSubstrateMCPTool(ctx context.Context, tool *corev1alpha1.Tool) (ctrl.Result, error) {
 	actorSpec := tool.Spec.MCP.SubstrateActor
 	templateRequest := r.substrateMCPTemplateRequest(tool)
+	if err := r.validateSubstrateMCPTemplate(ctx, templateRequest); err != nil {
+		return r.updateStatus(ctx, tool, false, err.Error())
+	}
 	actorID := deterministicSubstrateToolActorID(tool.Namespace, tool.Name, templateRequest.TemplateNamespace, templateRequest.TemplateName)
 	poolName, poolNamespace, pool, err := r.resolveSubstrateMCPActorPool(ctx, tool, templateRequest)
 	if err != nil {
@@ -422,6 +426,7 @@ func (r *ToolReconciler) reconcileSubstrateMCPTool(ctx context.Context, tool *co
 		Template: workspace.TemplateRef{
 			Namespace: templateRequest.TemplateNamespace,
 			Name:      templateRequest.TemplateName,
+			UID:       templateRequest.TemplateUID,
 		},
 		Timeout: cfg.ClaimTimeout,
 	})
@@ -471,6 +476,7 @@ func (r *ToolReconciler) waitForSubstrateMCPToolActor(
 	bootActor := shouldBootSubstrateMCPToolActor(tool, actorID, bootRequested, claim.Created)
 	if _, err := executor.WaitReady(ctx, workspace.WaitReadyRequest{
 		Ref:                   claim.Ref,
+		Template:              claim.Template,
 		Timeout:               timeout,
 		Boot:                  bootActor,
 		SkipDaemonHealthCheck: true,

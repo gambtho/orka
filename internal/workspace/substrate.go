@@ -265,6 +265,9 @@ func (e *SubstrateWorkspaceExecutor) Claim(ctx context.Context, req ClaimRequest
 		}
 		return nil, err
 	}
+	if err := validateSubstrateActorTemplate(actor, req.Template); err != nil {
+		return nil, err
+	}
 	now := e.now()
 	return &ClaimResult{
 		Ref:       substrateRef(req.Template.Namespace, actor),
@@ -309,6 +312,16 @@ func validateSubstrateActorTemplateForOp(op string, actor *substrateActor, templ
 	wantNamespace := strings.TrimSpace(template.Namespace)
 	wantName := strings.TrimSpace(template.Name)
 	if actualNamespace == wantNamespace && actualName == wantName {
+		if template.UID != "" && actor.TemplateUID != template.UID {
+			// Fresh upstream Actors have no current template UID until their first
+			// boot. Their identity must be checked again before readiness is returned.
+			unbooted := actor.TemplateUID == "" && actor.Status == substrateStatusSuspended &&
+				actor.WorkerName == "" && actor.PodName == "" && actor.PodUID == "" &&
+				actor.LastSnapshot == "" && actor.InProgressSnapshot == ""
+			if !unbooted {
+				return NewError(op, ErrorKindFailedPrecondition, "existing Substrate actor uses a different immutable template identity", false, nil)
+			}
+		}
 		return nil
 	}
 	return NewError(
@@ -358,6 +371,15 @@ func (e *SubstrateWorkspaceExecutor) WaitReady(ctx context.Context, req WaitRead
 		)
 	}
 	resumeStartedAt := e.now()
+	if req.Template.UID != "" {
+		actor, err := e.control.GetActor(ctx, actorID)
+		if err != nil {
+			return nil, err
+		}
+		if err := validateSubstrateActorTemplateForOp("wait ready", actor, req.Template); err != nil {
+			return nil, err
+		}
+	}
 	if _, err := e.control.ResumeActor(ctx, actorID, req.Boot); err != nil {
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return nil, contextError("wait ready", ctxErr)
@@ -377,6 +399,11 @@ func (e *SubstrateWorkspaceExecutor) WaitReady(ctx context.Context, req WaitRead
 			}
 		}
 		if err == nil && actor.Status == substrateStatusRunning && strings.TrimSpace(actor.PodIP) != "" {
+			if req.Template.UID != "" {
+				if err := validateSubstrateActorTemplateForOp("wait ready", actor, req.Template); err != nil {
+					return nil, err
+				}
+			}
 			if req.SkipDaemonHealthCheck {
 				readyAt := e.now()
 				resumeLatency := max(readyAt.Sub(resumeStartedAt), 0)

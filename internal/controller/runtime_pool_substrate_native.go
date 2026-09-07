@@ -193,10 +193,12 @@ func (r *RuntimePoolReconciler) reconcileNativeSubstrateRuntimePool(ctx context.
 		if err := r.saveNativeSubstrateState(ctx, cm, record); err != nil {
 			return ctrl.Result{}, err
 		}
-		if err := r.setSubstrateRuntimePoolAnnotation(ctx, pool, substrateNativeCheckpointConsent, ""); err != nil {
-			return ctrl.Result{}, err
-		}
 		return r.nativeSubstrateProgress(ctx, pool, corev1alpha1.RuntimePoolLifecycleStarting, "recorded a unique native Actor creation intent")
+	}
+	// The journal and consent annotation are separate writes. Retry removal for
+	// every running attempt, including recovery after a failed patch or restart.
+	if err := r.setSubstrateRuntimePoolAnnotation(ctx, pool, substrateNativeCheckpointConsent, ""); err != nil {
+		return ctrl.Result{}, err
 	}
 	a := record.Attempt
 	if a.BootID == "" && !a.StartedAt.IsZero() && r.now().Sub(a.StartedAt.Time) > max(3*r.SubstrateConfig.WithDefaults().ClaimTimeout, 5*time.Minute) {

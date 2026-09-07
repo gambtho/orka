@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -26,8 +27,8 @@ import (
 )
 
 // Native templates have no labels or owner references. Orka keeps the owner
-// and immutable revision bindings in its own ConfigMaps, before calling the
-// provider. These records contain public configuration, never credentials.
+// and immutable revision bindings in its own ConfigMaps, before creating
+// provider revisions. These records contain public configuration, never credentials.
 // They are not provider CRDs and are never consumed by Substrate.
 type substrateTemplateStore interface {
 	Get(context.Context, string, string) (*unstructured.Unstructured, error)
@@ -278,12 +279,7 @@ func (s *nativeSubstrateTemplateStore) put(ctx context.Context, previous, desire
 			return err
 		}
 	}
-	if binding.Pending == nil {
-		binding.Pending = &pending
-		if err := s.save(ctx, cm, binding); err != nil {
-			return err
-		}
-	}
+	freshIntent := binding.Pending == nil
 	api, err := s.r.substrateNativeClient()
 	if err != nil {
 		return err
@@ -292,7 +288,25 @@ func (s *nativeSubstrateTemplateStore) put(ctx context.Context, previous, desire
 	ref := &ateapipb.ObjectRef{Atespace: binding.Atespace, Name: pending.Name}
 	observed, err := api.Control.GetActorTemplate(ctx, &ateapipb.GetActorTemplateRequest{ActorTemplate: ref})
 	if status.Code(err) == codes.NotFound {
+		if !freshIntent {
+			// A previous Create may still commit after its client lost the response.
+			// Keep its ownership intent until an exact revision can be observed.
+			return fmt.Errorf("native Substrate template creation is unresolved; preserving its pending intent")
+		}
+		binding.Pending = &pending
+		if err := s.save(ctx, cm, binding); err != nil {
+			return err
+		}
 		observed, err = api.Control.CreateActorTemplate(ctx, &ateapipb.CreateActorTemplateRequest{ActorTemplate: native})
+		if status.Code(err) == codes.InvalidArgument || status.Code(err) == codes.FailedPrecondition {
+			// Upstream returns these only before persisting a template. This is
+			// the sole create attempt for the freshly recorded intent, so corrected
+			// configuration may safely choose a different immutable revision.
+			binding.Pending = nil
+			if saveErr := s.save(ctx, cm, binding); saveErr != nil {
+				return errors.Join(fmt.Errorf("create native Substrate template: %w", err), saveErr)
+			}
+		}
 		if status.Code(err) == codes.AlreadyExists {
 			observed, err = api.Control.GetActorTemplate(ctx, &ateapipb.GetActorTemplateRequest{ActorTemplate: ref})
 		}

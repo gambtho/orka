@@ -114,6 +114,8 @@ type nativeTemplateTestAPI struct {
 	ateapipb.ControlClient
 	templates       map[string]*ateapipb.ActorTemplate
 	creates         int
+	createCalls     int
+	createErr       error
 	failAfterCreate bool
 }
 
@@ -126,6 +128,10 @@ func (a *nativeTemplateTestAPI) GetActorTemplate(_ context.Context, req *ateapip
 }
 
 func (a *nativeTemplateTestAPI) CreateActorTemplate(_ context.Context, req *ateapipb.CreateActorTemplateRequest, _ ...grpc.CallOption) (*ateapipb.ActorTemplate, error) {
+	a.createCalls++
+	if a.createErr != nil {
+		return nil, a.createErr
+	}
 	value := proto.Clone(req.GetActorTemplate()).(*ateapipb.ActorTemplate)
 	key := value.GetMetadata().GetAtespace() + "/" + value.GetMetadata().GetName()
 	if a.templates[key] != nil {

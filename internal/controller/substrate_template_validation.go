@@ -26,7 +26,11 @@ func validateNativeSubstrateRoutableTemplate(ctx context.Context, cfg SubstrateC
 	if err != nil {
 		return fmt.Errorf("read native Substrate MCP template: %w", err)
 	}
-	return validateNativeSubstrateRoute(template)
+	if err := validateNativeSubstrateRoute(template); err != nil {
+		return err
+	}
+	request.TemplateUID = template.GetMetadata().GetUid()
+	return nil
 }
 
 func validateNativeSubstrateRoute(template *ateapipb.ActorTemplate) error {

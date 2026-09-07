@@ -77,7 +77,10 @@ func TestSubstrateActorPoolReconcilerPrecreatesActorsAndUpdatesDensity(t *testin
 			return executor, nil
 		},
 	}
-	reconciler.SubstrateTemplateValidator = substrateFixtureTemplateValidator(reconciler.Client)
+	reconciler.SubstrateTemplateValidator = func(ctx context.Context, request *ExecutionWorkspaceRequest) error {
+		request.TemplateUID = "validated-native-template-uid"
+		return substrateFixtureTemplateValidator(reconciler.Client)(ctx, request)
+	}
 
 	req := ctrl.Request{NamespacedName: types.NamespacedName{Name: "codex-pool", Namespace: "default"}}
 	if _, err := reconciler.Reconcile(context.Background(), req); err != nil {
@@ -102,6 +105,9 @@ func TestSubstrateActorPoolReconcilerPrecreatesActorsAndUpdatesDensity(t *testin
 	}
 	if !executor.convergeCalled {
 		t.Fatal("ConvergeSubstrateActors was not called")
+	}
+	if executor.convergeTemplate.UID != "validated-native-template-uid" {
+		t.Fatal("actor pool discarded the validated native template identity")
 	}
 	if !executor.closeCalled {
 		t.Fatal("Substrate pool executor was not closed after reconcile")
@@ -493,12 +499,13 @@ func TestSubstrateActorPoolReconcilerFinalizerWaitsForActiveToolLease(t *testing
 }
 
 type recordingSubstratePoolExecutor struct {
-	convergeCalled bool
-	convergeTarget int
-	pruneCalled    bool
-	pruneTarget    int
-	closeCalled    bool
-	density        workspace.Density
+	convergeCalled   bool
+	convergeTarget   int
+	convergeTemplate workspace.TemplateRef
+	pruneCalled      bool
+	pruneTarget      int
+	closeCalled      bool
+	density          workspace.Density
 }
 
 func (e *recordingSubstratePoolExecutor) ConvergeSubstrateActors(
@@ -509,6 +516,7 @@ func (e *recordingSubstratePoolExecutor) ConvergeSubstrateActors(
 ) (int, int, error) {
 	e.convergeCalled = true
 	e.convergeTarget = target
+	e.convergeTemplate = template
 	return target, 0, nil
 }
 
