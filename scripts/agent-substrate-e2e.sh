@@ -105,9 +105,13 @@ build_image() {
 }
 native_template_manifest() {
   local name="$1" image="$2" public_key="$3"
+  # DurableDir mounts hide the image's writable /workspace directory. Restore
+  # its permissions before the daemon drops command children to UID 1000.
   jq -n --arg name "${name}" --arg image "${image}" --arg publicKey "${public_key}" '
     {metadata:{atespace:"orka-system",name:$name},workerSelector:{matchLabels:{"orka.ai/native-pool":"conformance"}},
      containers:[{name:"server",image:$image,env:([{name:"ORKA_WORKSPACE_AGENT_LISTEN_ADDR",value:":80"}] + (if $name == "orka-direct" then [{name:"ORKA_WORKSPACE_BOOTSTRAP_PUBLIC_KEY",value:$publicKey}] else [] end)),
+       command:(if $name == "orka-direct" then ["/bin/sh","-ec"] else [] end),
+       args:(if $name == "orka-direct" then ["chmod 1777 /workspace; exec /orka-workspace-agent"] else [] end),
        readyz:{httpGet:{path:(if $name == "orka-direct" then "/v1/health" else "/healthz" end),port:80}},
        securityContext:{capabilities:{drop:["ALL"],add:["NET_BIND_SERVICE","SETUID","SETGID","CHOWN","KILL"]}},
        volumeMounts:(if $name == "orka-direct" then [{name:"identity",mountPath:"/run/orka-substrate-identity"},{name:"workspace",mountPath:"/workspace"}] else [] end)}],

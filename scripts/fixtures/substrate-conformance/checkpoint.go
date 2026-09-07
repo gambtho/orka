@@ -112,7 +112,7 @@ func restoreDataFork(
 		WorkDir: "/workspace", Timeout: time.Minute,
 	})
 	if err != nil || result == nil || result.ExitCode != 0 || result.Stdout != proofContents {
-		return fmt.Errorf("native Data Tag did not restore independent workspace files")
+		return commandFailure("native Data Tag did not restore independent workspace files", cfg, result, err)
 	}
 	_, err = executor.Delete(ctx, workspace.DeleteRequest{Ref: ref, Timeout: 2 * time.Minute})
 	return err

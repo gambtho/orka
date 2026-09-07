@@ -79,13 +79,13 @@ func run() error {
 		WorkDir: "/workspace", Timeout: 30 * time.Second,
 	})
 	if err != nil || result == nil || result.ExitCode != 0 || result.Stdout != proofContents {
-		return fmt.Errorf("native direct long command or file write failed")
+		return commandFailure("native direct long command or file write failed", cfg, result, err)
 	}
 	download, err := executor.Download(ctx, workspace.DownloadRequest{
 		Ref: claim.Ref, Paths: []string{"/workspace/proof"}, Timeout: time.Minute,
 	})
 	if err != nil || len(download.Artifacts) != 1 || string(download.Artifacts[0].Data) != proofContents {
-		return fmt.Errorf("native direct file download failed")
+		return commandFailure("native direct file download failed", cfg, nil, err)
 	}
 	result, err = executor.Exec(ctx, workspace.ExecRequest{
 		Ref:     claim.Ref,

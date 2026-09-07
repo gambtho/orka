@@ -1365,6 +1365,9 @@ func (s *workspaceAgentServer) runExec(
 		cmd.Stderr = stderr
 		err = startCommand(cmd)
 	}
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "start command: %v", err)
+	}
 	groupID := commandProcessGroupID(cmd)
 	if err == nil {
 		err = waitCommand(cmd)
