@@ -3,6 +3,7 @@ package controller
 import (
 	"encoding/json"
 	"fmt"
+	"path"
 	"strings"
 
 	corev1 "k8s.io/api/core/v1"
@@ -130,6 +131,13 @@ func nativeSubstrateSupervisorContainer(container corev1.Container) (*ateapipb.C
 			return nil, fmt.Errorf("substrate does not support subPath or read-only mount overrides")
 		}
 		compiled.VolumeMounts = append(compiled.VolumeMounts, &ateapipb.VolumeMount{Name: mount.Name, MountPath: mount.MountPath})
+		if mount.Name == substrateDurableWorkspaceVolume && mount.MountPath == substrateDurableWorkspaceMountPath {
+			// Upstream creates DurableDir roots as 0700. Permit traversal to
+			// each child's private 0700 workspace on fresh and restored mounts.
+			// Both paths are controller constants, never operator shell input.
+			compiled.Args[0] = fmt.Sprintf(`chmod 0755 /; chmod 0711 %s %s; exec "$@"`,
+				path.Dir(substrateDurableWorkspaceMountPath), substrateDurableWorkspaceMountPath)
+		}
 	}
 	return compiled, nil
 }

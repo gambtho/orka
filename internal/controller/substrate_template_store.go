@@ -327,10 +327,12 @@ func (s *nativeSubstrateTemplateStore) materialize(
 			return nil, err
 		}
 		observed, err = api.Control.CreateActorTemplate(ctx, &ateapipb.CreateActorTemplateRequest{ActorTemplate: native})
-		if status.Code(err) == codes.InvalidArgument || status.Code(err) == codes.FailedPrecondition {
-			// Upstream returns these only before persisting a template. This is
+		switch status.Code(err) {
+		case codes.InvalidArgument, codes.FailedPrecondition, codes.Unauthenticated:
+			// Upstream rejects authentication before invoking the create handler
+			// and returns these validation errors before persisting a template. This is
 			// the sole create attempt for the freshly recorded intent, so corrected
-			// configuration may safely choose a different immutable revision.
+			// credentials or configuration may safely retry or choose another revision.
 			binding.Pending = nil
 			if saveErr := s.save(ctx, cm, binding); saveErr != nil {
 				return nil, errors.Join(fmt.Errorf("create native Substrate template: %w", err), saveErr)

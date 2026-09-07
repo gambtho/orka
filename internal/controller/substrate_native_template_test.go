@@ -15,6 +15,8 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
+	acpworkspacev1alpha1 "github.com/orka-agents/orka/api/acp.workspace/v1alpha1"
+	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	ateapipb "github.com/orka-agents/orka/internal/substratepb"
 	"github.com/orka-agents/orka/internal/workspace"
 	"google.golang.org/grpc"
@@ -25,7 +27,11 @@ import (
 
 func nativeSubstrateTestRender(t *testing.T, r *RuntimePoolReconciler, nonce string) *unstructured.Unstructured {
 	t.Helper()
-	pool := runtimePoolSubstrateTestObject()
+	return nativeSubstrateTestRenderPool(t, r, runtimePoolSubstrateTestObject(), nonce)
+}
+
+func nativeSubstrateTestRenderPool(t *testing.T, r *RuntimePoolReconciler, pool *corev1alpha1.RuntimePool, nonce string) *unstructured.Unstructured {
+	t.Helper()
 	cfg, err := r.runtimePoolConfigForDrain(pool)
 	if err != nil {
 		t.Fatal(err)
@@ -95,40 +101,64 @@ func TestNativeSubstrateStartupPreservesArgumentsAndFailsClosed(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("native Substrate runtime images use a POSIX shell")
 	}
-	r, _ := runtimePoolSubstrateTestReconciler(t, nil, &fakeSubstrateActorControl{})
-	object := nativeSubstrateTestRender(t, r, "nonce")
-	containers, _, _ := unstructured.NestedSlice(object.Object, "spec", "containers")
-	container := containers[0].(map[string]any)
-	container["command"] = []any{"/bin/sh", "-c", `printf 'argv<%s>\n' "$@"`, "child", "command argument"}
-	container["args"] = []any{"literal $HOME; exit 91", "with 'quotes' and \"double quotes\""}
-	if err := unstructured.SetNestedSlice(object.Object, containers, "spec", "containers"); err != nil {
-		t.Fatal(err)
-	}
-	native, err := nativeSubstrateRuntimeTemplate(object)
-	if err != nil {
-		t.Fatal(err)
-	}
-	compiled := native.GetContainers()[0]
 	// Substitute chmod so this executes the real compiled startup program
-	// without changing permissions on the test machine's root directory.
+	// without changing permissions on the test machine's directories.
 	binDir := t.TempDir()
-	chmod := "#!/bin/sh\nprintf 'chmod<%s><%s>\\n' \"$1\" \"$2\"\nexit \"${ORKA_TEST_CHMOD_EXIT:-0}\"\n"
+	chmod := `#!/bin/sh
+printf 'chmod'
+printf '<%s>' "$@"
+printf '\n'
+for value in "$@"; do
+  if [ "$value" = "${ORKA_TEST_CHMOD_FAIL_PATH:-}" ]; then exit 17; fi
+done
+`
 	if err := os.WriteFile(filepath.Join(binDir, "chmod"), []byte(chmod), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	for _, fail := range []bool{false, true} {
-		cmd := exec.CommandContext(t.Context(), compiled.GetCommand()[0], append(compiled.GetCommand()[1:], compiled.GetArgs()...)...)
-		cmd.Env = []string{"PATH=" + binDir}
-		want := "chmod<0755></>\n"
-		if fail {
-			cmd.Env = append(cmd.Env, "ORKA_TEST_CHMOD_EXIT=17")
-		} else {
-			want += "argv<command argument>\nargv<literal $HOME; exit 91>\nargv<with 'quotes' and \"double quotes\">\n"
-		}
-		output, err := cmd.CombinedOutput()
-		if (err != nil) != fail || string(output) != want {
-			t.Fatalf("startup with failed permissions=%t: output=%q err=%v", fail, output, err)
-		}
+	for _, tc := range []struct {
+		name, failPath string
+		durable        bool
+	}{
+		{name: "ephemeral"},
+		{name: "ephemeral root failure", failPath: "/"},
+		{name: "durable", durable: true},
+		{name: "durable root failure", durable: true, failPath: "/"},
+		{name: "durable parent failure", durable: true, failPath: "/durable"},
+		{name: "durable mount failure", durable: true, failPath: substrateDurableWorkspaceMountPath},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r, _ := runtimePoolSubstrateTestReconciler(t, nil, &fakeSubstrateActorControl{})
+			pool := runtimePoolSubstrateTestObject()
+			if tc.durable {
+				pool.Spec.ExecutionWorkspace.Substrate.SuspendMode = string(acpworkspacev1alpha1.SubstrateSuspendModeDataOnly)
+			}
+			object := nativeSubstrateTestRenderPool(t, r, pool, "nonce")
+			containers, _, _ := unstructured.NestedSlice(object.Object, "spec", "containers")
+			container := containers[0].(map[string]any)
+			container["command"] = []any{"/bin/sh", "-c", `printf 'argv<%s>\n' "$@"`, "child", "command argument"}
+			container["args"] = []any{"literal $HOME; exit 91", "with 'quotes' and \"double quotes\""}
+			if err := unstructured.SetNestedSlice(object.Object, containers, "spec", "containers"); err != nil {
+				t.Fatal(err)
+			}
+			native, err := nativeSubstrateRuntimeTemplate(object)
+			if err != nil {
+				t.Fatal(err)
+			}
+			compiled := native.GetContainers()[0]
+			cmd := exec.CommandContext(t.Context(), compiled.GetCommand()[0], append(compiled.GetCommand()[1:], compiled.GetArgs()...)...)
+			cmd.Env = []string{"PATH=" + binDir, "ORKA_TEST_CHMOD_FAIL_PATH=" + tc.failPath}
+			want := "chmod<0755></>\n"
+			if tc.durable && tc.failPath != "/" {
+				want += "chmod<0711></durable><" + substrateDurableWorkspaceMountPath + ">\n"
+			}
+			if tc.failPath == "" {
+				want += "argv<command argument>\nargv<literal $HOME; exit 91>\nargv<with 'quotes' and \"double quotes\">\n"
+			}
+			output, err := cmd.CombinedOutput()
+			if (err != nil) != (tc.failPath != "") || string(output) != want {
+				t.Fatalf("startup output=%q err=%v; want %q", output, err, want)
+			}
+		})
 	}
 }
 

@@ -26,7 +26,7 @@ cleanup() {
   local rc=$?
   for pid in "${PORT_FORWARD_PIDS[@]}"; do kill "${pid}" 2>/dev/null || true; done
   if (( rc )) && [[ "${CLUSTER_PREPARED:-0}" == 1 ]]; then
-    kubectl -n orka-system get tasks,runtimepools,executionworkspaces,executionworkspacecheckpoints 2>/dev/null || true
+    runtime_diagnostics
     kubectl get pods -A 2>/dev/null || true
     job_diagnostics substrate-direct-conformance
     job_diagnostics native-mcp-client
@@ -36,6 +36,18 @@ cleanup() {
   fi
   if [[ "${KEEP_CLUSTER}" != 1 && "${CLUSTER_PREPARED:-0}" == 1 ]]; then kind delete cluster --name "${KIND_CLUSTER}"; fi
   exit "${rc}"
+}
+runtime_diagnostics() {
+  local bootstrap_secret=""
+  local ORKA_REDACT_SECRET_VARS=(bootstrap_secret)
+  if [[ -f "${TMP_ROOT}/bootstrap-token" ]]; then bootstrap_secret="$(<"${TMP_ROOT}/bootstrap-token")"; fi
+  # Capture provisioning failures while pools still exist. Task cleanup can
+  # remove them before the outer success deadline expires. Omit all specs,
+  # Task results, transcripts, and provider identity records.
+  kubectl -n orka-system --request-timeout=15s get tasks,runtimepools,executionworkspaces,executionworkspacecheckpoints -o json 2>/dev/null |
+    jq '[.items[] | {kind, name: .metadata.name, phase: .status.phase, state: .status.state,
+      lifecycle: .status.lifecycle, message: .status.message,
+      conditions: [.status.conditions[]? | {type, status, reason, message}]}]' | redact >&2 || true
 }
 workload_logs() {
   local namespace="$1" bootstrap_secret=""
@@ -74,10 +86,27 @@ wait_job() {
   done
 }
 wait_field() {
-  local resource="$1" name="$2" expression="$3" expected="$4" seconds="${5:-600}" start
+  local resource="$1" name="$2" expression="$3" expected="$4" seconds="${5:-600}" start now next_diagnostics object
   start=$(date +%s)
-  until [[ "$(kubectl -n orka-system get "${resource}" "${name}" -o json 2>/dev/null | jq -r "${expression}" || true)" == "${expected}" ]]; do
-    if (( $(date +%s) - start > seconds )); then printf 'Timed out waiting for %s/%s %s = %s\n' "${resource}" "${name}" "${expression}" "${expected}" >&2; return 1; fi
+  next_diagnostics=$((start + 30))
+  while true; do
+    object="$(kubectl -n orka-system --request-timeout=15s get "${resource}" "${name}" -o json 2>/dev/null)" || return 1
+    if [[ "$(jq -r "${expression}" <<<"${object}")" == "${expected}" ]]; then return 0; fi
+    if [[ "${resource}" == task ]] && jq -e '.status.phase == "Failed"' <<<"${object}" >/dev/null; then
+      printf 'Task/%s failed before %s = %s\n' "${name}" "${expression}" "${expected}" >&2
+      runtime_diagnostics
+      return 1
+    fi
+    now=$(date +%s)
+    if (( now - start >= seconds )); then
+      printf 'Timed out waiting for %s/%s %s = %s\n' "${resource}" "${name}" "${expression}" "${expected}" >&2
+      runtime_diagnostics
+      return 1
+    fi
+    if [[ "${resource}" == task ]] && (( now >= next_diagnostics )); then
+      runtime_diagnostics
+      next_diagnostics=$((now + 30))
+    fi
     sleep 2
   done
 }

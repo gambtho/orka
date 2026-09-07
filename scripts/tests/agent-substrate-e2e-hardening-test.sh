@@ -41,6 +41,32 @@ if wait_job unreadable 0; then
   exit 1
 fi
 
+# ACP provisioning failures must stop the phase wait before garbage collection
+# removes the pool's diagnostic status, while an expected failure still passes.
+runtime_diagnostics() { printf 'runtime status captured\n' >&2; }
+job_status='{"status":{"phase":"Failed"}}'
+kubectl() { printf '%s\n' "${job_status}"; }
+wait_field task failed '.status.phase' Failed
+if wait_field task failed '.status.phase' Running 600 2>"${test_root}/error"; then
+  echo 'failed ACP task passed its running wait' >&2
+  exit 1
+fi
+grep -Fq 'Task/failed failed' "${test_root}/error"
+grep -Fq 'runtime status captured' "${test_root}/error"
+job_status='{"status":{}}'
+if wait_field task incomplete '.status.phase' Running 0 2>"${test_root}/error"; then
+  echo 'incomplete ACP task passed its running wait' >&2
+  exit 1
+fi
+grep -Fq 'Timed out' "${test_root}/error"
+kubectl() { return 7; }
+if wait_field task unreadable '.status.phase' Running 0; then
+  echo 'unreadable ACP task passed its running wait' >&2
+  exit 1
+fi
+unset -f runtime_diagnostics
+source "${root}/scripts/agent-substrate-e2e.sh"
+
 # Job logs pass through redaction before cleanup prints them. Never dump a Pod
 # spec, even when a container fails before it can produce logs.
 saved_run_dir="${TMP_ROOT}"
@@ -50,14 +76,18 @@ printf 'fixture-bootstrap-value\n' >"${TMP_ROOT}/bootstrap-token"
 kubectl() {
   case "$*" in
     *'get pods'*) printf '{"items":[{"metadata":{"name":"failed-pod"},"spec":{"env":"spec-must-not-be-printed"},"status":{"phase":"Failed"}}]}\n' ;;
+    *'get tasks,runtimepools,'*) printf '{"items":[{"kind":"RuntimePool","metadata":{"name":"blocked-pool"},"spec":{"env":"spec-must-not-be-printed"},"status":{"lifecycle":"Degraded","message":"native provisioning failed fixture-bootstrap-value","result":"result-must-not-be-printed"}}]}\n' ;;
     *'logs '*) printf 'native boot failed\nAuthorization: Bearer fixture-header-value\nfixture-bootstrap-value\n' ;;
     *) return 9 ;;
   esac
 }
 job_diagnostics failed >"${test_root}/diagnostics.log" 2>&1
+runtime_diagnostics >>"${test_root}/diagnostics.log" 2>&1
 grep -Fq 'native boot failed' "${test_root}/diagnostics.log"
 grep -Fq 'failed-pod' "${test_root}/diagnostics.log"
-if grep -Eq 'fixture-header-value|fixture-bootstrap-value|spec-must-not-be-printed' "${test_root}/diagnostics.log"; then
+grep -Fq 'blocked-pool' "${test_root}/diagnostics.log"
+grep -Fq 'native provisioning failed' "${test_root}/diagnostics.log"
+if grep -Eq 'fixture-header-value|fixture-bootstrap-value|spec-must-not-be-printed|result-must-not-be-printed' "${test_root}/diagnostics.log"; then
   echo 'conformance diagnostics exposed credentials or Pod specs' >&2
   exit 1
 fi
