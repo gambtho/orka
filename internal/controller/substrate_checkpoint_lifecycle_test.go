@@ -59,7 +59,7 @@ func nativeExportCheckpoint(t *testing.T, h *nativeRuntimeTestHarness, ws *works
 	if err := h.r.Create(t.Context(), cp); err != nil {
 		t.Fatal(err)
 	}
-	r := &SubstrateCheckpointReconciler{RuntimePools: h.r}
+	r := &SubstrateCheckpointReconciler{RuntimePools: h.r, CheckpointAPIInstalled: true}
 	for range 8 {
 		if _, err := r.Reconcile(t.Context(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(cp)}); err != nil {
 			t.Fatal(err)
@@ -132,7 +132,7 @@ func TestNativeSubstratePublicCheckpointSurvivesSourceDeletionAndForks(t *testin
 	if err := h.r.Delete(t.Context(), cp); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := (&SubstrateCheckpointReconciler{RuntimePools: h.r}).Reconcile(t.Context(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(cp)}); err != nil {
+	if _, err := (&SubstrateCheckpointReconciler{RuntimePools: h.r, CheckpointAPIInstalled: true}).Reconcile(t.Context(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(cp)}); err != nil {
 		t.Fatal(err)
 	}
 	_, artifact, err := h.r.readSubstrateCheckpointArtifact(t.Context(), checkpoint.Digest)
@@ -199,7 +199,7 @@ func TestNativeSubstrateRecoveryReexportsImportedCheckpoint(t *testing.T) {
 	if err := h.r.Delete(t.Context(), cp); err != nil {
 		t.Fatal(err)
 	}
-	r := &SubstrateCheckpointReconciler{RuntimePools: h.r}
+	r := &SubstrateCheckpointReconciler{RuntimePools: h.r, CheckpointAPIInstalled: true}
 	if _, err := r.Reconcile(t.Context(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(cp)}); err != nil {
 		t.Fatal(err)
 	}
@@ -313,7 +313,7 @@ func TestNativeSubstrateCheckpointStatusAndHistoricalTemplateCollection(t *testi
 	h.until(t, nativeTestSuspended)
 	cp := nativeExportCheckpoint(t, h, ws, false)
 	old := *h.record(t).Checkpoint
-	r := &SubstrateCheckpointReconciler{RuntimePools: h.r}
+	r := &SubstrateCheckpointReconciler{RuntimePools: h.r, CheckpointAPIInstalled: true}
 	version := cp.ResourceVersion
 	if _, err := r.Reconcile(t.Context(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(cp)}); err != nil {
 		t.Fatal(err)

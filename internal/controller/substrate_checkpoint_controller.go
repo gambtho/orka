@@ -28,7 +28,10 @@ const substratePublicCheckpointFinalizer = "orka.ai/substrate-checkpoint-referen
 
 // SubstrateCheckpointReconciler exports only already verified Data artifacts.
 // It shares native configuration and journal ownership with RuntimePool.
-type SubstrateCheckpointReconciler struct{ RuntimePools *RuntimePoolReconciler }
+type SubstrateCheckpointReconciler struct {
+	RuntimePools           *RuntimePoolReconciler
+	CheckpointAPIInstalled bool
+}
 
 // +kubebuilder:rbac:groups=workspace.orka.ai,resources=executionworkspacecheckpoints,verbs=get;list;watch;update;patch
 // +kubebuilder:rbac:groups=workspace.orka.ai,resources=executionworkspacecheckpoints/status,verbs=get;update;patch
@@ -39,6 +42,9 @@ func (r *SubstrateCheckpointReconciler) Reconcile(ctx context.Context, req ctrl.
 	pools := r.RuntimePools
 	if strings.HasPrefix(req.Name, "catalog/") || strings.HasPrefix(req.Name, "template/") {
 		return r.collect(ctx, req)
+	}
+	if !r.CheckpointAPIInstalled {
+		return ctrl.Result{}, nil
 	}
 	checkpoint := &workspacev1alpha1.ExecutionWorkspaceCheckpoint{}
 	if err := pools.nativeSubstrateReader().Get(ctx, req.NamespacedName, checkpoint); err != nil {
@@ -243,7 +249,9 @@ func (r *SubstrateCheckpointReconciler) collect(ctx context.Context, req ctrl.Re
 }
 
 func (r *SubstrateCheckpointReconciler) SetupWithManager(mgr ctrl.Manager) error {
-	return ctrl.NewControllerManagedBy(mgr).For(&workspacev1alpha1.ExecutionWorkspaceCheckpoint{}).
+	// Private catalogs and template journals exist without the optional public
+	// checkpoint API, and must keep collecting after admission is disabled.
+	builder := ctrl.NewControllerManagedBy(mgr).Named("substratecheckpoint").
 		Watches(&corev1.ConfigMap{}, handler.EnqueueRequestsFromMapFunc(func(_ context.Context, object client.Object) []reconcile.Request {
 			prefix := ""
 			if object.GetLabels()[substrateCatalogLabel] == substrateOwnedLabelValue {
@@ -256,5 +264,9 @@ func (r *SubstrateCheckpointReconciler) SetupWithManager(mgr ctrl.Manager) error
 				return nil
 			}
 			return []reconcile.Request{{NamespacedName: types.NamespacedName{Namespace: object.GetNamespace(), Name: prefix + object.GetName()}}}
-		})).Named("substratecheckpoint").Complete(r)
+		}))
+	if r.CheckpointAPIInstalled {
+		builder = builder.For(&workspacev1alpha1.ExecutionWorkspaceCheckpoint{})
+	}
+	return builder.Complete(r)
 }

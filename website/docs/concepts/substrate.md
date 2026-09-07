@@ -69,6 +69,9 @@ admission so existing workspaces can still finish cleanup.
 Keep that configuration until retained checkpoint catalogs and template journals
 are collected, even after the last RuntimePool is gone. Controller startup checks
 those records in the controller namespace when Substrate admission is disabled.
+Their cleanup watches run even when the optional public checkpoint CRD is
+absent; public checkpoint and restore capabilities remain unavailable until
+that API is installed and its reconciliation is enabled.
 
 The infrastructure template must select exactly one WorkerPool and specify a
 gVisor `sandboxConfig`, resource limits, and snapshot storage. The controller

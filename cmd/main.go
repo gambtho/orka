@@ -1467,14 +1467,16 @@ func main() {
 			setupLog.Error(err, "unable to discover substrate checkpoint API")
 			os.Exit(1)
 		}
-		if checkpointAPIInstalled {
-			if err := (&controller.SubstrateCheckpointReconciler{RuntimePools: runtimePoolReconciler}).SetupWithManager(mgr); err != nil {
-				setupLog.Error(err, "unable to create controller", "controller", "SubstrateCheckpoint")
-				os.Exit(1)
-			}
-			substrateCheckpointsEnabled = true
-		} else {
-			setupLog.Info("checkpoint CRD is not installed; skipping substrate checkpoint controller")
+		checkpointReconciler := &controller.SubstrateCheckpointReconciler{
+			RuntimePools: runtimePoolReconciler, CheckpointAPIInstalled: checkpointAPIInstalled,
+		}
+		if err := checkpointReconciler.SetupWithManager(mgr); err != nil {
+			setupLog.Error(err, "unable to create controller", "controller", "SubstrateCheckpoint")
+			os.Exit(1)
+		}
+		substrateCheckpointsEnabled = checkpointAPIInstalled
+		if !checkpointAPIInstalled {
+			setupLog.Info("checkpoint CRD is not installed; substrate catalog and template cleanup remain enabled")
 		}
 	}
 
