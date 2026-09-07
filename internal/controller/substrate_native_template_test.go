@@ -3,6 +3,10 @@ package controller
 import (
 	"context"
 	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -84,6 +88,47 @@ func TestNativeSubstrateTemplateDiscoveryUsesProviderInventory(t *testing.T) {
 	name, _, _ := unstructured.NestedString(object.Object, "spec", "workerPoolRef", "name")
 	if namespace != substrateTestWorkerNamespace || name != substrateTestWorkerPoolName {
 		t.Fatalf("native infrastructure selected WorkerPool %s/%s outside its provider inventory", namespace, name)
+	}
+}
+
+func TestNativeSubstrateStartupPreservesArgumentsAndFailsClosed(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("native Substrate runtime images use a POSIX shell")
+	}
+	r, _ := runtimePoolSubstrateTestReconciler(t, nil, &fakeSubstrateActorControl{})
+	object := nativeSubstrateTestRender(t, r, "nonce")
+	containers, _, _ := unstructured.NestedSlice(object.Object, "spec", "containers")
+	container := containers[0].(map[string]any)
+	container["command"] = []any{"/bin/sh", "-c", `printf 'argv<%s>\n' "$@"`, "child", "command argument"}
+	container["args"] = []any{"literal $HOME; exit 91", "with 'quotes' and \"double quotes\""}
+	if err := unstructured.SetNestedSlice(object.Object, containers, "spec", "containers"); err != nil {
+		t.Fatal(err)
+	}
+	native, err := nativeSubstrateRuntimeTemplate(object)
+	if err != nil {
+		t.Fatal(err)
+	}
+	compiled := native.GetContainers()[0]
+	// Substitute chmod so this executes the real compiled startup program
+	// without changing permissions on the test machine's root directory.
+	binDir := t.TempDir()
+	chmod := "#!/bin/sh\nprintf 'chmod<%s><%s>\\n' \"$1\" \"$2\"\nexit \"${ORKA_TEST_CHMOD_EXIT:-0}\"\n"
+	if err := os.WriteFile(filepath.Join(binDir, "chmod"), []byte(chmod), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, fail := range []bool{false, true} {
+		cmd := exec.CommandContext(t.Context(), compiled.GetCommand()[0], append(compiled.GetCommand()[1:], compiled.GetArgs()...)...)
+		cmd.Env = []string{"PATH=" + binDir}
+		want := "chmod<0755></>\n"
+		if fail {
+			cmd.Env = append(cmd.Env, "ORKA_TEST_CHMOD_EXIT=17")
+		} else {
+			want += "argv<command argument>\nargv<literal $HOME; exit 91>\nargv<with 'quotes' and \"double quotes\">\n"
+		}
+		output, err := cmd.CombinedOutput()
+		if (err != nil) != fail || string(output) != want {
+			t.Fatalf("startup with failed permissions=%t: output=%q err=%v", fail, output, err)
+		}
 	}
 }
 

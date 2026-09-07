@@ -15,6 +15,8 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
+const substrateNativeStartupShell = "/bin/sh"
+
 // nativeSubstrateRuntimeTemplate is a pure compiler. Kubernetes-only mounts,
 // references, probes and resource fields never reach the provider's API.
 func nativeSubstrateRuntimeTemplate(object *unstructured.Unstructured) (*ateapipb.ActorTemplate, error) {
@@ -56,8 +58,19 @@ func nativeSubstrateRuntimeTemplate(object *unstructured.Unstructured) (*ateapip
 	if len(container.Env) > 32 {
 		return nil, fmt.Errorf("substrate supervisor has %d environment entries; upstream admits at most 32", len(container.Env))
 	}
+	if len(container.Command) == 0 || container.Command[0] == "" {
+		return nil, fmt.Errorf("substrate supervisor requires an explicit command")
+	}
+	// The pinned provider creates the rootfs overlay's upper directory as
+	// 0700. Restore traversal of this Actor's private root before the
+	// supervisor starts unprivileged children. Keep command arguments out of
+	// the shell program, and fail startup if the permission repair fails.
+	args := make([]string, 0, 2+len(container.Command)+len(container.Args))
+	args = append(args, `chmod 0755 /; exec "$@"`, "orka-substrate-init")
+	args = append(args, container.Command...)
+	args = append(args, container.Args...)
 	compiled := &ateapipb.Container{
-		Name: container.Name, Image: container.Image, Command: container.Command, Args: container.Args,
+		Name: container.Name, Image: container.Image, Command: []string{substrateNativeStartupShell, "-ec"}, Args: args,
 		Readyz: &ateapipb.ContainerReadyz{HttpGet: &ateapipb.HTTPGetAction{Path: harnessv2.HealthPath, Port: substrateActorListenPort}, TimeoutSeconds: 120},
 		SecurityContext: &ateapipb.SecurityContext{Capabilities: &ateapipb.Capabilities{
 			Drop: []string{substrateNativeAllCapabilities}, Add: []string{"CHOWN", "KILL", "SETGID", "SETUID"},
