@@ -97,6 +97,11 @@ The router's request timeout must cover the longest supported operation; the
 local suite sets `--route-timeout=30m` and uses Envoy info logging. Longer router
 shutdown survival also needs a suitable drain timeout and Pod termination grace.
 
+For direct commands with an explicit daemon timeout, the client allows up to
+five additional seconds to collect the final exit status. A caller context can
+impose a tighter overall deadline or cancel the wait. Timeout conformance requires
+the daemon's exit code 124; connection or authentication failures do not count.
+
 Upstream currently authenticates control clients but does not implement native
 resource authorization/RBAC. Treat its control API, router, template operators,
 and worker namespace as a trusted infrastructure boundary. Kubernetes `use`

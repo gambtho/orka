@@ -10,6 +10,13 @@ import (
 
 const maxCommandFailureBytes = 2048
 
+func verifyCommandTimeout(cfg workspace.SubstrateConfig, result *workspace.ExecResult, err error) error {
+	if result != nil && result.ExitCode == 124 && workspace.IsKind(err, workspace.ErrorKindCommandFailed) {
+		return nil
+	}
+	return commandFailure("native command timeout did not return the daemon timeout result", cfg, result, err)
+}
+
 func commandFailure(stage string, cfg workspace.SubstrateConfig, result *workspace.ExecResult, err error) error {
 	detail := fmt.Sprintf("kind=%s error=%v", workspace.KindOf(err), err)
 	if result == nil {

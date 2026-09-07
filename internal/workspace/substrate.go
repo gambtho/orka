@@ -26,6 +26,7 @@ const (
 	substratePlacementLookupTimeout   = 100 * time.Millisecond
 	substrateExecInitialPollInterval  = 250 * time.Millisecond
 	substrateExecMaxPollInterval      = 2 * time.Second
+	substrateExecResultTimeout        = 5 * time.Second
 	substrateDefaultHandoffTokenEnv   = "ORKA_WORKSPACE_HANDOFF_TOKEN"
 	substrateDefaultBootstrapTokenEnv = "ORKA_WORKSPACE_BOOTSTRAP_TOKEN"
 	substrateHandoffTokenUploadPath   = "orka-workspace-handoff-token"
@@ -451,7 +452,7 @@ func (e *SubstrateWorkspaceExecutor) WaitReady(ctx context.Context, req WaitRead
 }
 
 func (e *SubstrateWorkspaceExecutor) Exec(ctx context.Context, req ExecRequest) (*ExecResult, error) {
-	ctx, cancel := contextWithTimeout(ctx, req.Timeout)
+	ctx, cancel := substrateExecContext(ctx, req.Timeout)
 	defer cancel()
 	if len(req.Command) == 0 || strings.TrimSpace(req.Command[0]) == "" {
 		return nil, NewError("exec", ErrorKindInvalidArgument, "command is required", false, nil)
@@ -511,6 +512,19 @@ func (e *SubstrateWorkspaceExecutor) Exec(ctx context.Context, req ExecRequest) 
 		return result, NewError("exec", ErrorKindCommandFailed, fmt.Sprintf("command exited with code %d", result.ExitCode), false, nil)
 	}
 	return result, nil
+}
+
+func substrateExecContext(ctx context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {
+	if timeout < time.Second {
+		return contextWithTimeout(ctx, timeout)
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	// The daemon's whole-second command timer expires before it can publish
+	// the final result. Bound that collection window without extending the
+	// caller's deadline or cancellation, and never replay the command.
+	return context.WithDeadline(ctx, time.Now().Add(timeout).Add(substrateExecResultTimeout))
 }
 
 func (e *SubstrateWorkspaceExecutor) pollExec(ctx context.Context, actorID, execID string) (*daemonprotocol.ExecResponse, error) {

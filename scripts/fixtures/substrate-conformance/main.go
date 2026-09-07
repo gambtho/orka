@@ -91,8 +91,8 @@ func run() error {
 		Ref:     claim.Ref,
 		Command: []string{"sh", "-c", "sleep 60"}, Timeout: time.Second,
 	})
-	if err == nil && (result == nil || result.ExitCode != 124) {
-		return fmt.Errorf("native command timeout did not cancel execution")
+	if err := verifyCommandTimeout(cfg, result, err); err != nil {
+		return err
 	}
 	return exerciseDataRestore(ctx, cfg, executor, claim.Ref, token[:12])
 }
