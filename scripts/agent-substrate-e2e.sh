@@ -78,7 +78,7 @@ native_template_manifest() {
 create_native_resources() {
   local worker_image="$1" direct_image="$2" mcp_image="$3" public_key="$4"
   kubectl create namespace ate-demo --dry-run=client -o yaml | kubectl apply -f -
-  kubectl create namespace orka-system --dry-run=client -o yaml | kubectl apply -f -
+  bash "${ROOT_DIR}/scripts/lib/ensure-static-mode-namespace.sh" kubectl "${ORKA_NAMESPACE}" harness-v2
   kubectl_ate get atespace orka-system >/dev/null 2>&1 || kubectl_ate create atespace orka-system
   kubectl -n ate-demo apply -f - <<YAML
 apiVersion: ate.dev/v1alpha1
