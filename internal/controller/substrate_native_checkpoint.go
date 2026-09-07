@@ -145,6 +145,12 @@ func (r *RuntimePoolReconciler) checkpointNativeSubstrateRuntime(ctx context.Con
 			return ctrl.Result{}, err
 		}
 		if _, err := api.SuspendActor(ctx, &ateapipb.SuspendActorRequest{Actor: nativeSubstrateActorRef(record)}); err != nil {
+			if nativeSubstrateControlAuthenticationRejected(err) {
+				operation.SuspendIssued = false
+				if saveErr := r.saveNativeSubstrateState(ctx, cm, record); saveErr != nil {
+					return ctrl.Result{}, saveErr
+				}
+			}
 			return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, fmt.Errorf("native Data suspension requires observation before recovery: %w", err))
 		}
 		return r.nativeSubstrateProgress(ctx, pool, corev1alpha1.RuntimePoolLifecycleStopping, "native Actor is saving DurableDir data with process memory excluded")

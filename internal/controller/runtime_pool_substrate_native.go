@@ -361,7 +361,7 @@ func (r *RuntimePoolReconciler) reconcileNativeSubstrateRuntimePool(ctx context.
 		}
 		_, err := api.Control.ResumeActor(ctx, &ateapipb.ResumeActorRequest{Actor: nativeSubstrateActorRef(record), Boot: record.Checkpoint == nil})
 		if err != nil {
-			if nativeSubstrateBootAuthenticationRejected(err) {
+			if nativeSubstrateControlAuthenticationRejected(err) {
 				a.BootRequested = false
 				if saveErr := r.saveNativeSubstrateState(ctx, cm, record); saveErr != nil {
 					return ctrl.Result{}, saveErr
@@ -444,13 +444,13 @@ func (r *RuntimePoolReconciler) reconcileNativeSubstrateRuntimePool(ctx context.
 	return r.reconcileRuntimePoolServingWithPostProbeFence(ctx, pool, cfg, []corev1.Pod{*synthetic}, []corev1.Pod{*synthetic}, auth, poolStatus, postProbe)
 }
 
-func nativeSubstrateBootAuthenticationRejected(err error) bool {
+func nativeSubstrateControlAuthenticationRejected(err error) bool {
 	if status.Code(err) != codes.Unauthenticated {
 		return false
 	}
 	// These are the pinned ate-api authentication interceptor's pre-handler
-	// rejections. Resume can also propagate a worker authentication failure
-	// after assigning compute; its wrapped error must not authorize a replay.
+	// rejections. Lifecycle operations can also propagate worker authentication
+	// failures after mutation; their wrapped errors must not authorize a replay.
 	message := status.Convert(err).Message()
 	return message == "missing bearer token" || message == "invalid bearer token" ||
 		(strings.HasPrefix(message, "token issuer ") && strings.HasSuffix(message, " not trusted"))

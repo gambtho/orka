@@ -73,6 +73,9 @@ func run() error {
 	if err := bootAndSeed(ctx, executor, claim.Ref, token, true); err != nil {
 		return err
 	}
+	if err := verifyProviderConnectivity(ctx, cfg, executor, claim.Ref); err != nil {
+		return err
+	}
 	result, err := executor.Exec(ctx, workspace.ExecRequest{
 		Ref:     claim.Ref,
 		Command: []string{"sh", "-c", "printf native-data > /workspace/proof; sleep 15; cat /workspace/proof"},
@@ -95,6 +98,27 @@ func run() error {
 		return err
 	}
 	return exerciseDataRestore(ctx, cfg, executor, claim.Ref, token[:12])
+}
+
+func verifyProviderConnectivity(
+	ctx context.Context, cfg workspace.SubstrateConfig,
+	executor *workspace.SubstrateWorkspaceExecutor, ref workspace.WorkspaceRef,
+) error {
+	// Exercise outbound DNS and the provider's native egress path before an
+	// agent's retries can obscure the first connection failure. Health is public;
+	// no model request or provider credential is involved in this probe.
+	result, err := executor.Exec(ctx, workspace.ExecRequest{
+		Ref: ref,
+		Command: []string{"curl", "--fail", "--silent", "--show-error", "--connect-timeout", "10", "--max-time", "20",
+			"--output", "/dev/null", "--write-out", "%{http_code}",
+			"http://orka-provider-auth-proxy.orka-system.svc:8080/healthz"},
+		Timeout: 30 * time.Second,
+	})
+	if err != nil || result == nil || result.ExitCode != 0 || result.Stdout != "200" {
+		return commandFailure("native Actor could not reach provider proxy health", cfg, result, err)
+	}
+	fmt.Println("native Actor provider proxy connectivity passed")
+	return nil
 }
 
 func cleanupActor(executor *workspace.SubstrateWorkspaceExecutor, ref workspace.WorkspaceRef) {
