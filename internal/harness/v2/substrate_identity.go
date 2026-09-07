@@ -13,6 +13,7 @@ const WorkspaceBootstrapPublicKeyEnv = "ORKA_WORKSPACE_BOOTSTRAP_PUBLIC_KEY"
 
 type WorkspaceBootstrapRequest struct {
 	HandoffToken string `json:"handoffToken"`
+	Recover      bool   `json:"recover,omitempty"`
 }
 
 func WorkspaceBootstrapSigningSeed(secret string) []byte {

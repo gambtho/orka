@@ -45,7 +45,7 @@ func (s *workspaceAgentServer) handleSubstrateBootstrap(w http.ResponseWriter, r
 		_ = json.NewEncoder(w).Encode(s.bootstrapReceiver.Challenge)
 		return
 	}
-	if r.Method != http.MethodPut {
+	if r.Method != http.MethodPut && r.Method != http.MethodPost {
 		w.WriteHeader(http.StatusMethodNotAllowed)
 		return
 	}
@@ -66,14 +66,17 @@ func (s *workspaceAgentServer) handleSubstrateBootstrap(w http.ResponseWriter, r
 		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
+	sealedBody := body
 	body, err = s.bootstrapReceiver.Open(envelope)
 	if err != nil {
 		w.WriteHeader(http.StatusForbidden)
 		return
 	}
 	var request harnessv2.WorkspaceBootstrapRequest
-	if json.Unmarshal(body, &request) != nil || strings.TrimSpace(request.HandoffToken) == "" ||
-		len(request.HandoffToken) > 32768 {
+	if json.Unmarshal(body, &request) != nil || len(request.HandoffToken) > 32768 ||
+		request.Recover != (r.Method == http.MethodPost) ||
+		(request.Recover && request.HandoffToken != "") ||
+		(!request.Recover && strings.TrimSpace(request.HandoffToken) == "") {
 		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
@@ -81,6 +84,10 @@ func (s *workspaceAgentServer) handleSubstrateBootstrap(w http.ResponseWriter, r
 	defer s.mu.Unlock()
 	if s.cleanupInProgress || s.activeAttachment != nil {
 		w.WriteHeader(http.StatusConflict)
+		return
+	}
+	if request.Recover {
+		s.recoverSubstrateBootstrap(w, sealedBody)
 		return
 	}
 	current, err := handoffToken()
@@ -99,4 +106,30 @@ func (s *workspaceAgentServer) handleSubstrateBootstrap(w http.ResponseWriter, r
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// The caller holds s.mu and has verified the request signature and sealed
+// process challenge. Reading the existing credential never rotates it or
+// replays any workspace operation.
+func (s *workspaceAgentServer) recoverSubstrateBootstrap(w http.ResponseWriter, request []byte) {
+	token, err := handoffToken()
+	if err != nil {
+		if !handoffBootstrapAllowedForTokenError(err) {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		token = ""
+	}
+	plaintext, err := json.Marshal(harnessv2.WorkspaceBootstrapRequest{HandoffToken: token})
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+	body, err := s.bootstrapReceiver.SealResponse(request, plaintext)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_, _ = w.Write(body)
 }

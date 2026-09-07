@@ -38,7 +38,7 @@ func (c *substrateBootstrapRecoveryControl) GetActor(context.Context, string) (*
 }
 
 func TestNativeSubstrateWorkspaceBootstrapRetriesMintedCredential(t *testing.T) {
-	for _, failure := range []string{"lost response", "failed observation", "replaced Actor", "replaced Pod", "changed during challenge"} {
+	for _, failure := range []string{"lost response", "failed observation", "closed executor", "restarted executor", "restarted after observation", "replaced during recovery", "replaced Actor", "replaced Pod", "changed during challenge"} {
 		t.Run(failure, func(t *testing.T) {
 			const secret = "fixture-signing-secret"
 			key, err := harnessv2.WorkspaceBootstrapPublicKey(secret)
@@ -62,13 +62,28 @@ func TestNativeSubstrateWorkspaceBootstrapRetriesMintedCredential(t *testing.T) 
 					body, err = json.Marshal(receiver.Challenge)
 					require.NoError(t, err)
 				} else {
-					puts++
+					sealed, err := io.ReadAll(request.Body)
+					require.NoError(t, err)
+					require.NoError(t, harnessv2.VerifyCredentialBootstrap(key, receiver.Challenge.Nonce, sealed,
+						request.Header.Get(harnessv2.CredentialBootstrapSignatureHeader)))
 					var envelope harnessv2.SealedCredentialBootstrap
-					require.NoError(t, json.NewDecoder(request.Body).Decode(&envelope))
+					require.NoError(t, json.Unmarshal(sealed, &envelope))
 					plain, err := receiver.Open(envelope)
 					require.NoError(t, err)
 					var payload harnessv2.WorkspaceBootstrapRequest
 					require.NoError(t, json.Unmarshal(plain, &payload))
+					if request.Method == http.MethodPost {
+						require.True(t, payload.Recover)
+						plain, err := json.Marshal(harnessv2.WorkspaceBootstrapRequest{HandoffToken: installed})
+						require.NoError(t, err)
+						body, err = receiver.SealResponse(sealed, plain)
+						require.NoError(t, err)
+						if installed != "" && failure == "replaced during recovery" {
+							control.actor.PodUID = "replacement-pod-uid"
+						}
+						return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(bytes.NewReader(body)), Header: make(http.Header)}, nil
+					}
+					puts++
 					statusCode = http.StatusNoContent
 					if installed != "" && installed != payload.HandoffToken {
 						statusCode = http.StatusConflict
@@ -77,7 +92,7 @@ func TestNativeSubstrateWorkspaceBootstrapRetriesMintedCredential(t *testing.T) 
 					}
 					if puts == 1 {
 						mint.jwt = "second-minted-credential"
-						if failure == "failed observation" {
+						if failure == "failed observation" || failure == "restarted after observation" {
 							control.unavailable = true
 						} else {
 							return nil, errors.New("bootstrap response was lost")
@@ -86,12 +101,16 @@ func TestNativeSubstrateWorkspaceBootstrapRetriesMintedCredential(t *testing.T) 
 				}
 				return &http.Response{StatusCode: statusCode, Body: io.NopCloser(bytes.NewReader(body)), Header: make(http.Header)}, nil
 			})
-			executor, err := NewSubstrateExecutor(SubstrateConfig{
-				RouterURL: "http://router.test", ActorDNSSuffix: "actors.test", BootstrapToken: secret,
-				SealedBootstrap: true, ControlClient: control, HTTPClient: &http.Client{Transport: transport},
-				SessionIdentityRequired: true, SessionIdentityToken: "fixture-session-identity", SessionIdentityClient: mint,
-			})
-			require.NoError(t, err)
+			newExecutor := func() *SubstrateWorkspaceExecutor {
+				executor, err := NewSubstrateExecutor(SubstrateConfig{
+					RouterURL: "http://router.test", ActorDNSSuffix: "actors.test", BootstrapToken: secret,
+					SealedBootstrap: true, ControlClient: control, HTTPClient: &http.Client{Transport: transport},
+					SessionIdentityRequired: true, SessionIdentityToken: "fixture-session-identity", SessionIdentityClient: mint,
+				})
+				require.NoError(t, err)
+				return executor
+			}
+			executor := newExecutor()
 			request := UploadRequest{Ref: WorkspaceRef{ID: "direct.ate-demo"}, BootstrapHandoff: true,
 				Artifacts: []UploadArtifact{{Path: substrateHandoffTokenUploadPath, Data: []byte("fixture-handoff")}}}
 			_, err = executor.Upload(t.Context(), request)
@@ -101,6 +120,12 @@ func TestNativeSubstrateWorkspaceBootstrapRetriesMintedCredential(t *testing.T) 
 				return
 			}
 			require.Equal(t, "first-minted-credential", installed)
+			if failure == "closed executor" || failure == "restarted executor" || failure == "restarted after observation" || failure == "replaced during recovery" {
+				if failure == "closed executor" {
+					require.NoError(t, executor.Close())
+				}
+				executor = newExecutor()
+			}
 			if failure == "replaced Actor" || failure == "replaced Pod" {
 				control.actor.PodUID = "second-pod-uid"
 				if failure == "replaced Actor" {
@@ -112,6 +137,12 @@ func TestNativeSubstrateWorkspaceBootstrapRetriesMintedCredential(t *testing.T) 
 				installed = ""
 			}
 			_, err = executor.Upload(t.Context(), request)
+			if failure == "replaced during recovery" {
+				require.Error(t, err, "a changed Pod must not accept a recovered credential")
+				require.Equal(t, 1, puts, "recovery must stop before another credential delivery")
+				require.Equal(t, 1, mint.calls)
+				return
+			}
 			require.NoError(t, err, "retry must confirm the same installed credential")
 			_, err = executor.Upload(t.Context(), request)
 			require.NoError(t, err, "confirmed bootstrap remains idempotent")

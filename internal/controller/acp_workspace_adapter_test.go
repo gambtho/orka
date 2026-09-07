@@ -186,7 +186,7 @@ func TestACPWorkspaceProviderAdapterAdvertisesNativeSubstrateDataRecovery(t *tes
 	}
 	c := acpAdapterTestClient(t, provider, config)
 	reconciler := &ACPWorkspaceProviderAdapterReconciler{
-		Client: c, SubstrateEnabled: true, ACPWorkspaceDispatchEnabled: true, WorkspaceProviderAPIEnabled: true,
+		Client: c, SubstrateEnabled: true, SubstrateDirectEgressEnabled: true, ACPWorkspaceDispatchEnabled: true, WorkspaceProviderAPIEnabled: true,
 		SubstrateCheckpointsEnabled: true,
 	}
 	if _, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: provider.Name}}); err != nil {
@@ -218,6 +218,42 @@ func TestACPWorkspaceProviderAdapterAdvertisesNativeSubstrateDataRecovery(t *tes
 		slices.Contains(current.Status.SupportedFeatures, workspacev1alpha1.WorkspaceFeatureRestore) ||
 		!slices.Contains(current.Status.SupportedFeatures, workspacev1alpha1.WorkspaceFeatureSuspend) {
 		t.Fatalf("checkpoint API absent, advertised features=%v", current.Status.SupportedFeatures)
+	}
+}
+
+func TestACPWorkspaceProviderAdapterRequiresNativeSubstrateEgress(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	provider := acpAdapterProvider()
+	config := &acpworkspacev1alpha1.RuntimeProviderConfig{
+		ObjectMeta: metav1.ObjectMeta{Name: acpTestConfigName, UID: types.UID(acpAdapterOriginalConfigUID)},
+		Spec:       acpworkspacev1alpha1.RuntimeProviderConfigSpec{Backend: acpworkspacev1alpha1.RuntimeProviderBackendSubstrate},
+	}
+	c := acpAdapterTestClient(t, provider, config)
+	reconciler := &ACPWorkspaceProviderAdapterReconciler{
+		Client: c, SubstrateEnabled: true, SubstrateDirectEgressEnabled: true, ACPWorkspaceDispatchEnabled: true, WorkspaceProviderAPIEnabled: true,
+		SubstrateCheckpointsEnabled: true,
+	}
+	request := ctrl.Request{NamespacedName: types.NamespacedName{Name: provider.Name}}
+	for _, enabled := range []bool{false, true, false, true} {
+		reconciler.SubstrateDirectEgressEnabled = enabled
+		if _, err := reconciler.Reconcile(ctx, request); err != nil {
+			t.Fatal(err)
+		}
+		current := &workspacev1alpha1.ExecutionWorkspaceProvider{}
+		if err := c.Get(ctx, request.NamespacedName, current); err != nil {
+			t.Fatal(err)
+		}
+		if enabled {
+			if current.Status.Adapter == nil || current.Status.Backend == nil || len(current.Status.SupportedContracts) == 0 || current.Status.LastHeartbeat == nil {
+				t.Fatalf("enabled native Substrate did not advertise: %+v", current.Status)
+			}
+		} else if current.Status.Adapter != nil || current.Status.Backend != nil || len(current.Status.SupportedContracts) != 0 || len(current.Status.SupportedFeatures) != 0 || current.Status.LastHeartbeat != nil {
+			t.Fatalf("native Substrate advertised before direct egress was enabled: %+v", current.Status)
+		}
+		if current.Status.PinnedParametersUID != acpAdapterOriginalConfigUID {
+			t.Fatal("changing admission must preserve the immutable provider config identity")
+		}
 	}
 }
 
@@ -302,7 +338,7 @@ func TestACPWorkspaceProviderAdapterRefusesReplacementWhenLegacyPinWasStripped(t
 	}
 	c := acpAdapterTestClient(t, provider, replacement)
 	reconciler := &ACPWorkspaceProviderAdapterReconciler{
-		Client: c, SubstrateEnabled: true, ACPWorkspaceDispatchEnabled: true, WorkspaceProviderAPIEnabled: true,
+		Client: c, SubstrateEnabled: true, SubstrateDirectEgressEnabled: true, ACPWorkspaceDispatchEnabled: true, WorkspaceProviderAPIEnabled: true,
 	}
 	request := ctrl.Request{NamespacedName: types.NamespacedName{Name: provider.Name}}
 	for i := range 2 {
@@ -343,7 +379,7 @@ func TestACPWorkspaceProviderAdapterMigratesLegacyPinBeforeConfigLookup(t *testi
 	provider.Status.Adapter = &workspacev1alpha1.ExecutionWorkspaceAdapterStatus{Version: acpWorkspaceAdapterVersion}
 	c := acpAdapterTestClient(t, provider)
 	reconciler := &ACPWorkspaceProviderAdapterReconciler{
-		Client: c, SubstrateEnabled: true, ACPWorkspaceDispatchEnabled: true, WorkspaceProviderAPIEnabled: true,
+		Client: c, SubstrateEnabled: true, SubstrateDirectEgressEnabled: true, ACPWorkspaceDispatchEnabled: true, WorkspaceProviderAPIEnabled: true,
 	}
 	request := ctrl.Request{NamespacedName: types.NamespacedName{Name: provider.Name}}
 	if _, err := reconciler.Reconcile(ctx, request); err != nil {

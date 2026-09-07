@@ -168,7 +168,8 @@ type SubstrateWorkspaceExecutor struct {
 	sessionIdentityUserID   string
 	sessionIdentityRequired bool
 	// Native bootstrap retries must use the JWT already delivered to this
-	// Actor/Pod lifetime. Keep it in memory before a possibly ambiguous PUT.
+	// Actor/Pod lifetime. Cache it before a possibly ambiguous PUT; a new
+	// executor recovers the installed JWT through an authenticated sealed reply.
 	sessionIdentityHandoffMu sync.Mutex
 	sessionIdentityHandoffs  map[string]substrateSessionIdentityHandoff
 	now                      func() time.Time
@@ -648,6 +649,13 @@ func (e *SubstrateWorkspaceExecutor) mintSessionIdentityHandoffToken(ctx context
 	if e.sealedBootstrap {
 		if prior := e.cacheSessionIdentityHandoff(actorID, actor, ""); prior != "" {
 			return prior, nil
+		}
+		installed, err := e.recoverNativeWorkspaceCredential(ctx, actorID, actor)
+		if err != nil {
+			return "", err
+		}
+		if installed != "" {
+			return e.cacheSessionIdentityHandoff(actorID, actor, installed), nil
 		}
 	}
 	actorRef, err := substrateObjectRef(actorID, ref.Namespace)

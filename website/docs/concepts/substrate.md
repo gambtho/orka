@@ -107,8 +107,9 @@ that configuration with Orka's `--substrate-direct-egress-enabled=true`,
 `ORKA_SUBSTRATE_DIRECT_EGRESS_ENABLED=true`, or Helm's
 `controller.substrate.directEgressEnabled: true`. Orka cannot inspect this
 server setting through the native API. The acknowledgement defaults to false
-and closes ACP admission before Actor creation or credential delivery. Disabling
-it still permits drain, suspension, and deletion with the existing credentials.
+and closes ACP admission before Actor creation or credential delivery. Providers
+also withhold their capability advertisement until it is enabled. Disabling it
+still permits drain, suspension, and deletion with the existing credentials.
 
 The pinned provider's default transparent gateway hides Actor destinations from
 worker NetworkPolicies, and its Envoy handler does not enforce destination
@@ -126,6 +127,13 @@ For direct commands with an explicit daemon timeout, the client allows up to
 five additional seconds to collect the final exit status. A caller context can
 impose a tighter overall deadline or cancel the wait. Timeout conformance requires
 the daemon's exit code 124; connection or authentication failures do not count.
+
+Direct workspaces using SessionIdentity recover their installed handoff JWT
+after executor recreation through a signed, sealed bootstrap request. The reply
+is encrypted for that request and the exact challenged process. Recovery does
+not replace the credential, write it to controller state, or replay workspace
+commands. An unseeded process returns an authenticated empty result before the
+client mints a new JWT. Bootstrap signing credentials are required for recovery.
 
 Direct workspace and MCP deletion use upstream `DeleteActor(anyState=true)` to
 terminate workloads without creating snapshots. This also permits cleanup of

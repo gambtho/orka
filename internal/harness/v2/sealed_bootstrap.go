@@ -102,52 +102,52 @@ func (c SealedBootstrapChallenge) Validate(nonce string, expected SubstrateActor
 // with the controller-only bootstrap signing seed. A rerouted request or
 // replaced process cannot decrypt a prior process's payload.
 func SealCredentialBootstrap(challenge SealedBootstrapChallenge, nonce string, actor SubstrateActorIdentity, plaintext []byte) ([]byte, error) {
+	body, _, err := SealCredentialBootstrapExchange(challenge, nonce, actor, plaintext)
+	return body, err
+}
+
+// SealCredentialBootstrapExchange also retains the ephemeral exchange key so
+// the caller can authenticate and decrypt a response from this exact process.
+func SealCredentialBootstrapExchange(challenge SealedBootstrapChallenge, nonce string, actor SubstrateActorIdentity, plaintext []byte) ([]byte, *CredentialBootstrapExchange, error) {
 	if err := challenge.Validate(nonce, actor); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	receiverBytes, _ := base64.RawURLEncoding.DecodeString(challenge.PublicKey)
 	receiverKey, err := ecdh.X25519().NewPublicKey(receiverBytes)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	senderKey, err := ecdh.X25519().GenerateKey(rand.Reader)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	shared, err := senderKey.ECDH(receiverKey)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	aead, aad, err := bootstrapAEAD(shared, challenge)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	iv := make([]byte, aead.NonceSize())
 	if _, err := rand.Read(iv); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	envelope := SealedCredentialBootstrap{
 		Challenge: challenge, SenderPublicKey: base64.RawURLEncoding.EncodeToString(senderKey.PublicKey().Bytes()),
 		Nonce: base64.RawURLEncoding.EncodeToString(iv), Ciphertext: base64.RawURLEncoding.EncodeToString(aead.Seal(nil, iv, plaintext, aad)),
 	}
-	return json.Marshal(envelope)
+	body, err := json.Marshal(envelope)
+	if err != nil {
+		return nil, nil, err
+	}
+	return body, &CredentialBootstrapExchange{shared: shared, requestDigest: sha256.Sum256(body)}, nil
 }
 
 func (r *CredentialBootstrapReceiver) Open(envelope SealedCredentialBootstrap) ([]byte, error) {
-	if r == nil || r.key == nil || envelope.Challenge != r.Challenge {
-		return nil, errors.New("sealed bootstrap targets another process or Actor lifetime")
-	}
-	senderBytes, err := base64.RawURLEncoding.DecodeString(envelope.SenderPublicKey)
+	shared, err := r.sharedKey(envelope)
 	if err != nil {
-		return nil, errors.New("bootstrap sender key is invalid")
-	}
-	senderKey, err := ecdh.X25519().NewPublicKey(senderBytes)
-	if err != nil {
-		return nil, errors.New("bootstrap sender key is invalid")
-	}
-	shared, err := r.key.ECDH(senderKey)
-	if err != nil {
-		return nil, errors.New("bootstrap key exchange failed")
+		return nil, err
 	}
 	aead, aad, err := bootstrapAEAD(shared, r.Challenge)
 	if err != nil {
@@ -166,6 +166,25 @@ func (r *CredentialBootstrapReceiver) Open(envelope SealedCredentialBootstrap) (
 		return nil, errors.New("bootstrap ciphertext authentication failed")
 	}
 	return plaintext, nil
+}
+
+func (r *CredentialBootstrapReceiver) sharedKey(envelope SealedCredentialBootstrap) ([]byte, error) {
+	if r == nil || r.key == nil || envelope.Challenge != r.Challenge {
+		return nil, errors.New("sealed bootstrap targets another process or Actor lifetime")
+	}
+	senderBytes, err := base64.RawURLEncoding.DecodeString(envelope.SenderPublicKey)
+	if err != nil {
+		return nil, errors.New("bootstrap sender key is invalid")
+	}
+	senderKey, err := ecdh.X25519().NewPublicKey(senderBytes)
+	if err != nil {
+		return nil, errors.New("bootstrap sender key is invalid")
+	}
+	shared, err := r.key.ECDH(senderKey)
+	if err != nil {
+		return nil, errors.New("bootstrap key exchange failed")
+	}
+	return shared, nil
 }
 
 func bootstrapAEAD(shared []byte, challenge SealedBootstrapChallenge) (cipher.AEAD, []byte, error) {

@@ -46,12 +46,13 @@ const (
 // a given class may actually request it.
 type ACPWorkspaceProviderAdapterReconciler struct {
 	client.Client
-	AgentSandboxEnabled         bool
-	SubstrateEnabled            bool
-	SubstrateCheckpointsEnabled bool
-	ACPWorkspaceDispatchEnabled bool
-	WorkspaceProviderAPIEnabled bool
-	Now                         func() time.Time
+	AgentSandboxEnabled          bool
+	SubstrateEnabled             bool
+	SubstrateDirectEgressEnabled bool
+	SubstrateCheckpointsEnabled  bool
+	ACPWorkspaceDispatchEnabled  bool
+	WorkspaceProviderAPIEnabled  bool
+	Now                          func() time.Time
 }
 
 func (r *ACPWorkspaceProviderAdapterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -212,6 +213,9 @@ func (r *ACPWorkspaceProviderAdapterReconciler) servableBackend(
 	case acpworkspacev1alpha1.RuntimeProviderBackendSubstrate:
 		if !r.SubstrateEnabled {
 			return "", "substrate backend is disabled", nil
+		}
+		if !r.SubstrateDirectEgressEnabled {
+			return "", "native Substrate requires --substrate-direct-egress-enabled=true", nil
 		}
 	default:
 		return "", fmt.Sprintf("backend %q is not supported", config.Spec.Backend), nil

@@ -1746,12 +1746,13 @@ func main() {
 		// flags are off so existing workspaces keep converging toward cleanup;
 		// provider advertisement itself fails closed on the flags.
 		if err := (&controller.ACPWorkspaceProviderAdapterReconciler{
-			Client:                      mgr.GetClient(),
-			AgentSandboxEnabled:         agentSandboxEnabled,
-			SubstrateEnabled:            substrateEnabled,
-			SubstrateCheckpointsEnabled: substrateCheckpointsEnabled,
-			ACPWorkspaceDispatchEnabled: acpWorkspaceDispatchEnabled,
-			WorkspaceProviderAPIEnabled: workspaceProviderAPIEnabled,
+			Client:                       mgr.GetClient(),
+			AgentSandboxEnabled:          agentSandboxEnabled,
+			SubstrateEnabled:             substrateEnabled,
+			SubstrateDirectEgressEnabled: substrateConfig.DirectEgressEnabled,
+			SubstrateCheckpointsEnabled:  substrateCheckpointsEnabled,
+			ACPWorkspaceDispatchEnabled:  acpWorkspaceDispatchEnabled,
+			WorkspaceProviderAPIEnabled:  workspaceProviderAPIEnabled,
 		}).SetupWithManager(mgr); err != nil {
 			setupLog.Error(err, "unable to create controller", "controller", "ACPWorkspaceProviderAdapter")
 			os.Exit(1)
