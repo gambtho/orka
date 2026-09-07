@@ -66,6 +66,10 @@ Secret projections support rotation.
 listed provider namespaces. Keep both settings while disabling Substrate
 admission so existing workspaces can still finish cleanup.
 
+Keep that configuration until retained checkpoint catalogs and template journals
+are collected, even after the last RuntimePool is gone. Controller startup checks
+those records in the controller namespace when Substrate admission is disabled.
+
 The infrastructure template must select exactly one WorkerPool and specify a
 gVisor `sandboxConfig`, resource limits, and snapshot storage. The controller
 compiles separate immutable native templates for ACP. It preserves admitted
@@ -80,6 +84,11 @@ An initialized pool with a missing journal closes admission and blocks deletion
 until the original journal is restored or an operator completes recovery.
 Existing legacy pools with lifecycle records are not automatically migrated.
 Finish their cleanup using the previous controller before upgrading.
+
+MCP Tool IDs that can be attributed to a recorded template or validated current
+binding migrate to `name.atespace` without replacing the Actor or its ownership
+lease. Orka rechecks endpoint readiness after migration. Historical cleanup IDs
+without enough template provenance remain blocked rather than guessing an Atespace.
 
 The WorkerPool must be dedicated to Orka ACP workloads. Orka needs Pod
 get/list/delete and NetworkPolicy access in its namespace. It confines worker

@@ -279,40 +279,9 @@ func (s *nativeSubstrateTemplateStore) put(ctx context.Context, previous, desire
 			return err
 		}
 	}
-	freshIntent := binding.Pending == nil
-	api, err := s.r.substrateNativeClient()
+	observed, err := s.materialize(ctx, cm, binding, pending, native)
 	if err != nil {
 		return err
-	}
-	defer api.Close() //nolint:errcheck
-	ref := &ateapipb.ObjectRef{Atespace: binding.Atespace, Name: pending.Name}
-	observed, err := api.Control.GetActorTemplate(ctx, &ateapipb.GetActorTemplateRequest{ActorTemplate: ref})
-	if status.Code(err) == codes.NotFound {
-		if !freshIntent {
-			// A previous Create may still commit after its client lost the response.
-			// Keep its ownership intent until an exact revision can be observed.
-			return fmt.Errorf("native Substrate template creation is unresolved; preserving its pending intent")
-		}
-		binding.Pending = &pending
-		if err := s.save(ctx, cm, binding); err != nil {
-			return err
-		}
-		observed, err = api.Control.CreateActorTemplate(ctx, &ateapipb.CreateActorTemplateRequest{ActorTemplate: native})
-		if status.Code(err) == codes.InvalidArgument || status.Code(err) == codes.FailedPrecondition {
-			// Upstream returns these only before persisting a template. This is
-			// the sole create attempt for the freshly recorded intent, so corrected
-			// configuration may safely choose a different immutable revision.
-			binding.Pending = nil
-			if saveErr := s.save(ctx, cm, binding); saveErr != nil {
-				return errors.Join(fmt.Errorf("create native Substrate template: %w", err), saveErr)
-			}
-		}
-		if status.Code(err) == codes.AlreadyExists {
-			observed, err = api.Control.GetActorTemplate(ctx, &ateapipb.GetActorTemplateRequest{ActorTemplate: ref})
-		}
-	}
-	if err != nil {
-		return fmt.Errorf("materialize immutable native Substrate template: %w", err)
 	}
 	if !proto.Equal(nativeSubstrateTemplateSpec(observed), nativeSubstrateTemplateSpec(native)) || observed.GetMetadata().GetUid() == "" {
 		return fmt.Errorf("native Substrate template revision conflicts with the controller's immutable content")
@@ -332,6 +301,49 @@ func (s *nativeSubstrateTemplateStore) put(ctx context.Context, previous, desire
 	}
 	binding.Current, binding.Pending = pending, nil
 	return s.save(ctx, cm, binding)
+}
+
+// materialize owns the persisted create intent and its one allowed RPC attempt.
+func (s *nativeSubstrateTemplateStore) materialize(
+	ctx context.Context, cm *corev1.ConfigMap, binding *substrateTemplateBinding,
+	pending substrateNativeTemplateRevision, native *ateapipb.ActorTemplate,
+) (*ateapipb.ActorTemplate, error) {
+	freshIntent := binding.Pending == nil
+	api, err := s.r.substrateNativeClient()
+	if err != nil {
+		return nil, err
+	}
+	defer api.Close() //nolint:errcheck
+	ref := &ateapipb.ObjectRef{Atespace: binding.Atespace, Name: pending.Name}
+	observed, err := api.Control.GetActorTemplate(ctx, &ateapipb.GetActorTemplateRequest{ActorTemplate: ref})
+	if status.Code(err) == codes.NotFound {
+		if !freshIntent {
+			// A previous Create may still commit after its client lost the response.
+			// Keep its ownership intent until an exact revision can be observed.
+			return nil, fmt.Errorf("native Substrate template creation is unresolved; preserving its pending intent")
+		}
+		binding.Pending = &pending
+		if err := s.save(ctx, cm, binding); err != nil {
+			return nil, err
+		}
+		observed, err = api.Control.CreateActorTemplate(ctx, &ateapipb.CreateActorTemplateRequest{ActorTemplate: native})
+		if status.Code(err) == codes.InvalidArgument || status.Code(err) == codes.FailedPrecondition {
+			// Upstream returns these only before persisting a template. This is
+			// the sole create attempt for the freshly recorded intent, so corrected
+			// configuration may safely choose a different immutable revision.
+			binding.Pending = nil
+			if saveErr := s.save(ctx, cm, binding); saveErr != nil {
+				return nil, errors.Join(fmt.Errorf("create native Substrate template: %w", err), saveErr)
+			}
+		}
+		if status.Code(err) == codes.AlreadyExists {
+			observed, err = api.Control.GetActorTemplate(ctx, &ateapipb.GetActorTemplateRequest{ActorTemplate: ref})
+		}
+	}
+	if err != nil {
+		return nil, fmt.Errorf("materialize immutable native Substrate template: %w", err)
+	}
+	return observed, nil
 }
 
 func (s *nativeSubstrateTemplateStore) Delete(ctx context.Context, template *unstructured.Unstructured) error {

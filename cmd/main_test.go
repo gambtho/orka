@@ -121,6 +121,11 @@ func TestValidateDisabledSubstrateRecoveryConfig(t *testing.T) {
 			},
 		}
 	}
+	journal := func(label string) *corev1.ConfigMap {
+		return &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{
+			Name: "retained-native-data", Namespace: "controller-system", Labels: map[string]string{label: "true"},
+		}}
+	}
 	tests := []struct {
 		name      string
 		objects   []client.Object
@@ -156,13 +161,37 @@ func TestValidateDisabledSubstrateRecoveryConfig(t *testing.T) {
 			objects: []client.Object{pool("substrate", corev1alpha1.WorkspaceProviderSubstrate)},
 			config:  validConfig,
 		},
+		{
+			name:      "retained checkpoint outside watch namespace requires recovery credentials",
+			objects:   []client.Object{journal("orka.ai/substrate-checkpoint-catalog")},
+			config:    invalidConfig,
+			wantError: "recovery ConfigMap controller-system/retained-native-data requires valid recovery configuration",
+		},
+		{
+			name:      "retained template preserves configuration parse failure",
+			objects:   []client.Object{journal("orka.ai/substrate-template-binding")},
+			config:    validConfig,
+			configErr: errors.New("invalid disabled-only duration"),
+			wantError: "parse substrate recovery configuration for existing recovery ConfigMap",
+		},
+		{
+			name:    "retained checkpoint accepts valid cleanup credentials",
+			objects: []client.Object{journal("orka.ai/substrate-checkpoint-catalog")},
+			config:  validConfig,
+		},
+		{
+			name:      "ordinary configmap does not require recovery credentials",
+			objects:   []client.Object{journal("example.invalid/unrelated")},
+			config:    invalidConfig,
+			configErr: errors.New("invalid disabled-only duration"),
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			reader := fake.NewClientBuilder().WithScheme(scheme).WithObjects(tt.objects...).Build()
 			err := validateDisabledSubstrateRecoveryConfig(
-				context.Background(), reader, "team-a", tt.config, tt.configErr,
+				context.Background(), reader, "team-a", "controller-system", tt.config, tt.configErr,
 			)
 			if tt.wantError == "" {
 				if err != nil {

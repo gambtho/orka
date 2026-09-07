@@ -69,7 +69,10 @@ func setSubstrateMCPPoolActorLeaseHolder(lease *coordinationv1.Lease, tool *core
 }
 
 func substrateMCPToolActorLeaseName(actorID string) string {
-	return strings.TrimSpace(actorID)
+	// The deterministic Tool Actor name already hashes its template Atespace.
+	// Preserve the pre-native lease key when its routable ID becomes qualified.
+	name, _, _ := strings.Cut(strings.TrimSpace(actorID), ".")
+	return name
 }
 
 func newSubstrateMCPToolActorLease(

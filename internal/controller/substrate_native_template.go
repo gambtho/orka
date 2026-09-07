@@ -55,6 +55,33 @@ func nativeSubstrateRuntimeTemplate(object *unstructured.Unstructured) (*ateapip
 	if err := k8sruntime.DefaultUnstructuredConverter.FromUnstructured(containerMap, &container); err != nil {
 		return nil, err
 	}
+	compiled, err := nativeSubstrateSupervisorContainer(container)
+	if err != nil {
+		return nil, err
+	}
+	for _, volume := range native.Volumes {
+		if volume.GetName() == substrateNativeIdentityVolume {
+			return nil, fmt.Errorf("infrastructure template defines the reserved Substrate identity volume")
+		}
+	}
+	native.Volumes = append(native.Volumes, &ateapipb.Volume{Name: substrateNativeIdentityVolume, SystemInfo: &ateapipb.SystemInfoVolumeSource{
+		DataSources: []*ateapipb.SystemInfoDataSource{{ActorMetadata: &ateapipb.ActorMetadataDataSource{Items: []*ateapipb.ActorMetadataItem{
+			{Field: ateapipb.ActorMetadataField_ACTOR_METADATA_FIELD_ATESPACE, Path: "atespace"},
+			{Field: ateapipb.ActorMetadataField_ACTOR_METADATA_FIELD_NAME, Path: substrateNativeObjectName},
+			{Field: ateapipb.ActorMetadataField_ACTOR_METADATA_FIELD_UID, Path: substrateNativeObjectUID},
+		}}}},
+	}})
+	compiled.VolumeMounts = append(compiled.VolumeMounts, &ateapipb.VolumeMount{Name: substrateNativeIdentityVolume, MountPath: harnessv2.SubstrateIdentityDirectory})
+	native.Containers = []*ateapipb.Container{compiled}
+	revision, err := substrateRuntimeTemplateObjectRevision(object)
+	if err != nil {
+		return nil, err
+	}
+	native.Metadata = &ateapipb.ResourceMetadata{Atespace: object.GetNamespace(), Name: runtimePoolChildName(object.GetName(), "r-"+strings.TrimPrefix(revision, "sha256:")[:24])}
+	return native, nil
+}
+
+func nativeSubstrateSupervisorContainer(container corev1.Container) (*ateapipb.Container, error) {
 	if len(container.Env) > 32 {
 		return nil, fmt.Errorf("substrate supervisor has %d environment entries; upstream admits at most 32", len(container.Env))
 	}
@@ -104,26 +131,7 @@ func nativeSubstrateRuntimeTemplate(object *unstructured.Unstructured) (*ateapip
 		}
 		compiled.VolumeMounts = append(compiled.VolumeMounts, &ateapipb.VolumeMount{Name: mount.Name, MountPath: mount.MountPath})
 	}
-	for _, volume := range native.Volumes {
-		if volume.GetName() == substrateNativeIdentityVolume {
-			return nil, fmt.Errorf("infrastructure template defines the reserved Substrate identity volume")
-		}
-	}
-	native.Volumes = append(native.Volumes, &ateapipb.Volume{Name: substrateNativeIdentityVolume, SystemInfo: &ateapipb.SystemInfoVolumeSource{
-		DataSources: []*ateapipb.SystemInfoDataSource{{ActorMetadata: &ateapipb.ActorMetadataDataSource{Items: []*ateapipb.ActorMetadataItem{
-			{Field: ateapipb.ActorMetadataField_ACTOR_METADATA_FIELD_ATESPACE, Path: "atespace"},
-			{Field: ateapipb.ActorMetadataField_ACTOR_METADATA_FIELD_NAME, Path: substrateNativeObjectName},
-			{Field: ateapipb.ActorMetadataField_ACTOR_METADATA_FIELD_UID, Path: substrateNativeObjectUID},
-		}}}},
-	}})
-	compiled.VolumeMounts = append(compiled.VolumeMounts, &ateapipb.VolumeMount{Name: substrateNativeIdentityVolume, MountPath: harnessv2.SubstrateIdentityDirectory})
-	native.Containers = []*ateapipb.Container{compiled}
-	revision, err := substrateRuntimeTemplateObjectRevision(object)
-	if err != nil {
-		return nil, err
-	}
-	native.Metadata = &ateapipb.ResourceMetadata{Atespace: object.GetNamespace(), Name: runtimePoolChildName(object.GetName(), "r-"+strings.TrimPrefix(revision, "sha256:")[:24])}
-	return native, nil
+	return compiled, nil
 }
 
 func normalizeSubstrateSnapshotEnums(spec map[string]any) {

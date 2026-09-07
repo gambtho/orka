@@ -48,6 +48,7 @@ type ACPWorkspaceProviderAdapterReconciler struct {
 	client.Client
 	AgentSandboxEnabled         bool
 	SubstrateEnabled            bool
+	SubstrateCheckpointsEnabled bool
 	ACPWorkspaceDispatchEnabled bool
 	WorkspaceProviderAPIEnabled bool
 	Now                         func() time.Time
@@ -94,7 +95,7 @@ func (r *ACPWorkspaceProviderAdapterReconciler) Reconcile(ctx context.Context, r
 			provider.Status.SupportedFeatures, workspacev1alpha1.WorkspaceFeatureSuspend,
 		)
 	}
-	if backend == acpworkspacev1alpha1.RuntimeProviderBackendSubstrate {
+	if backend == acpworkspacev1alpha1.RuntimeProviderBackendSubstrate && r.SubstrateCheckpointsEnabled {
 		provider.Status.SupportedFeatures = append(provider.Status.SupportedFeatures, workspacev1alpha1.WorkspaceFeatureCheckpoint, workspacev1alpha1.WorkspaceFeatureRestore)
 	}
 	heartbeat := metav1.NewTime(now)

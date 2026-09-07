@@ -181,12 +181,13 @@ func TestACPWorkspaceProviderAdapterAdvertisesNativeSubstrateDataRecovery(t *tes
 	ctx := context.Background()
 	provider := acpAdapterProvider()
 	config := &acpworkspacev1alpha1.RuntimeProviderConfig{
-		ObjectMeta: metav1.ObjectMeta{Name: acpTestConfigName},
+		ObjectMeta: metav1.ObjectMeta{Name: acpTestConfigName, UID: types.UID(acpAdapterOriginalConfigUID)},
 		Spec:       acpworkspacev1alpha1.RuntimeProviderConfigSpec{Backend: acpworkspacev1alpha1.RuntimeProviderBackendSubstrate},
 	}
 	c := acpAdapterTestClient(t, provider, config)
 	reconciler := &ACPWorkspaceProviderAdapterReconciler{
 		Client: c, SubstrateEnabled: true, ACPWorkspaceDispatchEnabled: true, WorkspaceProviderAPIEnabled: true,
+		SubstrateCheckpointsEnabled: true,
 	}
 	if _, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: provider.Name}}); err != nil {
 		t.Fatalf("reconcile: %v", err)
@@ -203,6 +204,20 @@ func TestACPWorkspaceProviderAdapterAdvertisesNativeSubstrateDataRecovery(t *tes
 		if !slices.Contains(current.Status.SupportedFeatures, feature) {
 			t.Fatalf("native Substrate DataOnly capability %q was not advertised", feature)
 		}
+	}
+	// A controller-first installation can omit the checkpoint CRD. A fresh
+	// controller with that discovery result must remove any stale advertisement.
+	reconciler.SubstrateCheckpointsEnabled = false
+	if _, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: provider.Name}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Get(ctx, types.NamespacedName{Name: provider.Name}, current); err != nil {
+		t.Fatal(err)
+	}
+	if slices.Contains(current.Status.SupportedFeatures, workspacev1alpha1.WorkspaceFeatureCheckpoint) ||
+		slices.Contains(current.Status.SupportedFeatures, workspacev1alpha1.WorkspaceFeatureRestore) ||
+		!slices.Contains(current.Status.SupportedFeatures, workspacev1alpha1.WorkspaceFeatureSuspend) {
+		t.Fatalf("checkpoint API absent, advertised features=%v", current.Status.SupportedFeatures)
 	}
 }
 

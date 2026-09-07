@@ -349,6 +349,11 @@ func (r *ToolReconciler) reconcileSubstrateMCPTool(ctx context.Context, tool *co
 	if err != nil {
 		return r.updateStatus(ctx, tool, false, err.Error())
 	}
+	if changed, err := r.migrateSubstrateMCPIdentities(ctx, tool, templateRequest, pool); err != nil {
+		return ctrl.Result{}, err
+	} else if changed {
+		return ctrl.Result{RequeueAfter: time.Second}, nil
+	}
 	var poolRef *corev1alpha1.SubstrateActorPoolReference
 	if poolName != "" {
 		prefix := deterministicSubstratePoolActorPrefix(poolNamespace, poolName)
@@ -615,6 +620,11 @@ func (r *ToolReconciler) finalizeSubstrateMCPTool(ctx context.Context, tool *cor
 	if !controllerutil.ContainsFinalizer(tool, substrateMCPToolActorFinalizer) {
 		return ctrl.Result{}, nil
 	}
+	if changed, err := r.migrateSubstrateMCPIdentities(ctx, tool, nil, nil); err != nil {
+		return ctrl.Result{}, err
+	} else if changed {
+		return ctrl.Result{RequeueAfter: time.Second}, nil
+	}
 	cfg := r.SubstrateConfig.WithDefaults()
 	executorFactory := r.SubstrateExecutorFactory
 	if executorFactory == nil {
@@ -792,12 +802,11 @@ func (r *ToolReconciler) ensureSubstrateMCPToolActorLease(ctx context.Context, t
 	if actorID == "" {
 		return nil
 	}
-	key := types.NamespacedName{Namespace: tool.Namespace, Name: substrateMCPToolActorLeaseName(actorID)}
-	lease := &coordinationv1.Lease{}
-	if err := r.Get(ctx, key, lease); err != nil {
-		if !errors.IsNotFound(err) {
-			return err
-		}
+	lease, held, err := r.substrateMCPToolActorLeaseHeldByTool(ctx, tool, tool.Namespace, actorID)
+	if err != nil {
+		return err
+	}
+	if lease == nil {
 		lease = newSubstrateMCPToolActorLease(tool, tool.Namespace, actorID)
 		if err := r.Create(ctx, lease); err != nil {
 			if errors.IsAlreadyExists(err) {
@@ -807,7 +816,7 @@ func (r *ToolReconciler) ensureSubstrateMCPToolActorLease(ctx context.Context, t
 		}
 		return nil
 	}
-	if !substrateMCPToolActorLeaseHeldByTool(lease, tool) {
+	if !held {
 		return fmt.Errorf("substrate MCP tool actor lease %q in namespace %q is held by another owner", lease.Name, lease.Namespace)
 	}
 	patch := client.MergeFromWithOptions(lease.DeepCopy(), client.MergeFromWithOptimisticLock{})
@@ -887,19 +896,29 @@ func (r *ToolReconciler) substrateMCPToolActorLeaseHeldByTool(
 	if actorID == "" || leaseNamespace == "" {
 		return nil, false, nil
 	}
-	lease := &coordinationv1.Lease{}
-	key := types.NamespacedName{Namespace: leaseNamespace, Name: substrateMCPToolActorLeaseName(actorID)}
-	if err := r.Get(ctx, key, lease); err != nil {
-		if errors.IsNotFound(err) {
-			return nil, false, nil
+	var selected *coordinationv1.Lease
+	names := []string{substrateMCPToolActorLeaseName(actorID)}
+	if names[0] != actorID {
+		// Early native controllers wrote the qualified ID as the lease name.
+		// Read both forms without creating a second ownership claim.
+		names = append(names, actorID)
+	}
+	for _, name := range names {
+		lease := &coordinationv1.Lease{}
+		if err := r.Get(ctx, types.NamespacedName{Namespace: leaseNamespace, Name: name}, lease); err != nil {
+			if errors.IsNotFound(err) {
+				continue
+			}
+			return nil, false, err
 		}
-		return nil, false, err
+		if lease.Labels[labels.LabelPurpose] != substrateMCPToolActorLeasePurpose || !substrateMCPToolActorLeaseHeldByTool(lease, tool) {
+			return lease, false, nil
+		}
+		if selected == nil {
+			selected = lease
+		}
 	}
-	if lease.Labels[labels.LabelPurpose] != substrateMCPToolActorLeasePurpose ||
-		!substrateMCPToolActorLeaseHeldByTool(lease, tool) {
-		return lease, false, nil
-	}
-	return lease, true, nil
+	return selected, selected != nil, nil
 }
 
 func (r *ToolReconciler) deleteSubstrateMCPToolActorLease(
@@ -908,26 +927,30 @@ func (r *ToolReconciler) deleteSubstrateMCPToolActorLease(
 	leaseNamespace string,
 	actorID string,
 ) error {
-	lease, held, err := r.substrateMCPToolActorLeaseHeldByTool(ctx, tool, leaseNamespace, actorID)
-	if err != nil {
-		return err
-	}
-	if lease == nil || !held {
-		return nil
-	}
-	if err := r.Delete(ctx, lease, deleteCurrentObjectPreconditions(lease)...); err != nil && !errors.IsNotFound(err) {
-		if errors.IsConflict(err) {
-			stillHeld, verifyErr := substrateLeaseStillMatchesAfterDeleteConflict(ctx, r.Client, lease, func(latest *coordinationv1.Lease) bool {
-				return substrateMCPToolActorLeaseHeldByTool(latest, tool)
-			})
-			if verifyErr != nil {
-				return verifyErr
-			}
-			if !stillHeld {
-				return nil
-			}
+	// A partially upgraded controller may have left both lease-name forms.
+	// Remove each only while both remain attributable to this exact Tool.
+	for range 2 {
+		lease, held, err := r.substrateMCPToolActorLeaseHeldByTool(ctx, tool, leaseNamespace, actorID)
+		if err != nil {
+			return err
 		}
-		return err
+		if lease == nil || !held {
+			return nil
+		}
+		if err := r.Delete(ctx, lease, deleteCurrentObjectPreconditions(lease)...); err != nil && !errors.IsNotFound(err) {
+			if errors.IsConflict(err) {
+				stillHeld, verifyErr := substrateLeaseStillMatchesAfterDeleteConflict(ctx, r.Client, lease, func(latest *coordinationv1.Lease) bool {
+					return substrateMCPToolActorLeaseHeldByTool(latest, tool)
+				})
+				if verifyErr != nil {
+					return verifyErr
+				}
+				if !stillHeld {
+					return nil
+				}
+			}
+			return err
+		}
 	}
 	return nil
 }

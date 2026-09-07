@@ -1424,7 +1424,7 @@ func TestToolReconcilerMCPSubstrateActorMigratesPooledLeaseOutsideTarget(t *test
 		},
 	}
 	prefix := deterministicSubstratePoolActorPrefix(defaultNS, testMCPPoolName)
-	oldActorID := deterministicSubstratePoolActorID(prefix, 4)
+	oldActorID := workspace.SubstrateActorKey("ate-demo", deterministicSubstratePoolActorID(prefix, 4))
 	wantActorID := deterministicSubstratePoolActorID(prefix, deterministicSubstratePoolActorOrdinal(
 		pool.Spec.TargetActors,
 		prefix,
@@ -1466,7 +1466,7 @@ func TestToolReconcilerMCPSubstrateActorMigratesPooledLeaseOutsideTarget(t *test
 			},
 		},
 	}
-	oldLease := newSubstrateMCPPoolActorLease(tool, defaultNS, oldActorID, oldActorID)
+	oldLease := newSubstrateMCPPoolActorLease(tool, defaultNS, substratePoolActorLeaseName(oldActorID), oldActorID)
 	executor := &recordingToolWorkspaceExecutor{}
 	r := &ToolReconciler{
 		Client: fake.NewClientBuilder().
@@ -1511,7 +1511,7 @@ func TestToolReconcilerMCPSubstrateActorMigratesPooledLeaseOutsideTarget(t *test
 		t.Fatalf("executor claimName=%q waitReady=%t, want in-range actor %q", executor.claimName, executor.waitReadyCalled, wantActorID)
 	}
 	assertToolDeleteRequest(t, executor, oldActorID, "MCP pooled tool actor replaced")
-	if err := r.Get(context.Background(), types.NamespacedName{Name: oldActorID, Namespace: defaultNS}, &coordinationv1.Lease{}); !apierrors.IsNotFound(err) {
+	if err := r.Get(context.Background(), types.NamespacedName{Name: substratePoolActorLeaseName(oldActorID), Namespace: defaultNS}, &coordinationv1.Lease{}); !apierrors.IsNotFound(err) {
 		t.Fatalf("old out-of-range lease error = %v, want not found", err)
 	}
 	var gotLease coordinationv1.Lease

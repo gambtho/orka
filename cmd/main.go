@@ -194,6 +194,7 @@ func validateDisabledSubstrateRecoveryConfig(
 	ctx context.Context,
 	reader crclient.Reader,
 	watchNamespace string,
+	controllerNamespace string,
 	cfg controller.SubstrateConfig,
 	configErr error,
 ) error {
@@ -205,29 +206,30 @@ func validateDisabledSubstrateRecoveryConfig(
 	if err := reader.List(ctx, pools, crclient.InNamespace(strings.TrimSpace(watchNamespace))); err != nil {
 		return fmt.Errorf("list RuntimePools for disabled substrate recovery: %w", err)
 	}
+	recoveryState := ""
 	for i := range pools.Items {
 		workspace := pools.Items[i].Spec.ExecutionWorkspace
 		if workspace == nil || workspace.Provider != corev1alpha1.WorkspaceProviderSubstrate {
 			continue
 		}
-		pool := &pools.Items[i]
-		if configErr != nil {
-			return fmt.Errorf(
-				"parse substrate recovery configuration for existing RuntimePool %s/%s: %w",
-				pool.Namespace,
-				pool.Name,
-				configErr,
-			)
+		recoveryState = fmt.Sprintf("RuntimePool %s/%s", pools.Items[i].Namespace, pools.Items[i].Name)
+		break
+	}
+	if recoveryState == "" {
+		var err error
+		recoveryState, err = controller.FindSubstrateRecoveryJournal(ctx, reader, controllerNamespace)
+		if err != nil {
+			return err
 		}
-		if err := cfg.ValidateACPRuntimePool(); err != nil {
-			return fmt.Errorf(
-				"existing substrate RuntimePool %s/%s requires valid recovery configuration: %w",
-				pool.Namespace,
-				pool.Name,
-				err,
-			)
-		}
+	}
+	if recoveryState == "" {
 		return nil
+	}
+	if configErr != nil {
+		return fmt.Errorf("parse substrate recovery configuration for existing %s: %w", recoveryState, configErr)
+	}
+	if err := cfg.ValidateACPRuntimePool(); err != nil {
+		return fmt.Errorf("existing substrate %s requires valid recovery configuration: %w", recoveryState, err)
 	}
 	return nil
 }
@@ -1096,6 +1098,7 @@ func main() {
 			checkCtx,
 			mgr.GetAPIReader(),
 			watchNamespace,
+			currentPodNamespace(),
 			substrateConfig,
 			substrateConfigErr,
 		)
@@ -1416,6 +1419,7 @@ func main() {
 		agentSandboxConfig.ControllerNamespace = currentPodNamespace()
 	}
 
+	substrateCheckpointsEnabled := false
 	if acpRuntimeEnabled {
 		runtimePoolReconciler := &controller.RuntimePoolReconciler{
 			Client:           mgr.GetClient(),
@@ -1468,6 +1472,7 @@ func main() {
 				setupLog.Error(err, "unable to create controller", "controller", "SubstrateCheckpoint")
 				os.Exit(1)
 			}
+			substrateCheckpointsEnabled = true
 		} else {
 			setupLog.Info("checkpoint CRD is not installed; skipping substrate checkpoint controller")
 		}
@@ -1740,6 +1745,7 @@ func main() {
 			Client:                      mgr.GetClient(),
 			AgentSandboxEnabled:         agentSandboxEnabled,
 			SubstrateEnabled:            substrateEnabled,
+			SubstrateCheckpointsEnabled: substrateCheckpointsEnabled,
 			ACPWorkspaceDispatchEnabled: acpWorkspaceDispatchEnabled,
 			WorkspaceProviderAPIEnabled: workspaceProviderAPIEnabled,
 		}).SetupWithManager(mgr); err != nil {
