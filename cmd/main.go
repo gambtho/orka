@@ -216,13 +216,10 @@ func validateDisabledSubstrateRecoveryConfig(
 		break
 	}
 	if recoveryState == "" {
-		actorPools := &corev1alpha1.SubstrateActorPoolList{}
-		if err := reader.List(ctx, actorPools, crclient.InNamespace(strings.TrimSpace(watchNamespace))); err != nil {
-			return fmt.Errorf("list SubstrateActorPools for disabled substrate recovery: %w", err)
-		}
-		if len(actorPools.Items) != 0 {
-			pool := &actorPools.Items[0]
-			recoveryState = fmt.Sprintf("SubstrateActorPool %s/%s", pool.Namespace, pool.Name)
+		var err error
+		recoveryState, err = controller.FindSubstrateMCPRecoveryState(ctx, reader, watchNamespace)
+		if err != nil {
+			return err
 		}
 	}
 	if recoveryState == "" {

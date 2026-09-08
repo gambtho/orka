@@ -128,10 +128,24 @@ func TestValidateDisabledSubstrateRecoveryConfig(t *testing.T) {
 			Name: "retained-native-data", Namespace: "controller-system", Labels: map[string]string{label: "true"},
 		}}
 	}
-	actorPool := func(namespace string) *corev1alpha1.SubstrateActorPool {
-		return &corev1alpha1.SubstrateActorPool{
+	actorPool := func(namespace string, owned bool) *corev1alpha1.SubstrateActorPool {
+		pool := &corev1alpha1.SubstrateActorPool{
 			ObjectMeta: metav1.ObjectMeta{Name: "native-mcp", Namespace: namespace},
 		}
+		if owned {
+			pool.Finalizers = []string{"orka.ai/substrate-actor-pool-cleanup"}
+		}
+		return pool
+	}
+	mcpTool := func(namespace string, owned bool) *corev1alpha1.Tool {
+		tool := &corev1alpha1.Tool{
+			ObjectMeta: metav1.ObjectMeta{Name: "native-tool", Namespace: namespace},
+		}
+		if owned {
+			// Cleanup survives a Tool changing or removing its MCP spec.
+			tool.Finalizers = []string{"orka.ai/substrate-mcp-tool-actor-cleanup"}
+		}
+		return tool
 	}
 	tests := []struct {
 		name      string
@@ -170,25 +184,61 @@ func TestValidateDisabledSubstrateRecoveryConfig(t *testing.T) {
 		},
 		{
 			name:      "existing actor pool requires control authentication",
-			objects:   []client.Object{actorPool("team-a")},
+			objects:   []client.Object{actorPool("team-a", true)},
 			config:    unauthenticatedConfig,
 			wantError: "SubstrateActorPool team-a/native-mcp requires valid recovery configuration",
 		},
 		{
 			name:      "existing actor pool preserves configuration parse failure",
-			objects:   []client.Object{actorPool("team-a")},
+			objects:   []client.Object{actorPool("team-a", true)},
 			config:    validConfig,
 			configErr: errors.New("invalid disabled-only duration"),
 			wantError: "parse substrate recovery configuration for existing SubstrateActorPool",
 		},
 		{
 			name:    "existing actor pool accepts valid recovery configuration",
-			objects: []client.Object{actorPool("team-a")},
+			objects: []client.Object{actorPool("team-a", true)},
 			config:  validConfig,
 		},
 		{
 			name:      "actor pool outside the watch namespace is not managed",
-			objects:   []client.Object{actorPool("team-b")},
+			objects:   []client.Object{actorPool("team-b", true)},
+			config:    invalidConfig,
+			configErr: errors.New("invalid disabled-only duration"),
+		},
+		{
+			name:      "unused actor pool ignores disabled provider configuration",
+			objects:   []client.Object{actorPool("team-a", false)},
+			config:    invalidConfig,
+			configErr: errors.New("invalid disabled-only duration"),
+		},
+		{
+			name:      "dedicated MCP tool requires control authentication",
+			objects:   []client.Object{mcpTool("team-a", true)},
+			config:    unauthenticatedConfig,
+			wantError: "Tool team-a/native-tool requires valid recovery configuration",
+		},
+		{
+			name:      "dedicated MCP tool preserves configuration parse failure",
+			objects:   []client.Object{mcpTool("team-a", true)},
+			config:    validConfig,
+			configErr: errors.New("invalid disabled-only duration"),
+			wantError: "parse substrate recovery configuration for existing Tool",
+		},
+		{
+			name:    "dedicated MCP tool accepts valid recovery configuration",
+			objects: []client.Object{mcpTool("team-a", true)},
+			config:  validConfig,
+		},
+		{
+			name:      "unused MCP tool ignores disabled provider configuration",
+			objects:   []client.Object{mcpTool("team-a", false)},
+			config:    invalidConfig,
+			configErr: errors.New("invalid disabled-only duration"),
+		},
+		{
+			name:      "MCP tool outside the watch namespace is not managed",
+			objects:   []client.Object{mcpTool("team-b", true)},
 			config:    invalidConfig,
 			configErr: errors.New("invalid disabled-only duration"),
 		},
