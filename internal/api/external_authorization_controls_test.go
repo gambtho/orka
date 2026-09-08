@@ -316,6 +316,9 @@ func TestExternalAPIProposalAppliedMemoryRequiresNamedRead(t *testing.T) {
 
 func TestExternalAPIAuthorizedSecurityActions(t *testing.T) {
 	f := newExternalAuthorizationFixture(t)
+	reviewer := repositoryMonitorHandlerTestAgent("reviewer", corev1alpha1.AgentRuntimeClaude)
+	reviewer.Namespace = "default"
+	require.NoError(t, f.kube.Create(t.Context(), reviewer))
 	scan := &corev1alpha1.RepositoryScan{}
 	require.NoError(t, f.kube.Get(t.Context(), client.ObjectKey{Namespace: "default", Name: "protected"}, scan))
 	scan.Spec = corev1alpha1.RepositoryScanSpec{

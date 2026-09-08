@@ -23,6 +23,9 @@ func TestExternalAPISecurityActionGrantsRemainScoped(t *testing.T) {
 	for _, action := range []string{"validate", "patch"} {
 		t.Run(action, func(t *testing.T) {
 			f := newExternalAuthorizationFixture(t)
+			reviewer := repositoryMonitorHandlerTestAgent("reviewer", corev1alpha1.AgentRuntimeClaude)
+			reviewer.Namespace = "default"
+			require.NoError(t, f.kube.Create(t.Context(), reviewer))
 			scan := &corev1alpha1.RepositoryScan{}
 			require.NoError(t, f.kube.Get(t.Context(), client.ObjectKey{Namespace: "default", Name: "protected"}, scan))
 			scan.Spec = corev1alpha1.RepositoryScanSpec{
@@ -84,6 +87,9 @@ func TestExternalAPIScanAdmissionRequiresTaskList(t *testing.T) {
 	for _, active := range []bool{false, true} {
 		t.Run("active="+boolString(active), func(t *testing.T) {
 			f := newExternalAuthorizationFixture(t)
+			reviewer := repositoryMonitorHandlerTestAgent("reviewer", corev1alpha1.AgentRuntimeClaude)
+			reviewer.Namespace = "default"
+			require.NoError(t, f.kube.Create(t.Context(), reviewer))
 			scan := &corev1alpha1.RepositoryScan{}
 			require.NoError(t, f.kube.Get(t.Context(), client.ObjectKey{Namespace: "default", Name: "protected"}, scan))
 			scan.Spec = corev1alpha1.RepositoryScanSpec{RepoURL: "https://github.com/orka-agents/orka", AnalysisAgentRef: corev1alpha1.AgentReference{Name: "reviewer"}}
@@ -142,6 +148,9 @@ func TestExternalAPIScannerPolicyConfigMapReads(t *testing.T) {
 		for _, deniedName := range []string{"scan-policy", "fp-policy"} {
 			t.Run(action.name+"/"+deniedName, func(t *testing.T) {
 				f := newExternalAuthorizationFixture(t)
+				reviewer := repositoryMonitorHandlerTestAgent("reviewer", corev1alpha1.AgentRuntimeClaude)
+				reviewer.Namespace = "default"
+				require.NoError(t, f.kube.Create(t.Context(), reviewer))
 				policies := map[string]string{
 					"scan-policy": "Inspect parser bounds.",
 					"fp-policy":   "Exclude documented test fixtures.",

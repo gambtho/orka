@@ -37,6 +37,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/agentruntimepolicy"
 	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/security"
 	"github.com/orka-agents/orka/internal/store"
@@ -118,6 +119,13 @@ type RepositoryScanReconciler struct {
 	// backs harness-v2 patch evidence; zero values use the defaults.
 	HTTPClient       *http.Client
 	GitHubAPIBaseURL string
+}
+
+func (r *RepositoryScanReconciler) agentRuntimePolicyReader() client.Reader {
+	if r.APIReader != nil {
+		return r.APIReader
+	}
+	return r.Client
 }
 
 func repositoryScanConditionMessage(message, fallback string) string {
@@ -433,6 +441,9 @@ func (r *RepositoryScanReconciler) createScanRun(ctx context.Context, scan *core
 	}
 	if err := controllerutil.SetControllerReference(scan, task, r.Scheme); err != nil {
 		return err
+	}
+	if err := agentruntimepolicy.ResolveAndMaterializeTaskRuntimeRefAllowedTools(ctx, r.agentRuntimePolicyReader(), task); err != nil {
+		return fmt.Errorf("resolve threat-model Task AgentRuntime policy: %w", err)
 	}
 	run := &store.ScanRun{
 		ID:                   scanID,
@@ -970,7 +981,7 @@ func (r *RepositoryScanReconciler) createReviewTasks(ctx context.Context, scan *
 		return err
 	}
 	for _, reviewSlice := range reviewSlices {
-		task, err := r.buildReviewTask(targetScan, run, threatModel, reviewSlice, policy, securityReviewInitialAttempt)
+		task, err := r.buildReviewTask(ctx, targetScan, run, threatModel, reviewSlice, policy, securityReviewInitialAttempt)
 		if err != nil {
 			return err
 		}
@@ -985,6 +996,7 @@ func (r *RepositoryScanReconciler) createReviewTasks(ctx context.Context, scan *
 }
 
 func (r *RepositoryScanReconciler) buildReviewTask(
+	ctx context.Context,
 	scan *corev1alpha1.RepositoryScan,
 	run *store.ScanRun,
 	threatModel string,
@@ -1050,6 +1062,9 @@ func (r *RepositoryScanReconciler) buildReviewTask(
 	}
 	if err := controllerutil.SetControllerReference(scan, task, r.Scheme); err != nil {
 		return nil, err
+	}
+	if err := agentruntimepolicy.ResolveAndMaterializeTaskRuntimeRefAllowedTools(ctx, r.agentRuntimePolicyReader(), task); err != nil {
+		return nil, fmt.Errorf("resolve review Task AgentRuntime policy: %w", err)
 	}
 	return task, nil
 }
@@ -2116,6 +2131,9 @@ func (r *RepositoryScanReconciler) ensureValidationTask(ctx context.Context, sca
 	}
 	if err := controllerutil.SetControllerReference(scan, task, r.Scheme); err != nil {
 		return err
+	}
+	if err := agentruntimepolicy.ResolveAndMaterializeTaskRuntimeRefAllowedTools(ctx, r.agentRuntimePolicyReader(), task); err != nil {
+		return fmt.Errorf("resolve validation Task AgentRuntime policy: %w", err)
 	}
 	if existing != nil {
 		// Recover older timestamp-named Tasks and manually requested validation
@@ -3436,7 +3454,7 @@ func (r *RepositoryScanReconciler) ensureReviewResultRetry(
 		return false, err
 	}
 
-	desired, err := r.buildReviewTask(targetScan, run, threatModel, *reviewSlice, policy, securityReviewRetryAttempt)
+	desired, err := r.buildReviewTask(ctx, targetScan, run, threatModel, *reviewSlice, policy, securityReviewRetryAttempt)
 	if err != nil {
 		return false, err
 	}

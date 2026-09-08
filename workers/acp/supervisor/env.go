@@ -30,6 +30,7 @@ const (
 	providerToolWebSearch        = "WebSearch"
 	providerToolWrite            = "Write"
 	architectureARM64            = "arm64"
+	acpCommandProtocol           = "acp"
 	EnvListenAddress             = "ORKA_ACP_LISTEN_ADDRESS"
 	EnvRuntimeInstanceID         = "ORKA_ACP_RUNTIME_INSTANCE_ID"
 	EnvSupervisorBootID          = "ORKA_ACP_SUPERVISOR_BOOT_ID"
@@ -247,13 +248,9 @@ func LoadConfigFromEnv() (Config, error) {
 		Protocol: harnessv2.ProtocolVersion, Transport: "http+ndjson", ACPVersion: harnessv2.ACPProfileV1,
 		RuntimeProfileDigest: profileDigest, ProfileDigestSchemaVersion: harnessv2.ProfileDigestSchemaVersion,
 		AdapterDigests: profile.AdapterDigests, Limits: limits, SupportsDrain: true, SupportsPublicationFinalization: true,
-		SupportsAgentSessionConfiguration: true,
-		Provider: harnessv2.ProviderCapabilities{
-			ProviderKinds: []string{providerKind}, Models: []string{model}, SupportsPermissions: true,
-			SupportsCancel: true, SupportsTools: true, SupportsImages: true,
-			SupportsEmbeddedResources: true,
-		},
-		WorkspaceGovernance: harnessv2.StrictWorkspaceGovernanceCapabilities(),
+		SupportsAgentSessionConfiguration: providerKind != providerKindAgentKit && providerKind != providerKindFoundry,
+		Provider:                          providerCapabilities(providerKind, model),
+		WorkspaceGovernance:               harnessv2.StrictWorkspaceGovernanceCapabilities(),
 	}
 	cfg := Config{
 		ListenAddress: envDefault(EnvListenAddress, ":8080"),
@@ -279,6 +276,10 @@ func LoadConfigFromEnv() (Config, error) {
 		E2EPromptWriteAmbiguityMarker: e2ePromptWriteAmbiguityMarker,
 	}
 	cfg.ProviderProxy.ModelOutputLimit = modelOutputLimit
+	if providerKind == providerKindFoundry {
+		// Remote Hosted Agent stop/delete must complete before settlement.
+		cfg.CancelGrace = foundryCleanupTimeout
+	}
 	if err := cfg.Validate(); err != nil {
 		return Config{}, err
 	}
@@ -288,6 +289,20 @@ func LoadConfigFromEnv() (Config, error) {
 // providerAdapterDigests keeps the supervisor's default-nil unknown-provider
 // behavior while sourcing the shared built-in adapter digest table.
 func providerAdapterDigests(provider string) map[string]string {
+	if provider == providerKindFoundry {
+		digest, err := foundryAdapterDigestFromEnv()
+		if err != nil {
+			return nil
+		}
+		return map[string]string{foundryAdapterName: digest}
+	}
+	if provider == providerKindAgentKit {
+		digest, err := agentKitAdapterDigestFromEnv()
+		if err != nil {
+			return nil
+		}
+		return agentKitAdapterDigests(digest)
+	}
 	return acp.BuiltInRuntimeAdapterDigests(provider)
 }
 
@@ -467,8 +482,15 @@ func claudeSessionProjection(
 		return ProviderSessionProjection{}, err
 	}
 	options := map[string]any{"maxTurns": request.AgentConfiguration.MaxTurns}
+	var environment map[string]string
 	if effort := request.AgentConfiguration.ReasoningEffort; effort != "" {
 		options["effort"] = effort
+	} else {
+		// Claude Code 2.1.217 infers high effort for unknown gateway model IDs,
+		// including claude-haiku-4.5, even when the model rejects effort.
+		// "unset" omits that inferred API field; explicit effort stays in options
+		// because this environment variable takes precedence over SDK options.
+		environment = map[string]string{"CLAUDE_CODE_EFFORT_LEVEL": "unset"}
 	}
 	if !policy.unrestricted {
 		allowed, disallowed := providerNativePolicyLists(policy)
@@ -479,7 +501,7 @@ func claudeSessionProjection(
 	if systemPrompt := request.AgentConfiguration.SystemPrompt; systemPrompt != "" {
 		meta["systemPrompt"] = systemPrompt
 	}
-	return ProviderSessionProjection{NewSessionMeta: meta}, nil
+	return ProviderSessionProjection{Environment: environment, NewSessionMeta: meta}, nil
 }
 
 var copilotToolIDs = map[string][]string{
@@ -671,7 +693,7 @@ func providerProfile(
 		}
 		return ProviderProfile{
 			Kind: kind, Model: model, Command: "/opt/opencode/bin/opencode",
-			Args:        []string{"--pure", "acp", "--hostname", "127.0.0.1", "--port", "0", "--no-mdns"},
+			Args:        []string{"--pure", acpCommandProtocol, "--hostname", "127.0.0.1", "--port", "0", "--no-mdns"},
 			AdapterName: openCodeAdapterName(), AdapterDigest: openCodeAdapterDigest(),
 			ProjectSession: func(request harnessv2.CreateRuntimeSessionRequest, paths acp.SessionPaths, proxy ProviderProxyBinding) (ProviderSessionProjection, error) {
 				return openCodeSessionProjection(request, paths, proxy, model)
@@ -709,6 +731,10 @@ func providerProfile(
 			},
 			PrepareSession: prepareOpenCodeConfig,
 		}, nil
+	case providerKindAgentKit:
+		return agentKitProviderProfile(model)
+	case providerKindFoundry:
+		return foundryProviderProfile(model)
 	default:
 		return ProviderProfile{}, fmt.Errorf("unsupported ACP provider %q", kind)
 	}
@@ -811,6 +837,9 @@ func openCodeSessionConfig(
 		permissions["write"] = openCodePermissionDeny
 	}
 	return json.Marshal(map[string]any{
+		// Native ACP returns before background title inference settles. Titles
+		// must not consume prompt quota or outlive the governed prompt.
+		"agent":             map[string]any{"title": map[string]bool{"disable": true}},
 		"$schema":           "https://opencode.ai/config.json",
 		"autoupdate":        false,
 		"enabled_providers": []string{openCodeProviderID},
@@ -951,7 +980,7 @@ func defaultProxyBaseURL() string {
 
 func providerUpstreamBaseURL(provider, base string) string {
 	base = strings.TrimSuffix(strings.TrimSpace(base), "/")
-	if provider == providerKindCodex || provider == providerKindCopilot || provider == providerKindOpencode {
+	if provider == providerKindCodex || provider == providerKindCopilot || provider == providerKindOpencode || provider == providerKindAgentKit || provider == providerKindFoundry {
 		return openAIProxyURL(base)
 	}
 	return base

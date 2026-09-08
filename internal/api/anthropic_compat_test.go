@@ -50,7 +50,7 @@ func setupTestAnthropicHandler(objs ...runtime.Object) (*AnthropicCompatHandler,
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(objs...).Build()
 	config := DefaultChatConfig()
 	resolver := NewProviderResolver(fakeClient, config)
-	handler := NewAnthropicCompatHandler(fakeClient, "default", false, config, resolver, nil)
+	handler := NewAnthropicCompatHandler(fakeClient, nil, "default", false, config, resolver, nil)
 
 	app := fiber.New()
 	return handler, app
