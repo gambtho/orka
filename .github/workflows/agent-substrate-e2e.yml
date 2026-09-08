@@ -96,6 +96,8 @@ jobs:
           test_dir="$(mktemp -d /tmp/orka-checkpoint-tests.XXXXXX)"
           trap 'rm -rf "${test_dir}"' EXIT
           chmod 755 "${test_dir}"
+          go build -o "${test_dir}/orka-acp-exec-helper" ./cmd/orka-acp-exec-helper
+          sudo install -m 0755 "${test_dir}/orka-acp-exec-helper" /usr/local/bin/orka-acp-exec-helper
           go test -c -o "${test_dir}/supervisor.test" ./workers/acp/supervisor
           sudo "${test_dir}/supervisor.test" -test.run '^TestDurableWorkspaceCleanupReclaimsOwnership$' -test.v
 

@@ -20,6 +20,9 @@ func TestDurableWorkspaceCleanupReclaimsOwnership(t *testing.T) {
 	if os.Geteuid() != 0 {
 		t.Skip("requires root to exercise distinct supervisor and agent identities")
 	}
+	if _, err := os.Stat(acp.DefaultExecHelperCommand); err != nil {
+		t.Fatalf("install the production ACP exec helper before running this test: %v", err)
+	}
 	for _, action := range []string{"delete", "drain", "close"} {
 		t.Run(action, func(t *testing.T) {
 			// The fixture child has a distinct UID and needs traversal through
