@@ -134,7 +134,7 @@ class SubmissionTests(unittest.TestCase):
                          "spec": {"type": "agent", "agentRef": {"name": "template-agent"},
                                   "prompt": "Preserve the shared incident evidence.\n",
                                   "timeout": "5m", "workspace": {"intent": "read"},
-                                  "agentRuntime": {"allowedTools": [], "allowBash": False}}},
+                                  "agentRuntime": {"allowedTools": []}}},
         }
 
     def run_demo(self, fixtures, backend="agentkit", scenario="success", arguments=None):

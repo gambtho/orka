@@ -13,7 +13,6 @@ spec:
     intent: read
   agentRuntime:
     allowedTools: []
-    allowBash: false
   prompt: |
     Investigate this synthetic Quincy North pump alert using only the evidence
     below. Separate observations from hypotheses. Summarize the likely cause,

@@ -57,6 +57,10 @@ the empty `mcpPolicy` in the templates. The runtime's `/v2/capabilities` must
 advertise `supportsAgentSessionConfiguration: false`; that is an HTTP capability,
 not an additional field in the AgentRuntime CRD.
 
+The Task selects only `agentRuntime.allowedTools: []`. Keep `allowBash: false`
+in the registration's MCP policy; any Task-level `allowBash` value is an
+unsupported runtime override, including `false`.
+
 Do not hash the Agentkitfile as the AgentKit configuration digest. AgentKit
 renders that input into a different `/agent/agent.yaml` file. The overall
 `profile.digest` is also distinct from the image and configuration digests; it
@@ -197,8 +201,9 @@ before the shared allowlist can change.
 bash scripts/tests/fibey-v2-demo-test.sh
 kubectl kustomize examples/fibey-custom-agent-demo
 go test ./internal/admission -run 'Test(Shipped|Documented)ManifestsDecodeStrictly' -count=1
+go test ./internal/controller -run TestFibeyDemoRuntimeRefCompatibility -count=1
 ```
 
-These validate the manifests and submission behavior without a cluster, Azure,
-or a model. Successful live runs still require the configured hosted endpoint
-and provider credentials.
+These validate the manifests, controller compatibility, and submission behavior
+without a cluster, Azure, or a model. Successful live runs still require the
+configured hosted endpoint and provider credentials.
