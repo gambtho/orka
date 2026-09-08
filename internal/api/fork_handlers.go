@@ -185,12 +185,13 @@ func (h *Handlers) ForkTask(c fiber.Ctx) error {
 		case apierrors.IsAlreadyExists(err):
 			// Idempotent recovery only when the caller opted in with an
 			// Idempotency-Key: the existing object is the same logical fork (same
-			// source + checkpoint), so return it instead of creating a duplicate.
+			// source, transcript sequence, and workspace checkpoint), so return it
+			// instead of creating a duplicate.
 			// Without a key (default unique auto-name, or an explicit user-supplied
 			// name), a collision is a genuine conflict — we never silently alias a
 			// divergent fork onto a pre-existing Task whose spec differs.
 			if idempotent {
-				if existing, ok := h.matchingExistingFork(c.Context(), namespace, newName, sourceName, afterSeq); ok {
+				if existing, ok := h.matchingExistingFork(c.Context(), namespace, newName, sourceName, afterSeq, req.ExecutionCheckpoint); ok {
 					return c.Status(fiber.StatusOK).JSON(ForkTaskResponse{Namespace: namespace, SourceTaskName: sourceName, NewTaskName: existing.Name, AfterSeq: afterSeq, ForkContext: forkCtx})
 				}
 			}
@@ -300,9 +301,12 @@ func generatedForkTaskName(sourceName string) string {
 }
 
 // matchingExistingFork returns the existing Task at newName if it is the same
-// logical fork (same source task and checkpoint seq), enabling idempotent
-// recovery on retry.
-func (h *Handlers) matchingExistingFork(ctx context.Context, namespace, newName, sourceName string, afterSeq int64) (*corev1alpha1.Task, bool) {
+// logical fork (same source task, transcript sequence, and exact workspace
+// checkpoint), enabling idempotent recovery on retry.
+func (h *Handlers) matchingExistingFork(
+	ctx context.Context, namespace, newName, sourceName string, afterSeq int64,
+	checkpoint *corev1alpha1.WorkspaceCheckpointReference,
+) (*corev1alpha1.Task, bool) {
 	existing := &corev1alpha1.Task{}
 	if err := h.client.Get(ctx, types.NamespacedName{Namespace: namespace, Name: newName}, existing); err != nil {
 		return nil, false
@@ -311,6 +315,17 @@ func (h *Handlers) matchingExistingFork(ctx context.Context, namespace, newName,
 		return nil, false
 	}
 	if existing.Annotations[labels.AnnotationForkSourceSeq] != strconv.FormatInt(afterSeq, 10) {
+		return nil, false
+	}
+	var existingCheckpoint *corev1alpha1.WorkspaceCheckpointReference
+	if execution := existing.Spec.Execution; execution != nil && execution.Workspace != nil {
+		existingCheckpoint = execution.Workspace.RestoreFrom
+	}
+	if checkpoint == nil {
+		if existingCheckpoint != nil {
+			return nil, false
+		}
+	} else if existingCheckpoint == nil || *existingCheckpoint != *checkpoint {
 		return nil, false
 	}
 	return existing, true

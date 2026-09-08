@@ -1,7 +1,10 @@
 package api
 
 import (
+	"bytes"
+	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
@@ -42,6 +45,85 @@ func TestForkWorkspaceUsesIndependentSessionAndExplicitData(t *testing.T) {
 		require.Equal(t, corev1alpha1.WorkspaceReusePolicySession, spec.Execution.Workspace.ReusePolicy)
 		require.Equal(t, corev1alpha1.WorkspaceOnDetachSuspend, spec.Execution.Workspace.OnDetach)
 		require.Equal(t, ref, spec.Execution.Workspace.RestoreFrom)
+	}
+}
+
+func TestForkWorkspaceIdempotencyRequiresSameCheckpoint(t *testing.T) {
+	checkpoint := &corev1alpha1.WorkspaceCheckpointReference{
+		Name: "selected-data", UID: "checkpoint-uid", Digest: "sha256:" + strings.Repeat("a", 64),
+	}
+	changedName, changedUID, changedDigest := checkpoint.DeepCopy(), checkpoint.DeepCopy(), checkpoint.DeepCopy()
+	changedName.Name = "other-data"
+	changedUID.UID = "replacement-uid"
+	changedDigest.Digest = "sha256:" + strings.Repeat("b", 64)
+	for _, tc := range []struct {
+		name       string
+		initial    *corev1alpha1.WorkspaceCheckpointReference
+		retry      *corev1alpha1.WorkspaceCheckpointReference
+		wantStatus int
+	}{
+		{name: "same checkpoint", initial: checkpoint, retry: checkpoint.DeepCopy(), wantStatus: http.StatusOK},
+		{name: "no checkpoint", wantStatus: http.StatusOK},
+		{name: "changed name", initial: checkpoint, retry: changedName, wantStatus: http.StatusConflict},
+		{name: "changed UID", initial: checkpoint, retry: changedUID, wantStatus: http.StatusConflict},
+		{name: "changed digest", initial: checkpoint, retry: changedDigest, wantStatus: http.StatusConflict},
+		{name: "removed checkpoint", initial: checkpoint, wantStatus: http.StatusConflict},
+		{name: "added checkpoint", retry: checkpoint, wantStatus: http.StatusConflict},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			eventStore := storetest.NewFakeExecutionEventStore()
+			appendTestTaskEvent(t, eventStore, "source", events.ExecutionEventTypeTaskStarted)
+			source := testTask("default", "source")
+			source.Spec.Type = corev1alpha1.TaskTypeAgent
+			source.Spec.Execution = &corev1alpha1.ExecutionSpec{Workspace: &corev1alpha1.ExecutionWorkspaceSpec{
+				ClassRef: &corev1alpha1.WorkspaceClassReference{Name: "substrate-data"},
+			}}
+			h, app := setupPostP0Handlers(t, eventStore, nil, source)
+			h.clientset, _ = externalToolReviews(t, func(authorizationv1.SubjectAccessReviewSpec) (runtime.Object, error) {
+				return externalToolReview(true), nil
+			})
+			app.Use(func(c fiber.Ctx) error {
+				c.Locals(UserInfoContextKey, externalToolUser())
+				return c.Next()
+			})
+			app.Post("/api/v1/tasks/:id/fork", h.ForkTask)
+			doFork := func(ref *corev1alpha1.WorkspaceCheckpointReference) *http.Response {
+				t.Helper()
+				afterSeq := int64(1)
+				body, err := json.Marshal(ForkTaskRequest{AfterSeq: &afterSeq, ExecutionCheckpoint: ref})
+				require.NoError(t, err)
+				request := httptest.NewRequest(http.MethodPost, "/api/v1/tasks/source/fork?namespace=default", bytes.NewReader(body))
+				request.Header.Set("Content-Type", "application/json")
+				request.Header.Set("Idempotency-Key", "checkpoint-retry")
+				response, err := app.Test(request)
+				require.NoError(t, err)
+				t.Cleanup(func() { _ = response.Body.Close() })
+				return response
+			}
+			first := doFork(tc.initial)
+			require.Equal(t, http.StatusCreated, first.StatusCode)
+			var created ForkTaskResponse
+			require.NoError(t, json.NewDecoder(first.Body).Decode(&created))
+			retry := doFork(tc.retry)
+			require.Equal(t, tc.wantStatus, retry.StatusCode)
+			if tc.wantStatus == http.StatusOK {
+				var recovered ForkTaskResponse
+				require.NoError(t, json.NewDecoder(retry.Body).Decode(&recovered))
+				require.Equal(t, created.NewTaskName, recovered.NewTaskName)
+			}
+			stored := &corev1alpha1.Task{}
+			require.NoError(t, h.client.Get(t.Context(), types.NamespacedName{Namespace: "default", Name: created.NewTaskName}, stored))
+			require.Equal(t, tc.initial, stored.Spec.Execution.Workspace.RestoreFrom)
+			tasks := &corev1alpha1.TaskList{}
+			require.NoError(t, h.client.List(t.Context(), tasks))
+			require.Len(t, tasks.Items, 2, "retry must preserve the source and its one fork")
+			forkEvents, err := eventStore.ListExecutionEvents(t.Context(), store.ExecutionEventFilter{Namespace: "default", StreamID: created.NewTaskName})
+			require.NoError(t, err)
+			require.Len(t, forkEvents, 1, "retry must not append fork events")
+			sourceEvents, err := eventStore.ListExecutionEvents(t.Context(), store.ExecutionEventFilter{Namespace: "default", StreamID: "source"})
+			require.NoError(t, err)
+			require.Len(t, sourceEvents, 3, "retry must not append source events")
+		})
 	}
 }
 
