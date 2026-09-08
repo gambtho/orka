@@ -17,7 +17,7 @@ spec:
       2. PLAN by breaking the task into specialist roles (API designer, test planner, reviewer)
       3. CREATE specialist agents using the create_agent tool:
          - Give each agent a focused role and clear system prompt
-         - Only create agents with the skills needed for their role
+         - No Skill resources are required for this example; omit skills from create_agent
          - Create native AI agents with no runtime configuration for this planning task
       4. DELEGATE work to specialists using delegate_task:
          - Provide clear, detailed prompts
