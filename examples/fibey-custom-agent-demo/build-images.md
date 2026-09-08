@@ -1,4 +1,7 @@
-# Build and configure the Fibey runtimes
+# Build and register the Fibey runtimes
+
+This guide is for operators provisioning the two backends. Complete their
+registration before running the [demo](README.md#connect-the-agents).
 
 Build one Fibey AgentKit image, then use its digest for both direct ACP and the
 Foundry-hosted wrapper. These commands use the `remote-vm` builder and
@@ -7,8 +10,7 @@ Foundry-hosted wrapper. These commands use the `remote-vm` builder and
 Use AgentKit source containing commit `c9a18070363b9eded0be8ca826d8fc5365afc828`
 and Foundry runtime source containing
 `57988dbe9d6b9a5ed2a39ce10b3d5abc8a68a7c7`, or successors with the same contracts.
-The Orka checkout must contain the external-v2 integration from PR #487 and
-the `orka-acp-runtime --export-registration` command used by this demo.
+The Orka checkout must contain the external-v2 integration from PR #487.
 Configure the source directories and your writable registry:
 
 ```bash
@@ -160,8 +162,45 @@ Only the broker receives Azure Workload Identity or another refreshable
 `DefaultAzureCredential` configuration. The broker's state must survive both
 container and Pod replacement and remain inaccessible to the ACP child.
 
-Expose the supervisor as `fibey-foundry-runtime`, then complete the
-[registration and comparison steps](README.md#register-the-backends). A ready
-hosted container does not establish that the bridge can authenticate, settle
-remote work, or pass Orka's v2 conformance; wait for the actual AgentRuntime to
-be Ready before submitting the incident.
+Expose the supervisor as `fibey-foundry-runtime`.
+
+## Register the deployed backends
+
+Create the two `AgentRuntime` registrations as part of backend provisioning,
+following the [external runtime contract](../../website/docs/guides/bring-your-own-agent-runtime.md#strict-governed-registration)
+and its complete registration sample. The deployment must pin the exact
+identity, profile, protocol limits, and governance claims of each service:
+
+| Registration | `providerKind` | `adapterName` | Adapter digest | Agent configuration digest |
+| --- | --- | --- | --- | --- |
+| `fibey-agentkit-runtime` | `agentkit` | `agentkit-serve-acp` | Digest of the Fibey AgentKit source image, before supervisor composition | SHA-256 of the exact baked `/agent/agent.yaml` bytes |
+| `fibey-foundry-runtime` | `foundry` | `foundry-serve-acp` | Digest of the configured Foundry ACP source image, before supervisor composition | SHA-256 of the exact baked `/agent/foundry.json` bytes |
+
+Both profiles use read intent, credential role `operator-managed`, credential
+scope `external-runtime`, and resource class `external`. The model must match
+the baked configuration. Keep all MCP tool and approval lists empty and
+`allowBash: false`. The runtime's `/v2/capabilities` must advertise
+`supportsAgentSessionConfiguration: false`; that is an HTTP capability, not an
+additional field in the AgentRuntime CRD.
+
+Do not hash the Agentkitfile as the AgentKit configuration digest. AgentKit
+renders that input into a different `/agent/agent.yaml` file. The overall
+profile digest must use the v2 contract's canonicalization.
+
+Provision separate controller-bearer and operation-capability Secrets for each
+registration, with values of at least 32 bytes. Both Secrets need the exact
+registration name and endpoint bindings described in the external runtime
+contract. Mount them into the corresponding supervisor. Keep model credentials
+separate; only the Foundry broker receives Azure identity and its private
+ownership ledger.
+
+Pin each registration to its supervisor lifetime's instance ID and configure
+`ORKA_ACP_CONTROLLER_EPOCH` with the current controller epoch. Handle epoch and
+instance changes through the external runtime lifecycle. Do not replace a
+Foundry lifetime or delete its ledger while remote ownership remains unresolved.
+
+Wait for the actual `AgentRuntime` registrations to become Ready before running
+the demo. `GET /v2/health` and `GET /v2/capabilities` are safe public probes;
+readiness also requires authenticated status and Orka's conformance checks.
+A ready hosted container alone does not establish that the bridge can
+authenticate or settle remote work.

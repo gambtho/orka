@@ -21,125 +21,48 @@ to Orka. The hosted AgentKit container exposes Foundry's Responses protocol.
 This restores the incident and backend-selection workflow from the v0.1.3 demo.
 Each run now creates a new Task and checks its immutable v2 binding. The
 baseline uses `workspace.intent: read`, no tools, no repository, and one prompt
-per Task. It exercises inference, registration, and execution identity. It does
+per Task. It exercises inference, runtime selection, and execution identity. It does
 not establish hosted tool governance, conversation continuation, or recovery
 after an ambiguous remote operation.
 
 ## Prerequisites
 
 - An Orka installation containing [external v2 dispatch](https://github.com/orka-agents/orka/pull/487), running with `--controller-mode=harness-v2`.
-- Source builds containing the [AgentKit ACP changes](https://github.com/sozercan/agentkit/pull/22) and [Foundry v2 changes](https://github.com/orka-agents/agent-runtime-foundry/pull/1). The image instructions use those implementations, not the older static-tools Foundry branch or AgentKit's released v1 renderer.
 - `kubectl`, `jq`, and access to the controller's watched namespace.
-- Two operator-owned supervisor Services and their conformant v2 registrations. [Build and configure the backends](build-images.md) before running the commands below. This example does not provision an AKS cluster, Foundry project, Azure identity, or model credentials.
+- Two Ready external `AgentRuntime` registrations for the Fibey backends in that namespace:
 
-The checked-in registrations are inputs to `orka-acp-runtime --export-registration`,
-included in supervisor images built from this checkout.
-Export them before applying. `kustomization.yaml` includes only the two
-reference-only Agents; registration and Task submission are separate steps.
+| Registration | Backend |
+| --- | --- |
+| `fibey-agentkit-runtime` | AgentKit running directly through ACP |
+| `fibey-foundry-runtime` | Foundry ACP bridge calling the same AgentKit agent hosted in Foundry |
 
-## Register the backends
+The runtime deployment owns registration, credentials, identity, and profile
+configuration. Both backends must use the baked Fibey configuration, read
+intent, and an empty tool policy. Operators provisioning them can follow
+[build and register the backends](build-images.md).
 
-Use the [external runtime contract](../../website/docs/guides/bring-your-own-agent-runtime.md)
-to configure each service and its authentication. The small templates
-[agentruntime-agentkit.yaml](agentruntime-agentkit.yaml) and
-[agentruntime-foundry.yaml](agentruntime-foundry.yaml) contain the endpoint,
-Secret references, expected backend, read intent, and no-tools policy.
+## Connect the Agents
 
-The exporter fills the runtime identity, profile hashes, protocol limits, and
-governance guarantees from the supervisor's local configuration. These are
-required v2 assertions that Orka checks against the running service. They are
-not optional tuning parameters. Configure the deployment inputs once:
-
-| Registration | `providerKind` | `adapterName` | Adapter digest | Agent configuration digest |
-| --- | --- | --- | --- | --- |
-| `fibey-agentkit-runtime` | `agentkit` | `agentkit-serve-acp` | Digest of the Fibey AgentKit source image, before supervisor composition | SHA-256 of the exact baked `/agent/agent.yaml` bytes |
-| `fibey-foundry-runtime` | `foundry` | `foundry-serve-acp` | Digest of the configured Foundry ACP source image, before supervisor composition | SHA-256 of the exact baked `/agent/foundry.json` bytes |
-
-Both supervisors use read intent, credential role `operator-managed`,
-credential scope `external-runtime`, and resource class `external`. The model
-must match the baked configuration. Keep the empty `mcpPolicy` in the templates;
-export verifies its digests against the configured profile. The runtime's
-`/v2/capabilities` must advertise `supportsAgentSessionConfiguration: false`; that is an HTTP capability,
-not an additional field in the AgentRuntime CRD.
-
-The Task selects only `agentRuntime.allowedTools: []`. Keep `allowBash: false`
-in the registration's MCP policy; any Task-level `allowBash` value is an
-unsupported runtime override, including `false`.
-
-Do not hash the Agentkitfile as the AgentKit configuration digest. AgentKit
-renders that input into a different `/agent/agent.yaml` file. Export calculates
-the overall `profile.digest` with the same canonicalization as supervisor startup.
-
-Provision each registration's controller-bearer and operation-capability
-Secrets separately. Each value must be at least 32 bytes. Both Secrets need
-these bindings, with the exact registration name and endpoint:
-
-```yaml
-metadata:
-  labels:
-    orka.ai/agent-runtime-auth: "true"
-    orka.ai/agent-runtime-name: fibey-agentkit-runtime
-  annotations:
-    orka.ai/agent-runtime-endpoint: http://fibey-agentkit-runtime.orka-system.svc.cluster.local:8080
-```
-
-Mount those values into the matching supervisor. Keep model credentials
-separate. For Foundry, only the broker receives Azure identity and access to its
-private durable ownership ledger. No credential values belong in these
-manifests or images.
-
-Set `ORKA_ACP_RUNTIME_INSTANCE_ID` explicitly for each supervisor lifetime;
-export requires it. Set `ORKA_ACP_CONTROLLER_EPOCH` to the current controller
-epoch before starting either supervisor. Its operator must handle epoch changes
-as described in the external runtime contract. A stale supervisor cannot accept
-new Tasks. Do not replace a Foundry lifetime or delete its ledger while remote
-ownership remains unresolved.
-
-Use the context and namespace of an existing v2 installation. The namespace
-must already have `orka.ai/controller-mode: harness-v2` and be watched by that
-controller. Adjust copies of the templates and the Secret endpoint annotations
-together if your names or namespace differ. The following example assumes the
-controller watches `orka-system`, the Deployments use the registration names,
-and their supervisor containers are named `supervisor`.
+The demo uses the existing registrations through two small Agent resources.
+`kustomization.yaml` contains those Agents. Choose the existing v2 controller's
+context and watched namespace, then apply them:
 
 ```bash
 set -euo pipefail
 FIBEY_CONTEXT=sertac-aks
 FIBEY_NAMESPACE=orka-system
-FIBEY_TEMPLATES=examples/fibey-custom-agent-demo
-FIBEY_REGISTRATIONS="$(mktemp -d)"
-
-for backend in agentkit foundry; do
-  kubectl --context="$FIBEY_CONTEXT" -n "$FIBEY_NAMESPACE" exec -i \
-    "deployment/fibey-${backend}-runtime" -c supervisor -- \
-    /usr/local/bin/orka-acp-runtime --export-registration \
-    < "$FIBEY_TEMPLATES/agentruntime-${backend}.yaml" \
-    > "$FIBEY_REGISTRATIONS/agentruntime-${backend}.yaml"
-done
-```
-
-Export reads non-secret profile settings, writes YAML, and exits. It does not
-read credential files or create sessions. A mismatched backend, workspace
-intent, or policy digest stops export. It requires the configured supervisor's
-environment; running the binary on an unconfigured workstation is insufficient.
-
-Inspect the generated registrations, then apply them. Export does not establish
-readiness; authenticated status and Orka's conformance checks still decide that.
-
-```bash
-kubectl --context="$FIBEY_CONTEXT" -n "$FIBEY_NAMESPACE" apply -f "$FIBEY_REGISTRATIONS/"
-kubectl --context="$FIBEY_CONTEXT" -n "$FIBEY_NAMESPACE" wait \
-  --for=jsonpath='{.status.ready}'=true \
-  agentruntime/fibey-agentkit-runtime agentruntime/fibey-foundry-runtime --timeout=180s
 
 kubectl --context="$FIBEY_CONTEXT" -n "$FIBEY_NAMESPACE" apply \
   -k examples/fibey-custom-agent-demo
 ```
 
-`GET /v2/health` and `GET /v2/capabilities` are safe unauthenticated probes.
-Readiness also requires authenticated status and Orka's conformance checks;
-an HTTP 200 from health alone is insufficient. The submit helper checks that
-the Ready status belongs to the current registration generation and profile.
+The namespace must already have `orka.ai/controller-mode: harness-v2`.
+The submit helper checks that the selected runtime is Ready for its current
+registration generation, instance, and profile before creating a Task.
+
+The Task selects `agentRuntime.allowedTools: []`. Bash denial belongs to the
+registered MCP policy. External v2 Tasks must omit `allowBash` entirely;
+setting it to `false` is still an unsupported runtime override.
 
 ## Run and compare
 
@@ -213,12 +136,13 @@ That adds another Hosted Agent and a Kubernetes `--protocol hosted-gateway`
 process. Register the gateway Service as `fibey-foundry-runtime`; the Agents,
 Task, and submit commands stay the same. The hosted lifetime has bounded
 WebSocket connections and needs drain/retirement before replacement.
-Use the full [external registration](../../website/docs/guides/bring-your-own-agent-runtime.md#strict-governed-registration)
-for that topology; the `kubectl exec` export commands above require a supervisor
-container running in Kubernetes.
+The operator must register that topology using the
+[external runtime contract](../../website/docs/guides/bring-your-own-agent-runtime.md#strict-governed-registration)
+before running the demo.
 
 Do not add AgentKit `brokeredTools` to this demo and assume the hosted tool loop
-works. At the companion revisions above, AgentKit requires a continuation proof
+works. At the companion revisions in the [build guide](build-images.md), AgentKit
+requires a continuation proof
 on hosted `function_call_output`, and the Foundry v2 broker does not forward that
 proof. The direct AgentKit ACP tool path is separate. A hosted tool extension
 needs a supported continuation-authentication contract and end-to-end validation
@@ -231,7 +155,6 @@ bash scripts/tests/fibey-v2-demo-test.sh
 kubectl kustomize examples/fibey-custom-agent-demo
 go test ./internal/admission -run 'Test(Shipped|Documented)ManifestsDecodeStrictly' -count=1
 go test ./internal/controller -run TestFibeyDemo -count=1
-go test ./workers/acp/supervisor -run TestExportRegistration -count=1
 ```
 
 These validate the manifests, controller compatibility, and submission behavior

@@ -107,22 +107,45 @@ const (
 )
 
 func LoadConfigFromEnv() (Config, error) {
-	profile, provider, err := runtimeProfileFromEnv()
+	providerKind := requiredEnv(EnvProvider)
+	model := requiredEnv(EnvModel)
+	intent := harnessv2.WorkspaceIntent(requiredEnv(EnvWorkspaceIntent))
+	modelLimits, err := modelTokenLimitsFromEnv()
 	if err != nil {
 		return Config{}, err
 	}
-	capabilities, err := capabilitiesForProfile(profile)
-	if err != nil {
-		return Config{}, err
+	profile := harnessv2.RuntimeProfile{
+		ACPProfile:               harnessv2.ACPProfileV1,
+		ProviderKind:             providerKind,
+		Model:                    model,
+		ModelLimits:              modelLimits,
+		AgentConfigurationDigest: requiredEnv(EnvAgentConfigurationDigest),
+		ToolPolicyDigest:         requiredEnv(EnvToolPolicyDigest),
+		ApprovalPolicyDigest:     requiredEnv(EnvApprovalPolicyDigest),
+		MCPConfigurationDigest:   requiredEnv(EnvMCPConfigurationDigest),
+		WorkspaceIntent:          intent,
+		ProxyCredentialRole:      requiredEnv(EnvProxyCredentialRole),
+		ProxyCredentialScope:     requiredEnv(EnvProxyCredentialScope),
+		ResourceClass:            envDefault(EnvResourceClass, "standard"),
 	}
-	providerKind, model := profile.ProviderKind, profile.Model
 	providerBaseURL := envDefault(EnvProviderProxyBaseURL, defaultProxyBaseURL())
 	modelOutputLimit := int64(0)
-	if profile.ModelLimits != nil {
-		modelOutputLimit = profile.ModelLimits.Output
+	if modelLimits != nil {
+		modelOutputLimit = modelLimits.Output
 	}
-	profileDigest := capabilities.RuntimeProfileDigest
-	limits := capabilities.Limits
+	provider, err := providerProfile(providerKind, model, intent, modelLimits)
+	if err != nil {
+		return Config{}, err
+	}
+	profile.AdapterDigests = providerAdapterDigests(providerKind)
+	if err := profile.Validate(); err != nil {
+		return Config{}, fmt.Errorf("runtime profile: %w", err)
+	}
+	profileDigest, err := harnessv2.CanonicalProfileDigest(profile)
+	if err != nil {
+		return Config{}, err
+	}
+	limits := defaultProtocolLimits(providerKind)
 	controllerEpoch, err := parsePositiveUint(EnvControllerEpoch, requiredEnv(EnvControllerEpoch))
 	if err != nil {
 		return Config{}, err
@@ -221,6 +244,14 @@ func LoadConfigFromEnv() (Config, error) {
 		podUID := requiredEnv(EnvPodUID)
 		runtimeInstanceID = podUID + "." + bootID
 	}
+	capabilities := harnessv2.CapabilitiesResponse{
+		Protocol: harnessv2.ProtocolVersion, Transport: "http+ndjson", ACPVersion: harnessv2.ACPProfileV1,
+		RuntimeProfileDigest: profileDigest, ProfileDigestSchemaVersion: harnessv2.ProfileDigestSchemaVersion,
+		AdapterDigests: profile.AdapterDigests, Limits: limits, SupportsDrain: true, SupportsPublicationFinalization: true,
+		SupportsAgentSessionConfiguration: providerKind != providerKindAgentKit && providerKind != providerKindFoundry,
+		Provider:                          providerCapabilities(providerKind, model),
+		WorkspaceGovernance:               harnessv2.StrictWorkspaceGovernanceCapabilities(),
+	}
 	cfg := Config{
 		ListenAddress: envDefault(EnvListenAddress, ":8080"),
 		Fence: harnessv2.Fence{
@@ -253,57 +284,6 @@ func LoadConfigFromEnv() (Config, error) {
 		return Config{}, err
 	}
 	return cfg, nil
-}
-
-// runtimeProfileFromEnv reads only the non-secret, immutable profile inputs.
-// Registration export and supervisor startup must derive the same claims.
-func runtimeProfileFromEnv() (harnessv2.RuntimeProfile, ProviderProfile, error) {
-	providerKind := requiredEnv(EnvProvider)
-	model := requiredEnv(EnvModel)
-	intent := harnessv2.WorkspaceIntent(requiredEnv(EnvWorkspaceIntent))
-	modelLimits, err := modelTokenLimitsFromEnv()
-	if err != nil {
-		return harnessv2.RuntimeProfile{}, ProviderProfile{}, err
-	}
-	profile := harnessv2.RuntimeProfile{
-		ACPProfile:               harnessv2.ACPProfileV1,
-		ProviderKind:             providerKind,
-		Model:                    model,
-		ModelLimits:              modelLimits,
-		AgentConfigurationDigest: requiredEnv(EnvAgentConfigurationDigest),
-		ToolPolicyDigest:         requiredEnv(EnvToolPolicyDigest),
-		ApprovalPolicyDigest:     requiredEnv(EnvApprovalPolicyDigest),
-		MCPConfigurationDigest:   requiredEnv(EnvMCPConfigurationDigest),
-		WorkspaceIntent:          intent,
-		ProxyCredentialRole:      requiredEnv(EnvProxyCredentialRole),
-		ProxyCredentialScope:     requiredEnv(EnvProxyCredentialScope),
-		ResourceClass:            envDefault(EnvResourceClass, "standard"),
-	}
-	provider, err := providerProfile(providerKind, model, intent, modelLimits)
-	if err != nil {
-		return harnessv2.RuntimeProfile{}, ProviderProfile{}, err
-	}
-	profile.AdapterDigests = providerAdapterDigests(providerKind)
-	if err := profile.Validate(); err != nil {
-		return harnessv2.RuntimeProfile{}, ProviderProfile{}, fmt.Errorf("runtime profile: %w", err)
-	}
-	return profile, provider, nil
-}
-
-func capabilitiesForProfile(profile harnessv2.RuntimeProfile) (harnessv2.CapabilitiesResponse, error) {
-	profileDigest, err := harnessv2.CanonicalProfileDigest(profile)
-	if err != nil {
-		return harnessv2.CapabilitiesResponse{}, err
-	}
-	return harnessv2.CapabilitiesResponse{
-		Protocol: harnessv2.ProtocolVersion, Transport: "http+ndjson", ACPVersion: harnessv2.ACPProfileV1,
-		RuntimeProfileDigest: profileDigest, ProfileDigestSchemaVersion: harnessv2.ProfileDigestSchemaVersion,
-		AdapterDigests: profile.AdapterDigests, Limits: defaultProtocolLimits(profile.ProviderKind),
-		SupportsDrain: true, SupportsPublicationFinalization: true,
-		SupportsAgentSessionConfiguration: profile.ProviderKind != providerKindAgentKit && profile.ProviderKind != providerKindFoundry,
-		Provider:                          providerCapabilities(profile.ProviderKind, profile.Model),
-		WorkspaceGovernance:               harnessv2.StrictWorkspaceGovernanceCapabilities(),
-	}, nil
 }
 
 // providerAdapterDigests keeps the supervisor's default-nil unknown-provider
