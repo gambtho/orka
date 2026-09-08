@@ -112,6 +112,8 @@ func TestValidateDisabledSubstrateRecoveryConfig(t *testing.T) {
 	}
 	invalidConfig := validConfig
 	invalidConfig.APIInsecureSkipVerify = false
+	unauthenticatedConfig := validConfig
+	unauthenticatedConfig.APICertFile, unauthenticatedConfig.APIKeyFile = "", ""
 
 	pool := func(name string, provider corev1alpha1.WorkspaceProvider) *corev1alpha1.RuntimePool {
 		return &corev1alpha1.RuntimePool{
@@ -125,6 +127,11 @@ func TestValidateDisabledSubstrateRecoveryConfig(t *testing.T) {
 		return &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{
 			Name: "retained-native-data", Namespace: "controller-system", Labels: map[string]string{label: "true"},
 		}}
+	}
+	actorPool := func(namespace string) *corev1alpha1.SubstrateActorPool {
+		return &corev1alpha1.SubstrateActorPool{
+			ObjectMeta: metav1.ObjectMeta{Name: "native-mcp", Namespace: namespace},
+		}
 	}
 	tests := []struct {
 		name      string
@@ -160,6 +167,30 @@ func TestValidateDisabledSubstrateRecoveryConfig(t *testing.T) {
 			name:    "existing substrate pool accepts valid recovery configuration",
 			objects: []client.Object{pool("substrate", corev1alpha1.WorkspaceProviderSubstrate)},
 			config:  validConfig,
+		},
+		{
+			name:      "existing actor pool requires control authentication",
+			objects:   []client.Object{actorPool("team-a")},
+			config:    unauthenticatedConfig,
+			wantError: "SubstrateActorPool team-a/native-mcp requires valid recovery configuration",
+		},
+		{
+			name:      "existing actor pool preserves configuration parse failure",
+			objects:   []client.Object{actorPool("team-a")},
+			config:    validConfig,
+			configErr: errors.New("invalid disabled-only duration"),
+			wantError: "parse substrate recovery configuration for existing SubstrateActorPool",
+		},
+		{
+			name:    "existing actor pool accepts valid recovery configuration",
+			objects: []client.Object{actorPool("team-a")},
+			config:  validConfig,
+		},
+		{
+			name:      "actor pool outside the watch namespace is not managed",
+			objects:   []client.Object{actorPool("team-b")},
+			config:    invalidConfig,
+			configErr: errors.New("invalid disabled-only duration"),
 		},
 		{
 			name:      "retained checkpoint outside watch namespace requires recovery credentials",

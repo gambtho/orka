@@ -199,7 +199,7 @@ func validateDisabledSubstrateRecoveryConfig(
 	configErr error,
 ) error {
 	if reader == nil {
-		return fmt.Errorf("kubernetes reader is required to discover existing substrate RuntimePools")
+		return fmt.Errorf("kubernetes reader is required to discover existing substrate resources")
 	}
 
 	pools := &corev1alpha1.RuntimePoolList{}
@@ -214,6 +214,16 @@ func validateDisabledSubstrateRecoveryConfig(
 		}
 		recoveryState = fmt.Sprintf("RuntimePool %s/%s", pools.Items[i].Namespace, pools.Items[i].Name)
 		break
+	}
+	if recoveryState == "" {
+		actorPools := &corev1alpha1.SubstrateActorPoolList{}
+		if err := reader.List(ctx, actorPools, crclient.InNamespace(strings.TrimSpace(watchNamespace))); err != nil {
+			return fmt.Errorf("list SubstrateActorPools for disabled substrate recovery: %w", err)
+		}
+		if len(actorPools.Items) != 0 {
+			pool := &actorPools.Items[0]
+			recoveryState = fmt.Sprintf("SubstrateActorPool %s/%s", pool.Namespace, pool.Name)
+		}
 	}
 	if recoveryState == "" {
 		var err error
@@ -1094,7 +1104,8 @@ func main() {
 		setupLog.Error(err, "controller-mode namespace claim failed")
 		os.Exit(1)
 	}
-	if acpRuntimeEnabled && !substrateEnabled {
+	// Actor-pool cleanup remains registered even when ACP execution is disabled.
+	if !substrateEnabled {
 		checkCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		err := validateDisabledSubstrateRecoveryConfig(
 			checkCtx,

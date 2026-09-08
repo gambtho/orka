@@ -61,6 +61,11 @@ func (r *RuntimePoolReconciler) reconcileNativeSubstrateRuntimePool(ctx context.
 	if marker != substrateNativeJournalRequired && (!deleting || marker != substrateNativeJournalReleased || record.Attempt != nil) {
 		return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, errors.New("native Substrate journal lifecycle marker is invalid"))
 	}
+	if deleting && record.Attempt == nil {
+		// No Actor attempt exists. Finalization requests native credentials
+		// only if retained provider data still needs collection.
+		return r.finishNativeSubstrateStopped(ctx, pool, "native Substrate workload is absent; deleting retained data")
+	}
 	api, err := r.substrateNativeClient()
 	if err != nil {
 		return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, err)
@@ -82,9 +87,6 @@ func (r *RuntimePoolReconciler) reconcileNativeSubstrateRuntimePool(ctx context.
 	}
 	if deleting {
 		record.AfterStop = "Delete"
-		if record.Attempt == nil {
-			return r.finishNativeSubstrateStopped(ctx, pool, "native Substrate workload is absent; deleting retained data")
-		}
 		// The user requested deletion. Pending or failed checkpoints remain in
 		// the journal until workload and provider cleanup complete.
 		if record.Phase != substrateNativeStopping {

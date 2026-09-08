@@ -546,6 +546,75 @@ func TestNativeSubstrateFreshStoppedPoolNeedsNoJournal(t *testing.T) {
 	nativeDeletePool(t, h, &pool)
 }
 
+func TestNativeSubstrateDeletesUnstartedPoolWithoutControlCredentials(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		steps int
+	}{
+		{name: "before journal"},
+		{name: "unmarked journal", steps: 1},
+		{name: "required journal", steps: 2},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			h := newNativeRuntimeTestHarness(t)
+			for range test.steps {
+				h.step(t)
+			}
+			if record := h.record(t); record != nil && record.Attempt != nil {
+				t.Fatal("fixture allocated a provider attempt before deletion")
+			}
+			clientCalls := 0
+			h.r.SubstrateNativeClientFactory = func(SubstrateConfig) (*workspace.SubstrateNativeClient, error) {
+				clientCalls++
+				return nil, errors.New("control credential file is unavailable")
+			}
+			pool := runtimePoolTestGetPool(t, h.r, h.pool)
+			if !slices.Contains(pool.Finalizers, runtimePoolFinalizer) {
+				pool.Finalizers = append(pool.Finalizers, runtimePoolFinalizer)
+				if err := h.r.Update(t.Context(), &pool); err != nil {
+					t.Fatal(err)
+				}
+			}
+			nativeDeletePool(t, h, &pool)
+			if clientCalls != 0 || h.api.creates != 0 {
+				t.Fatal("empty pool cleanup unnecessarily contacted the native provider")
+			}
+			if err := h.r.Get(t.Context(), client.ObjectKeyFromObject(h.r.substrateNativeStateObject(&pool)), &corev1.ConfigMap{}); !apierrors.IsNotFound(err) {
+				t.Fatalf("empty pool cleanup retained its journal: %v", err)
+			}
+		})
+	}
+}
+
+func TestNativeSubstrateControlFailurePreservesActivePool(t *testing.T) {
+	h := newNativeRuntimeTestHarness(t)
+	h.until(t, nativeTestServing)
+	attempt := h.record(t).Attempt
+	controlErr := errors.New("control credential file is unavailable")
+	h.r.SubstrateNativeClientFactory = func(SubstrateConfig) (*workspace.SubstrateNativeClient, error) {
+		return nil, controlErr
+	}
+	pool := runtimePoolTestGetPool(t, h.r, h.pool)
+	if err := h.r.Delete(t.Context(), &pool); err != nil {
+		t.Fatal(err)
+	}
+	for range 3 {
+		_, err := h.r.Reconcile(t.Context(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(&pool)})
+		if err != nil && !errors.Is(err, controlErr) {
+			t.Fatal(err)
+		}
+	}
+	pool = runtimePoolTestGetPool(t, h.r, h.pool)
+	record := h.record(t)
+	if record.Attempt == nil || record.Attempt.UID != attempt.UID || h.api.deletes != 0 ||
+		pool.Status.Lifecycle == corev1alpha1.RuntimePoolLifecycleStopped || !slices.Contains(pool.Finalizers, runtimePoolFinalizer) {
+		t.Fatal("control authentication failure discarded the existing workload or its cleanup records")
+	}
+	if err := h.r.Get(t.Context(), types.NamespacedName{Namespace: attempt.Worker.Namespace, Name: attempt.Worker.Pod}, &corev1.Pod{}); err != nil {
+		t.Fatalf("control authentication failure removed the active worker: %v", err)
+	}
+}
+
 func TestNativeSubstrateUnfencedBootBlocksCleanup(t *testing.T) {
 	for _, providerState := range []string{"missing", "suspended"} {
 		for _, action := range []string{"stop", "delete"} {

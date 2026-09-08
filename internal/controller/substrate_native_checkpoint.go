@@ -416,12 +416,12 @@ func (r *RuntimePoolReconciler) deleteNativeSubstrateState(ctx context.Context, 
 	if record.Attempt != nil {
 		return true, nil
 	}
-	api, err := r.substrateNativeClient()
-	if err != nil {
-		return false, err
-	}
-	defer api.Close() //nolint:errcheck
 	if record.Pending != nil && record.Pending.TagIssued {
+		api, err := r.substrateNativeClient()
+		if err != nil {
+			return false, err
+		}
+		defer api.Close() //nolint:errcheck
 		tag, err := api.Control.GetTag(ctx, &ateapipb.GetTagRequest{Tag: &ateapipb.ObjectRef{Atespace: record.Atespace, Name: record.Pending.Name}})
 		if err == nil {
 			if digest, digestErr := nativeSubstrateTagDigest(tag); digestErr == nil {
