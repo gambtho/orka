@@ -7,7 +7,8 @@ Foundry-hosted wrapper. These commands use the `remote-vm` builder and
 Use AgentKit source containing commit `c9a18070363b9eded0be8ca826d8fc5365afc828`
 and Foundry runtime source containing
 `57988dbe9d6b9a5ed2a39ce10b3d5abc8a68a7c7`, or successors with the same contracts.
-The Orka checkout must contain the external-v2 integration from PR #487.
+The Orka checkout must contain the external-v2 integration from PR #487 and
+the `orka-acp-runtime --export-registration` command used by this demo.
 Configure the source directories and your writable registry:
 
 ```bash
@@ -66,8 +67,9 @@ docker buildx build --builder "$FIBEY_BUILDER" --platform linux/amd64 \
 FIBEY_DIRECT_IMAGE="$FIBEY_REGISTRY/orka-acp-agentkit@$(jq -er '."containerimage.digest"' "$FIBEY_BUILD_DIR/direct.json")"
 ```
 
-Deploy `FIBEY_DIRECT_IMAGE` as the operator-owned `fibey-agentkit-runtime`
-Service. The image starts `orka-acp-runtime` and sets `ORKA_ACP_PROVIDER=agentkit`.
+Deploy `FIBEY_DIRECT_IMAGE` with Deployment and Service name
+`fibey-agentkit-runtime`, one replica, and container name `supervisor`.
+The image starts `orka-acp-runtime` and sets `ORKA_ACP_PROVIDER=agentkit`.
 The supervisor launches the child with `--protocol acp` and supplies its
 loopback model proxy and MCP server. `AGENTKIT_PROTOCOL=orka` selects v1 and
 must not be used for this service.
@@ -139,14 +141,14 @@ docker buildx build --builder "$FIBEY_BUILDER" --platform linux/amd64 \
 FIBEY_FOUNDRY_IMAGE="$FIBEY_REGISTRY/orka-acp-foundry@$(jq -er '."containerimage.digest"' "$FIBEY_BUILD_DIR/foundry-runtime.json")"
 ```
 
-Use a single-replica Deployment with `strategy.type: Recreate` and these
-containers, following the
+Use a single-replica Deployment named `fibey-foundry-runtime` with
+`strategy.type: Recreate` and these containers, following the
 [Foundry v2 process configuration](https://github.com/orka-agents/agent-runtime-foundry/blob/57988dbe9d6b9a5ed2a39ce10b3d5abc8a68a7c7/docs/harness-v2.md#process-configuration):
 
 | Container | Image | Process |
 | --- | --- | --- |
-| Supervisor | `FIBEY_FOUNDRY_IMAGE` | Default `orka-acp-runtime` entrypoint, with `ORKA_ACP_PROVIDER=foundry` |
-| Broker | `FIBEY_FOUNDRY_SOURCE` | `/agent-runtime-foundry --protocol broker --config /agent/foundry.json` |
+| `supervisor` | `FIBEY_FOUNDRY_IMAGE` | Default `orka-acp-runtime` entrypoint, with `ORKA_ACP_PROVIDER=foundry` |
+| `broker` | `FIBEY_FOUNDRY_SOURCE` | `/agent-runtime-foundry --protocol broker --config /agent/foundry.json` |
 
 The supervisor needs the same classes of v2 bootstrap configuration as the
 direct backend. Point `ORKA_ACP_PROVIDER_PROXY_BASE_URL` at

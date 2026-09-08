@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"flag"
 	"log/slog"
 	"net/http"
 	"os"
@@ -17,6 +18,22 @@ import (
 func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	slog.SetDefault(logger)
+	exportRegistration := flag.Bool(
+		"export-registration", false,
+		"Expand an AgentKit/Foundry registration template from stdin to YAML and exit",
+	)
+	flag.Parse()
+	if flag.NArg() != 0 {
+		logger.Error("unexpected positional arguments")
+		os.Exit(1)
+	}
+	if *exportRegistration {
+		if err := supervisor.ExportRegistrationFromEnv(os.Stdin, os.Stdout); err != nil {
+			logger.Error("export registration", "error", err)
+			os.Exit(1)
+		}
+		return
+	}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
 	if _, err := acp.HardenSupervisorProcess(); err != nil {
