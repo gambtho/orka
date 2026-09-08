@@ -120,7 +120,7 @@ go run github.com/rhysd/actionlint/cmd/actionlint@latest .github/workflows/repos
 go run github.com/rhysd/actionlint/cmd/actionlint@latest .github/workflows/agent-substrate-e2e.yml
 ```
 
-The agent-sandbox and Substrate scripts provide the initial workspace-backed ACP v2 happy-path evidence, including fixture-backed prompt completion. They are not the full release gate: external-provider execution, clean-room publication, restart/replacement recovery, and the broader runtime matrix remain covered by the live ACP workflows. Workspace-provider-backed dispatch is still flag-gated behind `--acp-workspace-dispatch-enabled` plus the matching provider flag (`--agent-sandbox-enabled` or `--substrate-enabled`) and fails closed otherwise.
+The agent-sandbox and Substrate scripts validate workspace-backed ACP v2 Tasks against a local model fixture. Substrate also covers controller restart, DataOnly suspension, cold continuation, checkpoint file recovery, cancellation, timeout, and cleanup. External-provider execution, clean-room publication, pool replacement, and the broader runtime matrix remain covered by the live ACP workflows. Workspace-provider-backed dispatch is still flag-gated behind `--acp-workspace-dispatch-enabled` plus the matching provider flag (`--agent-sandbox-enabled` or `--substrate-enabled`) and fails closed otherwise.
 
 The GitHub OIDC live script requires GitHub Actions `id-token: write` or a manual `ORKA_GITHUB_OIDC_TOKEN`; without either, it fails fast before creating a cluster. Transaction-token provider E2E now lives in the external integration repository.
 
@@ -128,7 +128,6 @@ Run the Agent Substrate E2E locally with:
 
 ```bash
 PATH="$(go env GOPATH)/bin:$PATH" \
-SUBSTRATE_E2E_EXTENDED=1 \
 bash scripts/agent-substrate-e2e.sh
 ```
 

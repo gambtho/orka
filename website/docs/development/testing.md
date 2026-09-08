@@ -35,7 +35,7 @@ E2E_GINKGO_FOCUS="Gateway live E2E" \
 make test-e2e
 
 # Run Agent Substrate E2E (requires Docker, Go, git, curl, kind, kubectl, ko, jq)
-SUBSTRATE_E2E_EXTENDED=1 bash scripts/agent-substrate-e2e.sh
+bash scripts/agent-substrate-e2e.sh
 
 # Lint
 make lint
@@ -188,8 +188,8 @@ missing or mismatched artifacts staying not ready.
 - `Live Agent Sandbox E2E` and `Agent Substrate E2E` do run workspace-backed ACP Tasks
   end to end against a local model fixture, but they are not the full release gate:
   external-provider execution and clean-room publication stay with the live ACP workflows.
-  The Substrate suspend/resume lane is off by default (`SUBSTRATE_E2E_SUSPEND_RESUME=0`)
-  because the pinned Substrate release cannot express the data-only snapshot contract.
+  Every Substrate run includes DataOnly suspension, cold continuation, and
+  checkpoint file recovery against the unmodified upstream provider.
 - Security Scan E2E is secret-free and model-free, but requires Docker plus the
   local Go, Kind, kubectl, curl, and jq toolchain.
 
@@ -281,6 +281,15 @@ DataOnly suspension, cold continuation, checkpoint export and restore,
 cancellation, timeout, and cleanup. Native unit tests cover TLS and credential
 rotation, lost responses, source identity changes, reference races, and explicit
 recovery. Tests do not supply fork-only lifecycle preconditions.
+
+The ACP file scenario uses the real Codex runtime with a deterministic Responses
+fixture. It writes a file, exports a checkpoint, changes and deletes the source
+workspace, then restores the checkpoint and checks the original bytes through a
+shell read. The fixture requires successful tool output from the current turn.
+The file Tasks retain read-only intent, so the suite requires successful
+execution and `ReadOnlyWorkspaceModified` delivery rejection. The workflow also
+runs a Linux regression as root to verify durable file ownership after session
+deletion, drain, and supervisor shutdown.
 
 ```bash
 bash scripts/tests/agent-substrate-e2e-hardening-test.sh
