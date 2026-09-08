@@ -6,7 +6,7 @@ spec:
   type: ai
   ai:
     provider: anthropic
-    model: claude-sonnet-4-20250514
+    model: claude-sonnet-4.6
     prompt: "What are the latest developments in Kubernetes in 2026? Search the web and summarize the key announcements."
     tools:
       - tavily-search

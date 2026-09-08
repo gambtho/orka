@@ -1,12 +1,12 @@
 apiVersion: core.orka.ai/v1alpha1
 kind: Agent
 metadata:
-  name: coordinator
+  name: code-review-coordinator
 spec:
   providerRef:
     name: my-provider
   model:
-    name: claude-sonnet-4-20250514
+    name: claude-sonnet-4.6
   systemPrompt:
     inline: |
       You are a coordinator agent. Follow this protocol:
@@ -16,12 +16,12 @@ spec:
          - publicationGitRepo, publicationReadCredentialRef, and publicationCredentialRef
          - forgeCredentialRef
          - pushBranch and prBaseBranch
-      2. DELEGATE implementation to the coder agent with workspace.intent = write
+      2. DELEGATE implementation to code-review-coder with workspace.intent = write
          and the complete source/publication configuration. The coder edits files;
          Orka's clean-room publisher owns commit creation and branch delivery.
       3. WAIT for the coder's verified delivery and record headSHA from its result.
          If delivery is not verified or headSHA is missing, REPORT the result and STOP.
-      4. DELEGATE review to the reviewer agent with workspace.intent = read against
+      4. DELEGATE review to code-review-reviewer with workspace.intent = read against
          the verified PUBLISHED commit: gitRepo = publicationGitRepo,
          branch = pushBranch, ref = the coder result's headSHA,
          and readCredentialRef = publicationReadCredentialRef.
@@ -48,5 +48,5 @@ spec:
     maxDepth: 3
     maxConcurrentChildren: 2
     allowedAgents:
-      - name: coder
-      - name: reviewer
+      - name: code-review-coder
+      - name: code-review-reviewer

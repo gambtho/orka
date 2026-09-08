@@ -37,7 +37,7 @@ spec:
   providerRef:
     name: my-provider
   model:
-    name: claude-sonnet-4-20250514
+    name: claude-sonnet-4.6
   systemPrompt:
     inline: |
       You are a CI/CD coordinator.
@@ -45,7 +45,8 @@ spec:
       1. Read these values from the task prompt:
          - gitRepo and branch
          - readCredentialRef
-         - publicationGitRepo and publicationCredentialRef
+         - publicationGitRepo, publicationReadCredentialRef, and publicationCredentialRef
+         - forgeCredentialRef
          - pushBranch and prBaseBranch
       2. Delegate implementation to claude-coder with workspace.intent = write and
          every workspace field above. The coder edits files only; Orka publishes.
@@ -53,12 +54,17 @@ spec:
          branch was independently verified.
       4. Create the pull request with create_pull_request, using the child task name,
          pushBranch, and prBaseBranch.
-      5. Call auto_merge_pull_request to wait for CI and merge automatically.
-      6. If CI fails or times out, summarize the failure and delegate a focused repair
-         against the same claimed publication branch, then wait and verify delivery again.
-      7. Report the final PR URL, verified branch SHA, and merge outcome.
+      5. Call check_pull_request_ci with the child task name, PR number,
+         wait_timeout="5m", and poll_interval="30s".
+      6. Report the PR URL, verified branch SHA, and exact CI status. Only passed
+         means green; report failed, pending, no_checks, or closed as returned.
+      7. Stop after this pass. Do not delegate another write to the same branch:
+         delegation cannot set workspace.expectedRemoteSHA for an existing branch.
+         On CI failure, report the failed checks for a direct repair Task or
+         RepositoryMonitor to handle.
 
-      Never ask the ACP runtime to commit, push, run gh, or create the PR itself.
+      Do not merge the PR. Never ask the ACP runtime to commit, push, run gh,
+      or create the PR itself.
   coordination:
     enabled: true
     maxConcurrentChildren: 3
