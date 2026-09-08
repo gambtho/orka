@@ -140,6 +140,9 @@ func (r *RuntimePoolReconciler) checkpointNativeSubstrateRuntime(ctx context.Con
 		if actor.GetStatus().GetState() != ateapipb.ActorState_ACTOR_STATE_RUNNING {
 			return r.failNativeSubstrateRuntime(ctx, pool, cfg, cm, record, "native Actor stopped before Orka issued the checkpoint; refusing to claim an unrelated snapshot")
 		}
+		if operation.SuspendStartedAt.IsZero() {
+			operation.SuspendStartedAt = metav1.NewTime(r.now())
+		}
 		operation.SuspendIssued = true
 		if err := r.saveNativeSubstrateState(ctx, cm, record); err != nil {
 			return ctrl.Result{}, err
@@ -177,6 +180,7 @@ func (r *RuntimePoolReconciler) checkpointNativeSubstrateRuntime(ctx context.Con
 	tag, err := api.GetTag(ctx, &ateapipb.GetTagRequest{Tag: tagRef})
 	if status.Code(err) == codes.NotFound {
 		if !operation.TagIssued {
+			operation.TagStartedAt = metav1.NewTime(r.now())
 			operation.TagIssued = true
 			if err := r.saveNativeSubstrateState(ctx, cm, record); err != nil {
 				return ctrl.Result{}, err
@@ -224,7 +228,7 @@ func (r *RuntimePoolReconciler) checkpointNativeSubstrateRuntime(ctx context.Con
 	if observed == nil || observed.GetMetadata().GetVersion() != operation.SourceVersion || observed.GetStatus().GetState() != ateapipb.ActorState_ACTOR_STATE_SUSPENDED || nativeSubstrateSnapshotDigest(observed.GetStatus().GetExternalSnapshot()) != operation.SourceSnapshotDigest {
 		return r.failNativeSubstrateRuntime(ctx, pool, cfg, cm, record, "native source changed during Tag capture; the captured data remains quarantined")
 	}
-	checkpoint := &substrateNativeCheckpoint{Name: operation.Name, UID: operation.TagUID, Digest: tagDigest, SourceName: a.Name, SourceUID: a.UID, Template: a.Template, CreatedAt: operation.StartedAt}
+	checkpoint := &substrateNativeCheckpoint{Name: operation.Name, UID: operation.TagUID, Digest: tagDigest, SourceName: a.Name, SourceUID: a.UID, Template: a.Template}
 	if err := r.registerSubstrateCheckpointArtifact(ctx, pool, cfg, record, checkpoint); err != nil {
 		return r.finishRuntimePoolResourceFailure(ctx, pool, cfg, err)
 	}

@@ -256,6 +256,7 @@ func TestNativeSubstrateBootDeadlineAndConsentIdentity(t *testing.T) {
 		t.Fatal(err)
 	}
 	record.Attempt.StartedAt = metav1.NewTime(h.r.now().Add(-time.Hour))
+	record.Attempt.BootStartedAt = record.Attempt.StartedAt
 	if err := h.r.saveNativeSubstrateState(t.Context(), cm, record); err != nil {
 		t.Fatal(err)
 	}

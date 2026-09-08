@@ -105,6 +105,11 @@ func (r *RuntimePoolReconciler) registerSubstrateCheckpointArtifact(ctx context.
 	}
 	owner := substratePoolCheckpointOwner(pool)
 	if artifact != nil {
+		if checkpoint.CreatedAt.IsZero() {
+			// A catalog commit can precede a failed journal write. Recover its
+			// original completion time, including captures from older journals.
+			checkpoint.CreatedAt = artifact.Checkpoint.CreatedAt
+		}
 		if artifact.Deleting || !cm.DeletionTimestamp.IsZero() || artifact.Atespace != record.Atespace || !reflect.DeepEqual(artifact.Checkpoint, *checkpoint) || !artifact.Owners[owner] {
 			return fmt.Errorf("checkpoint catalog conflicts with its capture intent")
 		}
@@ -116,6 +121,9 @@ func (r *RuntimePoolReconciler) registerSubstrateCheckpointArtifact(ctx context.
 	}
 	if binding == nil || binding.OwnerUID != string(pool.UID) || binding.Current != checkpoint.Template {
 		return fmt.Errorf("checkpoint source template binding is not available")
+	}
+	if checkpoint.CreatedAt.IsZero() {
+		checkpoint.CreatedAt = metav1.NewTime(r.now())
 	}
 	artifact = &substrateCheckpointArtifact{Schema: "orka.substrate-checkpoint.v1", Atespace: record.Atespace, Namespace: pool.Namespace, Checkpoint: *checkpoint, Runtime: pool.Spec.Runtime, Manifest: binding.Manifest, Owners: map[string]bool{owner: true}}
 	artifact.SourcePool = workspacev1alpha1.ObjectIdentityReference{Name: pool.Name, UID: pool.UID}

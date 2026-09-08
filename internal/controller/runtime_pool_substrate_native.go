@@ -212,7 +212,11 @@ func (r *RuntimePoolReconciler) reconcileNativeSubstrateRuntimePool(ctx context.
 		return ctrl.Result{}, err
 	}
 	a := record.Attempt
-	if a.BootID == "" && !a.StartedAt.IsZero() && r.now().Sub(a.StartedAt.Time) > max(3*r.SubstrateConfig.WithDefaults().ClaimTimeout, 5*time.Minute) {
+	startedAt := a.StartedAt
+	if !a.BootStartedAt.IsZero() {
+		startedAt = a.BootStartedAt
+	}
+	if a.BootID == "" && nativeSubstrateRecoveryExpired(startedAt, r.now(), r.SubstrateConfig.WithDefaults().ClaimTimeout) {
 		return r.failNativeSubstrateRuntime(ctx, pool, cfg, cm, record, "native provisioning exceeded its recovery window; the creation intent is preserved for exact cleanup and explicit recovery")
 	}
 	template, desired, err := r.nativeSubstrateDesiredTemplate(ctx, pool, cfg, record, auth)
@@ -366,6 +370,9 @@ func (r *RuntimePoolReconciler) reconcileNativeSubstrateRuntimePool(ctx context.
 		return r.nativeSubstrateProgress(ctx, pool, corev1alpha1.RuntimePoolLifecycleStarting, "rotated the suspended Actor template using native UID/version preconditions")
 	}
 	if !a.BootRequested {
+		if a.BootStartedAt.IsZero() {
+			a.BootStartedAt = metav1.NewTime(r.now())
+		}
 		a.BootRequested = true
 		if err := r.saveNativeSubstrateState(ctx, cm, record); err != nil {
 			return ctrl.Result{}, err

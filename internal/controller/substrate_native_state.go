@@ -75,6 +75,7 @@ type substrateNativeState struct {
 type substrateNativeAttempt struct {
 	Name               string                          `json:"name"`
 	StartedAt          metav1.Time                     `json:"startedAt"`
+	BootStartedAt      metav1.Time                     `json:"bootStartedAt,omitempty"`
 	DrainStartedAt     metav1.Time                     `json:"drainStartedAt,omitempty"`
 	UID                string                          `json:"uid,omitempty"`
 	Template           substrateNativeTemplateRevision `json:"template"`
@@ -105,6 +106,8 @@ type substrateNativeCheckpointOperation struct {
 	SourceUID            string      `json:"sourceUID"`
 	TemplateUID          string      `json:"templateUID"`
 	StartedAt            metav1.Time `json:"startedAt"`
+	SuspendStartedAt     metav1.Time `json:"suspendStartedAt,omitempty"`
+	TagStartedAt         metav1.Time `json:"tagStartedAt,omitempty"`
 	SuspendIssued        bool        `json:"suspendIssued,omitempty"`
 	PriorSnapshotDigest  string      `json:"priorSnapshotDigest,omitempty"`
 	SourceVersion        int64       `json:"sourceVersion,omitempty"`
@@ -406,7 +409,23 @@ func (r *RuntimePoolReconciler) terminateNativeSubstrateWorker(ctx context.Conte
 }
 
 func nativeSubstrateOperationExpired(operation *substrateNativeCheckpointOperation, now time.Time, timeout time.Duration) bool {
-	return operation != nil && !operation.StartedAt.IsZero() && now.Sub(operation.StartedAt.Time) > max(timeout*3, 5*time.Minute)
+	if operation == nil {
+		return false
+	}
+	startedAt := operation.StartedAt
+	if !operation.SuspendStartedAt.IsZero() {
+		startedAt = operation.SuspendStartedAt
+	}
+	if !operation.TagStartedAt.IsZero() {
+		startedAt = operation.TagStartedAt
+	}
+	return nativeSubstrateRecoveryExpired(startedAt, now, timeout)
+}
+
+func nativeSubstrateRecoveryExpired(startedAt metav1.Time, now time.Time, timeout time.Duration) bool {
+	// Lifecycle RPCs may take five minutes. Leave time to observe their result
+	// afterward, even when the configured claim timeout is shorter.
+	return !startedAt.IsZero() && now.Sub(startedAt.Time) > max(timeout*3, 6*time.Minute)
 }
 
 func nativeSubstrateRecordID(record *substrateNativeState) string {
