@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="generator" content="Docusaurus v3.10.1">
 <title data-rh="true">Getting started | Orka</title><meta data-rh="true" name="viewport" content="width=device-width,initial-scale=1"><meta data-rh="true" name="twitter:card" content="summary_large_image"><meta data-rh="true" property="og:url" content="https://orka-agents.github.io/orka/docs/getting-started"><meta data-rh="true" property="og:locale" content="en"><meta data-rh="true" name="docusaurus_locale" content="en"><meta data-rh="true" name="docsearch:language" content="en"><meta data-rh="true" name="docusaurus_version" content="current"><meta data-rh="true" name="docusaurus_tag" content="docs-default-current"><meta data-rh="true" name="docsearch:version" content="current"><meta data-rh="true" name="docsearch:docusaurus_tag" content="docs-default-current"><meta data-rh="true" property="og:title" content="Getting started | Orka"><meta data-rh="true" name="description" content="Install Orka on a Kubernetes cluster and run your first agent task."><meta data-rh="true" property="og:description" content="Install Orka on a Kubernetes cluster and run your first agent task."><link data-rh="true" rel="canonical" href="https://orka-agents.github.io/orka/docs/getting-started"><link data-rh="true" rel="alternate" href="https://orka-agents.github.io/orka/docs/getting-started" hreflang="en"><link data-rh="true" rel="alternate" href="https://orka-agents.github.io/orka/docs/getting-started" hreflang="x-default"><script data-rh="true" type="application/ld+json">{"@context":"https://schema.org","@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"Getting started","item":"https://orka-agents.github.io/orka/docs/getting-started"}]}</script><link rel="stylesheet" href="/orka/assets/css/styles.62ee04a5.css">
-<script src="/orka/assets/js/runtime~main.be156cd9.js" defer="defer"></script>
+<script src="/orka/assets/js/runtime~main.c729c346.js" defer="defer"></script>
 <script src="/orka/assets/js/main.b04f374a.js" defer="defer"></script>
 </head>
 <body>
@@ -175,6 +175,11 @@ replace <code>&lt;task-name&gt;</code> with its name and <code>&lt;artifact-name
 <p>This section needs an <a href="#option-b-current-main-from-source" class="">Option B</a> install.</p>
 <p>A <code>type: agent</code> Task runs a real coding-agent CLI against a git repository. Orka clones the
 repo, hands the agent a working copy, and records everything it does.</p>
+<p>ACP agent runtimes run the supported Codex, Claude, Copilot, and OpenCode profiles as
+fenced RuntimeSessions in controller-owned RuntimePools. Operators own external
+<code>orka.harness.v2</code> registrations. Once a registration is ready at its current generation
+and passes strict governance checks, an Agent can select it through <code>runtimeRef</code> and
+use the same durable Task and RuntimeSession lifecycle.</p>
 <h3 class="anchor anchorTargetStickyNavbar_Vzrq" id="1-check-the-provider-proxy-is-up">1. Check the provider proxy is up<a href="#1-check-the-provider-proxy-is-up" class="hash-link" aria-label="Direct link to 1. Check the provider proxy is up" title="Direct link to 1. Check the provider proxy is up" translate="no">​</a></h3>
 <p>Built-in agent runtimes never see a provider Secret. They get a token for Orka&#x27;s proxy and
 a specific model they are allowed to use; the real API key stays with

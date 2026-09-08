@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="generator" content="Docusaurus v3.10.1">
 <title data-rh="true">Security | Orka</title><meta data-rh="true" name="viewport" content="width=device-width,initial-scale=1"><meta data-rh="true" name="twitter:card" content="summary_large_image"><meta data-rh="true" property="og:url" content="https://orka-agents.github.io/orka/docs/security"><meta data-rh="true" property="og:locale" content="en"><meta data-rh="true" name="docusaurus_locale" content="en"><meta data-rh="true" name="docsearch:language" content="en"><meta data-rh="true" name="docusaurus_version" content="current"><meta data-rh="true" name="docusaurus_tag" content="docs-default-current"><meta data-rh="true" name="docsearch:version" content="current"><meta data-rh="true" name="docsearch:docusaurus_tag" content="docs-default-current"><meta data-rh="true" property="og:title" content="Security | Orka"><meta data-rh="true" name="description" content="Credential and network boundaries for ACP runtimes, native workers, and publication."><meta data-rh="true" property="og:description" content="Credential and network boundaries for ACP runtimes, native workers, and publication."><link data-rh="true" rel="canonical" href="https://orka-agents.github.io/orka/docs/security"><link data-rh="true" rel="alternate" href="https://orka-agents.github.io/orka/docs/security" hreflang="en"><link data-rh="true" rel="alternate" href="https://orka-agents.github.io/orka/docs/security" hreflang="x-default"><script data-rh="true" type="application/ld+json">{"@context":"https://schema.org","@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"Security","item":"https://orka-agents.github.io/orka/docs/security"}]}</script><link rel="stylesheet" href="/orka/assets/css/styles.62ee04a5.css">
-<script src="/orka/assets/js/runtime~main.be156cd9.js" defer="defer"></script>
+<script src="/orka/assets/js/runtime~main.c729c346.js" defer="defer"></script>
 <script src="/orka/assets/js/main.b04f374a.js" defer="defer"></script>
 </head>
 <body>
@@ -47,12 +47,12 @@ auditing Kubernetes access.</p>
 <li class="">carries no Git read or publication credential and has no direct SCM publication egress.</li>
 </ul>
 <p>A shared pool is a same-administrative-trust-domain density boundary, not a hard tenant sandbox. Users who can mutate or exec into the runtime Pod, namespace administrators, node administrators, and sibling sessions in the same pool are trusted relative to that boundary.</p>
-<p>Per-Task <code>spec.execution</code> container settings and custom resource requests are not honoured on
-the ACP path: runtime isolation and resources come from the reviewed RuntimePool profile, not
-from the Task. <code>spec.execution.workspace</code> is the one exception — it moves the agent into an
-external sandbox provider, and only when the operator has enabled it
-(<code>--acp-workspace-dispatch-enabled</code> plus <code>--agent-sandbox-enabled</code> or <code>--substrate-enabled</code>).
-Everything else in <code>spec.execution</code> fails closed.</p>
+<p>ACP Tasks reject per-Task container settings and custom resource requests. Runtime isolation
+and resources come from the reviewed RuntimePool profile. For built-in runtimes,
+<code>spec.execution.workspace</code> can bind a dedicated RuntimePool through a sandbox provider when
+the operator enables <code>--acp-workspace-dispatch-enabled</code> plus <code>--agent-sandbox-enabled</code> or
+<code>--substrate-enabled</code>. External <code>runtimeRef</code> dispatch rejects execution workspaces. Other
+per-Task execution placement fields fail closed.</p>
 <h3 class="anchor anchorTargetStickyNavbar_Vzrq" id="workspacepublisher">Workspace/Publisher<a href="#workspacepublisher" class="hash-link" aria-label="Direct link to Workspace/Publisher" title="Direct link to Workspace/Publisher" translate="no">​</a></h3>
 <p>The separate Workspace/Publisher identity has no provider-session or
 prompt-broker access. The controller credential broker releases frozen
@@ -80,7 +80,7 @@ deletion revoke authorization and cancel in-flight broker calls. Consequential
 operations reserve a durable <code>ExternalEffect</code> identity before execution.</p>
 <h3 class="anchor anchorTargetStickyNavbar_Vzrq" id="current-acp-constraints">Current ACP constraints<a href="#current-acp-constraints" class="hash-link" aria-label="Direct link to Current ACP constraints" title="Direct link to Current ACP constraints" translate="no">​</a></h3>
 <ul>
-<li class="">External <code>AgentRuntime</code> v2 registration and conformance are supported, but <code>runtimeRef</code> Task dispatch remains fail-closed until the external v2 dispatcher support boundary is enabled.</li>
+<li class="">External <code>AgentRuntime</code> v2 dispatch is admitted only for a current-generation ready, strict-governed registration. Orka freezes and revalidates the endpoint, authentication authority, profile, and observed runtime identity before each mutation; drift fails closed.</li>
 <li class="">Non-empty write delivery uses the clean-room publisher and is successful only with a terminal independently verified <code>status.delivery</code> receipt.</li>
 <li class="">Codex, Claude, Copilot, and OpenCode are supported built-in RuntimePool profiles.</li>
 </ul>
