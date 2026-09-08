@@ -31,6 +31,7 @@ cleanup() {
     kubectl get pods -A 2>/dev/null || true
     job_diagnostics substrate-direct-conformance
     job_diagnostics native-mcp-client
+    checkpoint_diagnostics
     workload_logs ate-system -l app=ate-api-server
     workload_logs ate-system -l app=atenet-egress
     workload_logs ate-demo -l ate.dev/worker-pool=orka-native
@@ -53,6 +54,22 @@ runtime_diagnostics() {
       lifecycle: .status.lifecycle, message: .status.message,
       execution: (.status.execution | if . == null then null else {state, outcome, reason} end),
       conditions: [.status.conditions[]? | {type, status, reason, message}]}]' | redact >&2 || true
+}
+checkpoint_diagnostics() {
+  local bootstrap_secret=""
+  local ORKA_REDACT_SECRET_VARS=(bootstrap_secret)
+  if [[ -f "${TMP_ROOT}/bootstrap-token" ]]; then bootstrap_secret="$(<"${TMP_ROOT}/bootstrap-token")"; fi
+  # ateom reports data capture before atelet uploads it and releases the
+  # workspace. Keep the node-side failure even when polling outlives it.
+  # Select diagnostic fields before output; RPC requests can contain secrets.
+  kubectl -n ate-system --request-timeout=15s logs -l app=atelet --all-containers=true \
+    --tail=2000 --since=15m --pod-running-timeout=5s 2>/dev/null |
+    jq -Rrc 'fromjson? | select(
+      .level == "ERROR" or .level == "WARN" or
+      ((.method // "") | test("/(Checkpoint|UploadPausedCheckpoint)$")) or
+      ((.msg // "") | test("checkpoint|snapshot"; "i"))) |
+      {time, level, msg, method, err, error, message, phase, "elapsed-time"} |
+      with_entries(select(.value != null))' | tail -n 80 | redact >&2 || true
 }
 workload_logs() {
   local namespace="$1" bootstrap_secret=""
@@ -113,7 +130,7 @@ wait_field() {
       runtime_diagnostics
       return 1
     fi
-    if [[ "${resource}" == task ]] && (( now >= next_diagnostics )); then
+    if (( now >= next_diagnostics )); then
       runtime_diagnostics
       next_diagnostics=$((now + 30))
     fi

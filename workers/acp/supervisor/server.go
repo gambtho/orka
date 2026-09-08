@@ -1440,7 +1440,7 @@ func (s *Server) cleanupDrainedSession(sessionID harnessv2.RuntimeSessionID, sta
 		s.poisonPool("drain_session_cleanup_unproven")
 		return
 	}
-	if err := acp.ReclaimSessionOwnership(state.paths.Root); err != nil {
+	if err := reclaimStoppedSessionOwnership(state.paths); err != nil {
 		slog.Error("ACP drained runtime session cleanup failed", "stage", "ownership reclaim")
 		s.poisonPool("drain_session_root_ownership_reclaim_unproven")
 		return
@@ -1497,7 +1497,7 @@ func (s *Server) Close(ctx context.Context) error {
 			cleanup, err := state.runtime.Delete(ctx)
 			if err != nil || !cleanup.Proven {
 				errs = append(errs, fmt.Errorf("runtime session cleanup unproven: %w", err))
-			} else if err := acp.ReclaimSessionOwnership(state.paths.Root); err != nil {
+			} else if err := reclaimStoppedSessionOwnership(state.paths); err != nil {
 				errs = append(errs, fmt.Errorf("runtime session filesystem ownership reclaim: %w", err))
 			} else if err := os.RemoveAll(state.paths.Root); err != nil {
 				errs = append(errs, fmt.Errorf("runtime session filesystem cleanup: %w", err))

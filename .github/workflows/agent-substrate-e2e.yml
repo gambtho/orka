@@ -91,5 +91,13 @@ jobs:
           kubectl version --client=true
           ko version
 
+      - name: Verify durable workspace ownership after cleanup
+        run: |
+          test_dir="$(mktemp -d /tmp/orka-checkpoint-tests.XXXXXX)"
+          trap 'rm -rf "${test_dir}"' EXIT
+          chmod 755 "${test_dir}"
+          go test -c -o "${test_dir}/supervisor.test" ./workers/acp/supervisor
+          sudo "${test_dir}/supervisor.test" -test.run '^TestDurableWorkspaceCleanupReclaimsOwnership$' -test.v
+
       - name: Run Agent Substrate E2E
         run: bash scripts/agent-substrate-e2e.sh
