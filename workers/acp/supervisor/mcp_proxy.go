@@ -106,6 +106,9 @@ type mcpJSONRPCError struct {
 type mcpToolsCallParams struct {
 	Name      string          `json:"name"`
 	Arguments json.RawMessage `json:"arguments,omitempty"`
+	// MCP clients send progress tokens and extensions in _meta. The enclosing
+	// request limit bounds it, and it never contributes broker authority.
+	Meta json.RawMessage `json:"_meta,omitempty"`
 }
 
 func newMCPProxy(broker MCPBroker) (*mcpProxy, error) {
@@ -511,6 +514,10 @@ func (s *mcpProxySession) handleToolCall(w http.ResponseWriter, r *http.Request,
 	decoder := json.NewDecoder(bytes.NewReader(rpc.Params))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&params); err != nil {
+		writeMCPRPCError(w, rpc.ID, -32602, "invalid MCP tool call parameters")
+		return
+	}
+	if meta := bytes.TrimSpace(params.Meta); len(meta) != 0 && meta[0] != '{' {
 		writeMCPRPCError(w, rpc.ID, -32602, "invalid MCP tool call parameters")
 		return
 	}

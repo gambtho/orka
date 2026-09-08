@@ -2474,7 +2474,7 @@ func runtimePoolTestReconciler(
 	objects ...client.Object,
 ) *RuntimePoolReconciler {
 	t.Helper()
-	statusObjects := []client.Object{&corev1alpha1.RuntimePool{}, &appsv1.Deployment{}, &corev1.Pod{}}
+	statusObjects := []client.Object{&corev1alpha1.RuntimePool{}, &corev1alpha1.Task{}, &appsv1.Deployment{}, &corev1.Pod{}}
 	if scheme.Recognizes(workspacev1alpha1.GroupVersion.WithKind("ExecutionWorkspaceCheckpoint")) {
 		statusObjects = append(statusObjects, &workspacev1alpha1.ExecutionWorkspaceCheckpoint{}, &workspacev1alpha1.ExecutionWorkspace{})
 	}

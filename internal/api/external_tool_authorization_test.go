@@ -534,7 +534,7 @@ func TestExternalToolChatReferencesAreAuthorizedBeforeStateAccess(t *testing.T) 
 			_, backend, results, _ := newExternalToolExecutor(clientset)
 			sessions := &externalToolSessionAccessStore{SessionStore: newTestSessionStore(t)}
 			cfg := DefaultChatConfig()
-			handler := NewChatHandler(backend, nil, cfg, "", false, sessions, results, NewProviderResolver(backend, cfg), clientset)
+			handler := NewChatHandler(backend, nil, nil, cfg, "", false, sessions, results, NewProviderResolver(backend, cfg), clientset)
 			app := fiber.New()
 			app.Post("/api/v1/chat", func(c fiber.Ctx) error {
 				c.Locals(UserInfoContextKey, externalToolUser())
@@ -601,7 +601,7 @@ func TestExternalToolChatNamedSessionExactPermissions(t *testing.T) {
 			}
 			cfg := DefaultChatConfig()
 			cfg.Provider = "chat-provider"
-			handler := NewChatHandler(backend, nil, cfg, "", false, sessions, newTestResultStore(t), NewProviderResolver(backend, cfg), clientset)
+			handler := NewChatHandler(backend, nil, nil, cfg, "", false, sessions, newTestResultStore(t), NewProviderResolver(backend, cfg), clientset)
 			app := fiber.New()
 			app.Post("/api/v1/chat", func(c fiber.Ctx) error {
 				c.Locals(UserInfoContextKey, externalToolUser())

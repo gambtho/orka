@@ -267,9 +267,16 @@ journal_for_pool() {
   uid="$(kubectl -n orka-system get runtimepool "$1" -o jsonpath='{.metadata.uid}')"
   kubectl -n orka-system get configmap -l "orka.ai/runtime-pool-uid=${uid}" -o json | jq -er '.items[] | select(.data["runtime.json"]) | .data["runtime.json"] | fromjson'
 }
-service_read() {
+service_request() {
+  local response_mode="$1" method="$2" request_timeout=3
+  shift 2
   local namespace="$1" service="$2" target_port="$3" path="$4" port
   local request_headers=()
+  local response_args=(--fail)
+  if [[ "${response_mode}" == status ]]; then
+    response_args=(--output /dev/null --write-out '%{http_code}')
+  fi
+  if [[ "${method}" == DELETE ]]; then request_timeout=30; fi
   if [[ -n "${5:-}" ]]; then
     [[ -s "$5" ]] || return 1
     request_headers=(--header "@$5")
@@ -285,12 +292,18 @@ PORT
   local pid=$! result start
   PORT_FORWARD_PIDS+=("${pid}")
   start=$(date +%s)
-  until result="$(curl -fsS --connect-timeout 1 --max-time 3 "${request_headers[@]}" "http://127.0.0.1:${port}${path}" 2>/dev/null)"; do
+  until result="$(curl -sS --connect-timeout 1 --max-time "${request_timeout}" --request "${method}" "${response_args[@]}" "${request_headers[@]}" "http://127.0.0.1:${port}${path}" 2>/dev/null)"; do
     if (( $(date +%s) - start > 20 )); then kill "${pid}" 2>/dev/null || true; return 1; fi
     sleep 1
   done
   kill "${pid}" 2>/dev/null || true
   printf '%s\n' "${result}"
+}
+service_read() { service_request body GET "$@"; }
+service_status() {
+  local method="$1"
+  shift
+  service_request status "${method}" "$@"
 }
 create_history_api_identity() {
   jq -n '{apiVersion:"v1",kind:"List",items:[
@@ -312,6 +325,66 @@ create_history_api_identity() {
       printf '\n'
     } >"${TMP_ROOT}/native-history-header"
   ) || return 1
+}
+create_cleanup_api_identity() {
+  local session="$1"
+  jq -n --arg session "${session}" '{apiVersion:"v1",kind:"List",items:[
+    {apiVersion:"v1",kind:"ServiceAccount",metadata:{name:"native-cleanup-client",namespace:"orka-system"}},
+    {apiVersion:"rbac.authorization.k8s.io/v1",kind:"Role",metadata:{name:"native-cleanup-client",namespace:"orka-system"},
+      rules:[{apiGroups:["core.orka.ai"],resources:["sessions"],resourceNames:[$session],verbs:["get","delete"]}]},
+    {apiVersion:"rbac.authorization.k8s.io/v1",kind:"RoleBinding",metadata:{name:"native-cleanup-client",namespace:"orka-system"},
+      roleRef:{apiGroup:"rbac.authorization.k8s.io",kind:"Role",name:"native-cleanup-client"},
+      subjects:[{kind:"ServiceAccount",name:"native-cleanup-client",namespace:"orka-system"}]}
+  ]}' | kubectl -n orka-system apply -f - || return 1
+  (
+    umask 077
+    rm -f "${TMP_ROOT}/native-cleanup-token" "${TMP_ROOT}/native-cleanup-header"
+    kubectl -n orka-system create token native-cleanup-client --duration=5m >"${TMP_ROOT}/native-cleanup-token" || exit 1
+    [[ -s "${TMP_ROOT}/native-cleanup-token" ]] || exit 1
+    {
+      printf 'Authorization: Bearer '
+      cat "${TMP_ROOT}/native-cleanup-token" || exit 1
+      printf '\n'
+    } >"${TMP_ROOT}/native-cleanup-header"
+  ) || return 1
+}
+delete_native_session() {
+  local session="$1" status start
+  create_cleanup_api_identity "${session}" || return 1
+  start=$(date +%s)
+  while true; do
+    status="$(service_status DELETE orka-system orka-api 8080 "/api/v1/sessions/${session}?namespace=orka-system" "${TMP_ROOT}/native-cleanup-header")" || return 1
+    case "${status}" in
+      200|202|204|404) break ;;
+      409)
+        if (( $(date +%s) - start >= 120 )); then
+          printf 'Session/%s remained unsettled during cleanup\n' "${session}" >&2
+          return 1
+        fi
+        sleep 2
+        ;;
+      *) printf 'Session/%s deletion failed with HTTP %s\n' "${session}" "${status}" >&2; return 1 ;;
+    esac
+  done
+  start=$(date +%s)
+  while true; do
+    status="$(service_status GET orka-system orka-api 8080 "/api/v1/sessions/${session}?namespace=orka-system" "${TMP_ROOT}/native-cleanup-header")" || return 1
+    case "${status}" in
+      404)
+        kubectl -n orka-system delete serviceaccount,role,rolebinding native-cleanup-client || return 1
+        rm -f "${TMP_ROOT}/native-cleanup-token" "${TMP_ROOT}/native-cleanup-header"
+        return 0
+        ;;
+      200)
+        if (( $(date +%s) - start >= 60 )); then
+          printf 'Session/%s remained readable after cleanup\n' "${session}" >&2
+          return 1
+        fi
+        sleep 2
+        ;;
+      *) printf 'Session/%s deletion verification failed with HTTP %s\n' "${session}" "${status}" >&2; return 1 ;;
+    esac
+  done
 }
 fixture_read() { service_read vekil-system vekil 1337 "$1"; }
 fixture_key() { printf '%s' "$1" | shasum -a 256 | awk '{print substr($1, 1, 16)}'; }
@@ -414,6 +487,7 @@ exercise_acp_lifecycle() {
   local checkpoint_uid digest
   checkpoint_uid="$(kubectl -n orka-system get executionworkspacecheckpoint native-save -o jsonpath='{.metadata.uid}')"
   digest="$(kubectl -n orka-system get executionworkspacecheckpoint native-save -o jsonpath='{.status.digest}')"
+  delete_native_session native-session
   kubectl -n orka-system delete executionworkspace "${workspace}" --wait=false
   wait_absent executionworkspace "${workspace}"
   jq -n --arg uid "${checkpoint_uid}" --arg digest "${digest}" '{apiVersion:"core.orka.ai/v1alpha1",kind:"Task",metadata:{name:"native-fork",namespace:"orka-system"},spec:{type:"agent",agentRef:{name:"native-substrate"},timeout:"15m",execution:{workspace:{classRef:{name:"native-substrate"},onDetach:"Delete",restoreFrom:{name:"native-save",uid:$uid,digest:$digest}}},prompt:"Reply exactly: ORKA_NATIVE_FORK_OK"}}' | kubectl create -f -
@@ -430,12 +504,17 @@ exercise_acp_lifecycle() {
   wait_fixture_disconnect ORKA_NATIVE_TIMEOUT_OK
   wait_field executionworkspace "$(workspace_for_task native-timeout)" '.status.state' Suspended
   [[ "$(kubectl_ate get actors --atespace orka-system -o json | jq '.actors|length')" == 0 ]]
+  delete_native_session timeout-session
   submit_task native-cancel cancel-session 'ORKA_HOLD_120S Reply exactly: ORKA_NATIVE_CANCEL_OK'
   wait_field task native-cancel '.status.phase' Running
   wait_fixture_request native-cancel ORKA_NATIVE_CANCEL_OK
   kubectl -n orka-system delete task native-cancel --wait=false
-  wait_absent task native-cancel
+  wait_field task native-cancel '
+    .status.phase == "Cancelled" and .status.execution.state == "Cancelled" and
+    .status.execution.outcome == "Cancelled" and .status.execution.attempt == 1' true
   wait_fixture_disconnect ORKA_NATIVE_CANCEL_OK
+  delete_native_session cancel-session
+  wait_absent task native-cancel
   cleanup_acp_workspaces
   assert_fixture_count ORKA_NATIVE_TIMEOUT_OK 1
   assert_fixture_count ORKA_NATIVE_CANCEL_OK 1
@@ -481,6 +560,7 @@ exercise_acp_checkpoint_data() {
   wait_field executionworkspace "${workspace}" '.status.state' Suspended
   checkpoint_uid="$(kubectl -n orka-system get executionworkspacecheckpoint native-data-save -o jsonpath='{.metadata.uid}')"
   digest="$(kubectl -n orka-system get executionworkspacecheckpoint native-data-save -o jsonpath='{.status.digest}')"
+  delete_native_session native-data-session
   kubectl -n orka-system delete executionworkspace "${workspace}" --wait=false
   wait_absent executionworkspace "${workspace}"
   jq -n --arg uid "${checkpoint_uid}" --arg digest "${digest}" '{apiVersion:"core.orka.ai/v1alpha1",kind:"Task",metadata:{name:"native-data-restore",namespace:"orka-system"},spec:{type:"agent",agentRef:{name:"native-substrate"},agentRuntime:{maxTurns:2},timeout:"15m",execution:{workspace:{classRef:{name:"native-substrate"},onDetach:"Delete",restoreFrom:{name:"native-data-save",uid:$uid,digest:$digest}}},prompt:"Read the checkpoint canary file using the shell. Reply exactly: ORKA_NATIVE_DATA_READ_OK"}}' | kubectl create -f -

@@ -408,6 +408,12 @@ This section needs an [Option B](#option-b-current-main-from-source) install.
 A `type: agent` Task runs a real coding-agent CLI against a git repository. Orka clones the
 repo, hands the agent a working copy, and records everything it does.
 
+ACP agent runtimes run the supported Codex, Claude, Copilot, and OpenCode profiles as
+fenced RuntimeSessions in controller-owned RuntimePools. Operators own external
+`orka.harness.v2` registrations. Once a registration is ready at its current generation
+and passes strict governance checks, an Agent can select it through `runtimeRef` and
+use the same durable Task and RuntimeSession lifecycle.
+
 ### 1. Check the provider proxy is up
 
 Built-in agent runtimes never see a provider Secret. They get a token for Orka's proxy and

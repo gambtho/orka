@@ -32,7 +32,7 @@ const (
 	acpRuntimeWorkspaceProviderLabel             = "orka.ai/acp-execution-workspace-provider"
 	acpRuntimeTaskPoolLabel                      = "orka.ai/runtime-pool"
 	acpRuntimeSessionCleanupAnnotation           = "orka.ai/runtime-session-cleanup"
-	acpExternalRuntimeTaskLabel                  = "orka.ai/agent-runtime"
+	acpExternalRuntimeTaskAnnotation             = "orka.ai/agent-runtime"
 	acpRuntimeLastDemandAnnotation               = "orka.ai/acp-last-demand-at"
 	acpRuntimeQueuedAtAnnotation                 = "orka.ai/acp-queued-at"
 	acpRuntimePoolImageProvenanceCondition       = "ImageProvenance"
@@ -46,7 +46,7 @@ const (
 	DefaultACPQueueMaximumWait   = 5 * time.Minute
 )
 
-var errACPWorkspaceRecoveryPending = errors.New("execution workspace recovery is pending")
+var errACPWorkspaceRecoveryPending = fmt.Errorf("execution workspace recovery is pending: %w", store.ErrNotReady)
 
 //nolint:gocyclo // ACP queueing keeps durable planning, recovery, and binding gates auditable together.
 func (r *TaskReconciler) queueACPRuntimeTask(ctx context.Context, task *corev1alpha1.Task, _ *corev1alpha1.Agent) (ctrl.Result, error) {
@@ -58,6 +58,11 @@ func (r *TaskReconciler) queueACPRuntimeTask(ctx context.Context, task *corev1al
 		return ctrl.Result{}, fmt.Errorf("verify immutable v2 execution before ACP queueing: %w", err)
 	}
 	frozenTask := bound.frozenTask
+	externalRuntime := bound.externalRuntime
+	externalDispatch := bound.binding.Backend == corev1alpha1.AgentExecutionBackendExternalEndpoint
+	if externalDispatch && externalRuntime == nil {
+		return ctrl.Result{}, errors.New("verified external v2 execution is missing its AgentRuntime target")
+	}
 	if reason := r.frozenWorkspaceDispatchDisabledReason(bound.plan.Workspace); reason != "" {
 		// The single configuration gate for bound Tasks: ordinary planning
 		// AND bound-task recovery both flow through this chokepoint before
@@ -77,82 +82,90 @@ func (r *TaskReconciler) queueACPRuntimeTask(ctx context.Context, task *corev1al
 	if err != nil {
 		return ctrl.Result{}, err
 	}
-	delivery, err := r.acpRuntimeDeliveryPlanForTaskAttempt(ctx, task, bound.plan, attempt)
-	if err != nil {
-		return r.failACPPlanningTask(
-			ctx,
-			task,
-			corev1alpha1.TaskExecutionReason("InvalidRuntimeProfile"),
-			fmt.Sprintf("resolve current ACP runtime delivery plan: %v", err),
-		)
+	plan := bound.plan
+	var delivery acpRuntimeDeliverySelection
+	if !externalDispatch {
+		delivery, err = r.acpRuntimeDeliveryPlanForTaskAttempt(ctx, task, bound.plan, attempt)
+		if err != nil {
+			return r.failACPPlanningTask(
+				ctx,
+				task,
+				corev1alpha1.TaskExecutionReason("InvalidRuntimeProfile"),
+				fmt.Sprintf("resolve current ACP runtime delivery plan: %v", err),
+			)
+		}
+		plan = delivery.plan
 	}
-	plan := delivery.plan
 	if err := validateACPWorkspacePreflight(frozenTask); err != nil {
 		return r.failACPPlanningTask(ctx, task, corev1alpha1.TaskExecutionReason("InvalidWorkspace"), err.Error())
-	}
-	workspaceName, workspaceReady, err := r.ensureACPClassWorkspace(ctx, task, plan)
-	if err != nil {
-		if errors.Is(err, errACPWorkspaceBindingConflict) {
-			return r.failACPPlanningTask(ctx, task, corev1alpha1.TaskExecutionReason("InvalidWorkspace"), err.Error())
-		}
-		if errors.Is(err, errACPWorkspaceTerminalFailure) {
-			return r.failACPPlanningTask(ctx, task, corev1alpha1.TaskExecutionReason("WorkspaceFailed"), err.Error())
-		}
-		return ctrl.Result{}, err
-	}
-	if !workspaceReady {
-		// The controller-first workspace is not yet admitted, attachable, or
-		// exclusively held by this Task; no RuntimePool demand exists yet.
-		return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
 	}
 	reader := r.APIReader
 	if reader == nil {
 		reader = r.Client
 	}
-	runtimeBound := taskExecutionHasRuntimeOrSessionBinding(task.Status.Execution) ||
-		promptAttemptHasRuntimeOrSessionBinding(attempt)
-	allowCreate := delivery.allowPoolCreation && !runtimeBound
-	requiredUID := delivery.requiredRuntimePoolUID
-	if runtimeBound {
-		execution := task.Status.Execution
-		if execution == nil || execution.RuntimePoolName != plan.PoolName || strings.TrimSpace(execution.RuntimePoolUID) == "" {
+	var pool *corev1alpha1.RuntimePool
+	poolPreexisting := false
+	if !externalDispatch {
+		workspaceName, workspaceReady, err := r.ensureACPClassWorkspace(ctx, task, plan)
+		if err != nil {
+			if errors.Is(err, errACPWorkspaceBindingConflict) {
+				return r.failACPPlanningTask(ctx, task, corev1alpha1.TaskExecutionReason("InvalidWorkspace"), err.Error())
+			}
+			if errors.Is(err, errACPWorkspaceTerminalFailure) {
+				return r.failACPPlanningTask(ctx, task, corev1alpha1.TaskExecutionReason("WorkspaceFailed"), err.Error())
+			}
+			return ctrl.Result{}, err
+		}
+		if !workspaceReady {
+			// The controller-first workspace is not yet admitted, attachable, or
+			// exclusively held by this Task; no RuntimePool demand exists yet.
+			return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
+		}
+		runtimeBound := taskExecutionHasRuntimeOrSessionBinding(task.Status.Execution) ||
+			promptAttemptHasRuntimeOrSessionBinding(attempt)
+		allowCreate := delivery.allowPoolCreation && !runtimeBound
+		requiredUID := delivery.requiredRuntimePoolUID
+		if runtimeBound {
+			execution := task.Status.Execution
+			if execution == nil || execution.RuntimePoolName != plan.PoolName || strings.TrimSpace(execution.RuntimePoolUID) == "" {
+				return r.failACPPlanningTask(
+					ctx,
+					task,
+					corev1alpha1.TaskExecutionReason("InvalidRuntimeProfile"),
+					"the runtime-bound ACP attempt is missing its exact frozen RuntimePool identity",
+				)
+			}
+			requiredUID = types.UID(execution.RuntimePoolUID)
+		}
+		if !allowCreate && requiredUID == "" {
 			return r.failACPPlanningTask(
 				ctx,
 				task,
 				corev1alpha1.TaskExecutionReason("InvalidRuntimeProfile"),
-				"the runtime-bound ACP attempt is missing its exact frozen RuntimePool identity",
+				"the frozen ACP runtime delivery plan requires an exact preexisting RuntimePool identity",
 			)
 		}
-		requiredUID = types.UID(execution.RuntimePoolUID)
-	}
-	if !allowCreate && requiredUID == "" {
-		return r.failACPPlanningTask(
-			ctx,
-			task,
-			corev1alpha1.TaskExecutionReason("InvalidRuntimeProfile"),
-			"the frozen ACP runtime delivery plan requires an exact preexisting RuntimePool identity",
+		pool, poolPreexisting, err = r.ensureACPRuntimePoolWithPolicy(
+			ctx, task.Namespace, plan, workspaceName,
+			task.Annotations[acpExecutionWorkspaceUIDAnnotation], string(task.UID),
+			allowCreate, requiredUID,
 		)
-	}
-	pool, poolPreexisting, err := r.ensureACPRuntimePoolWithPolicy(
-		ctx, task.Namespace, plan, workspaceName,
-		task.Annotations[acpExecutionWorkspaceUIDAnnotation], string(task.UID),
-		allowCreate, requiredUID,
-	)
-	if err != nil {
-		if errors.Is(err, errACPWorkspaceRecoveryPending) {
-			return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
+		if err != nil {
+			if errors.Is(err, store.ErrNotReady) {
+				return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
+			}
+			if errors.Is(err, errACPRuntimeWorkspaceNamespace) {
+				return r.failACPPlanningTask(ctx, task, corev1alpha1.TaskExecutionReason("InvalidWorkspace"), err.Error())
+			}
+			if errors.Is(err, store.ErrValidation) {
+				return r.failACPPlanningTask(ctx, task, corev1alpha1.TaskExecutionReason("InvalidRuntimeProfile"), err.Error())
+			}
+			return ctrl.Result{}, err
 		}
-		if errors.Is(err, errACPRuntimeWorkspaceNamespace) {
-			return r.failACPPlanningTask(ctx, task, corev1alpha1.TaskExecutionReason("InvalidWorkspace"), err.Error())
-		}
-		if errors.Is(err, store.ErrValidation) {
-			return r.failACPPlanningTask(ctx, task, corev1alpha1.TaskExecutionReason("InvalidRuntimeProfile"), err.Error())
-		}
-		return ctrl.Result{}, err
 	}
 	if task.Status.Execution != nil && !taskExecutionStateTerminal(task.Status.Execution.State) {
-		if task.Status.Execution.State == corev1alpha1.TaskExecutionStateQueued ||
-			task.Status.Execution.State == corev1alpha1.TaskExecutionStateReserved {
+		if !externalDispatch && (task.Status.Execution.State == corev1alpha1.TaskExecutionStateQueued ||
+			task.Status.Execution.State == corev1alpha1.TaskExecutionStateReserved) {
 			rebound, rebindErr := r.rebindQueuedACPRuntimeTask(ctx, task, bound, pool)
 			if rebindErr != nil {
 				return ctrl.Result{}, rebindErr
@@ -207,7 +220,15 @@ func (r *TaskReconciler) queueACPRuntimeTask(ctx context.Context, task *corev1al
 	if task.Annotations == nil {
 		task.Annotations = make(map[string]string)
 	}
-	task.Labels[acpRuntimeTaskPoolLabel] = pool.Name
+	if externalDispatch {
+		task.Annotations[acpExternalRuntimeTaskAnnotation] = externalRuntime.Name
+		delete(task.Labels, acpExternalRuntimeTaskAnnotation)
+		delete(task.Labels, acpRuntimeTaskPoolLabel)
+	} else {
+		task.Labels[acpRuntimeTaskPoolLabel] = pool.Name
+		delete(task.Labels, acpExternalRuntimeTaskAnnotation)
+		delete(task.Annotations, acpExternalRuntimeTaskAnnotation)
+	}
 	task.Annotations[acpRuntimeQueuedAtAnnotation] = queuedAt.Format(time.RFC3339Nano)
 	if err := r.Patch(ctx, task, client.MergeFrom(metadataBase)); err != nil {
 		return ctrl.Result{}, err
@@ -215,9 +236,9 @@ func (r *TaskReconciler) queueACPRuntimeTask(ctx context.Context, task *corev1al
 	statusBase := task.DeepCopy()
 	now := metav1.NewTime(queuedAt)
 	task.Status.Attempts = attemptNumber
-	task.Status.Execution = &corev1alpha1.TaskExecutionStatus{
+	execution := &corev1alpha1.TaskExecutionStatus{
 		State: corev1alpha1.TaskExecutionStateQueued, Attempt: attemptNumber, PromptID: promptID,
-		RuntimePoolName: pool.Name, RuntimePoolUID: string(pool.UID), ControllerEpoch: fence.Epoch,
+		ControllerEpoch:                          fence.Epoch,
 		RequestDigest:                            attempt.RequestDigest,
 		ReadCredentialResourceVersion:            credentialVersions.SourceRead,
 		PublicationReadCredentialResourceVersion: credentialVersions.TargetRead,
@@ -225,6 +246,14 @@ func (r *TaskReconciler) queueACPRuntimeTask(ctx context.Context, task *corev1al
 		ForgeCredentialResourceVersion:           credentialVersions.Forge,
 		LastTransitionTime:                       &now,
 	}
+	if externalDispatch {
+		execution.AgentRuntimeName = externalRuntime.Name
+		execution.AgentRuntimeUID = string(externalRuntime.UID)
+	} else {
+		execution.RuntimePoolName = pool.Name
+		execution.RuntimePoolUID = string(pool.UID)
+	}
+	task.Status.Execution = execution
 	task.Status.Delivery = &corev1alpha1.TaskDeliveryStatus{
 		State: corev1alpha1.TaskDeliveryStateNotRequested, Outcome: corev1alpha1.TaskDeliveryOutcomeNotRequested, LastTransitionTime: &now,
 	}
@@ -246,7 +275,11 @@ func (r *TaskReconciler) queueACPRuntimeTask(ctx context.Context, task *corev1al
 		return ctrl.Result{}, err
 	}
 	if r.Recorder != nil {
-		r.Recorder.Eventf(task, corev1.EventTypeNormal, "ACPTaskQueued", "Queued attempt %d for RuntimePool %s", attemptNumber, pool.Name)
+		if externalDispatch {
+			r.Recorder.Eventf(task, corev1.EventTypeNormal, "ACPTaskQueued", "Queued attempt %d for external AgentRuntime %s", attemptNumber, externalRuntime.Name)
+		} else {
+			r.Recorder.Eventf(task, corev1.EventTypeNormal, "ACPTaskQueued", "Queued attempt %d for RuntimePool %s", attemptNumber, pool.Name)
+		}
 	}
 	return ctrl.Result{RequeueAfter: time.Second}, nil
 }

@@ -83,6 +83,9 @@ func (r *RuntimePoolReconciler) drainNativeSubstrateRuntime(ctx context.Context,
 	if !runtimePoolProbeIsQuiescent(pool.Status.Capacity, probe.Status) {
 		return wait(runtimePoolMessageDrainSettling)
 	}
+	if err := r.recordDrainedRuntimePoolTaskCleanup(ctx, validationPool, active, probe.Status); err != nil {
+		return false, ctrl.Result{}, err
+	}
 	if pool.Status.Lifecycle != corev1alpha1.RuntimePoolLifecycleQuiescent {
 		poolStatus := r.baseRuntimePoolStatus(pool, 1)
 		poolStatus.ActiveInstance = active

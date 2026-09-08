@@ -59,6 +59,115 @@ PY
   [[ ! -e "${TMP_ROOT}/native-history-header" ]]
 )
 
+# Cleanup uses a separate identity scoped to the one Session being archived.
+(
+  TMP_ROOT="${test_root}/session-identity"
+  mkdir -p "${TMP_ROOT}"
+  token_failure=""
+  kubectl() {
+    case "$*" in
+      '-n orka-system apply -f -') cat >"${TMP_ROOT}/identity.json" ;;
+      '-n orka-system create token native-cleanup-client --duration=5m')
+        [[ -z "${token_failure}" ]] || return 7
+        printf 'fixture-cleanup-token\n'
+        ;;
+      *'port-forward '*) ;;
+      *) return 9 ;;
+    esac
+  }
+  curl() {
+    printf '%s\n' "$@" >"${TMP_ROOT}/curl-arguments"
+    printf '204'
+  }
+  kill() { return 0; }
+  create_cleanup_api_identity cancel-session
+  jq -e '
+    (.items | length) == 3 and
+    all(.items[]; .metadata.namespace == "orka-system") and
+    (.items[] | select(.kind == "Role") | .rules) == [{apiGroups:["core.orka.ai"],resources:["sessions"],resourceNames:["cancel-session"],verbs:["get","delete"]}] and
+    (.items[] | select(.kind == "RoleBinding") | .subjects) == [{kind:"ServiceAccount",name:"native-cleanup-client",namespace:"orka-system"}]
+  ' "${TMP_ROOT}/identity.json" >/dev/null
+  python3 - "${TMP_ROOT}" <<'PY'
+import pathlib, stat, sys
+for name in ('native-cleanup-token', 'native-cleanup-header'):
+    assert stat.S_IMODE((pathlib.Path(sys.argv[1]) / name).stat().st_mode) == 0o600
+PY
+  [[ "$(service_status DELETE orka-system orka-api 8080 '/api/v1/sessions/cancel-session?namespace=orka-system' "${TMP_ROOT}/native-cleanup-header")" == 204 ]]
+  grep -Fxq -- "@${TMP_ROOT}/native-cleanup-header" "${TMP_ROOT}/curl-arguments"
+  grep -Fxq -- DELETE "${TMP_ROOT}/curl-arguments"
+  grep -Fxq -- '%{http_code}' "${TMP_ROOT}/curl-arguments"
+  if grep -Fq 'fixture-cleanup-token' "${TMP_ROOT}/curl-arguments"; then
+    echo 'Session cleanup credential entered curl arguments' >&2
+    exit 1
+  fi
+  token_failure=failed
+  if create_cleanup_api_identity cancel-session; then
+    echo 'Session cleanup continued after token creation failed' >&2
+    exit 1
+  fi
+  [[ ! -e "${TMP_ROOT}/native-cleanup-header" ]]
+)
+
+# Archival retries unsettled work and proves absence with a GET. Neither an
+# authorization failure nor a transport error can release the cleanup identity.
+(
+  TMP_ROOT="${test_root}/session-cleanup"
+  mkdir -p "${TMP_ROOT}"
+  create_cleanup_api_identity() {
+    [[ "$1" == cancel-session ]]
+    printf 'fixture-header\n' >"${TMP_ROOT}/native-cleanup-header"
+  }
+  service_status() {
+    printf '%s\n' "$1" >>"${TMP_ROOT}/calls"
+    local count=0
+    if [[ -f "${TMP_ROOT}/$1-count" ]]; then count=$(cat "${TMP_ROOT}/$1-count"); fi
+    printf '%s\n' "$((count + 1))" >"${TMP_ROOT}/$1-count"
+    case "${scenario}:$1" in
+      transport:DELETE) return 7 ;;
+      denied:DELETE) printf '403' ;;
+      unsettled:DELETE) printf '409' ;;
+      missing:DELETE|missing:GET) printf '404' ;;
+      bad-read:GET) printf '503' ;;
+      readable:GET) printf '200' ;;
+      *:DELETE) if (( count == 0 )); then printf '409'; else printf '204'; fi ;;
+      *:GET) if (( count == 0 )); then printf '200'; else printf '404'; fi ;;
+      *) return 9 ;;
+    esac
+  }
+  kubectl() {
+    [[ "$*" == '-n orka-system delete serviceaccount,role,rolebinding native-cleanup-client' ]] || return 9
+    printf 'revoke\n' >>"${TMP_ROOT}/calls"
+  }
+  sleep() { :; }
+  date() {
+    local tick
+    tick=$(cat "${TMP_ROOT}/clock")
+    if [[ "${scenario}" == unsettled || "${scenario}" == readable ]]; then
+      printf '%s\n' "$((tick + 130))" >"${TMP_ROOT}/clock"
+    else
+      printf '%s\n' "$((tick + 1))" >"${TMP_ROOT}/clock"
+    fi
+    printf '%s\n' "${tick}"
+  }
+  for scenario in success missing denied bad-read transport unsettled readable; do
+    rm -f "${TMP_ROOT}/DELETE-count" "${TMP_ROOT}/GET-count"
+    : >"${TMP_ROOT}/calls"
+    printf '0\n' >"${TMP_ROOT}/clock"
+    if delete_native_session cancel-session >"${TMP_ROOT}/output" 2>&1; then
+      [[ "${scenario}" == success || "${scenario}" == missing ]]
+      grep -Fxq GET "${TMP_ROOT}/calls"
+      [[ "$(tail -n 1 "${TMP_ROOT}/calls")" == revoke ]]
+      [[ ! -e "${TMP_ROOT}/native-cleanup-header" ]]
+    else
+      [[ "${scenario}" != success && "${scenario}" != missing ]]
+      if grep -Fxq revoke "${TMP_ROOT}/calls"; then
+        echo 'failed Session cleanup was treated as absence' >&2
+        exit 1
+      fi
+    fi
+  done
+)
+
 # Direct egress changes exactly the supported deployment argument, even when
 # containers or arguments move. Ambiguous state and failed updates stop setup.
 (

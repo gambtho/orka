@@ -97,12 +97,12 @@ Built-in `type: agent` Tasks run as private RuntimeSessions inside one controlle
 
 A shared pool is a same-administrative-trust-domain density boundary, not a hard tenant sandbox. Users who can mutate or exec into the runtime Pod, namespace administrators, node administrators, and sibling sessions in the same pool are trusted relative to that boundary.
 
-Per-Task `spec.execution` container settings and custom resource requests are not honoured on
-the ACP path: runtime isolation and resources come from the reviewed RuntimePool profile, not
-from the Task. `spec.execution.workspace` is the one exception — it moves the agent into an
-external sandbox provider, and only when the operator has enabled it
-(`--acp-workspace-dispatch-enabled` plus `--agent-sandbox-enabled` or `--substrate-enabled`).
-Everything else in `spec.execution` fails closed.
+ACP Tasks reject per-Task container settings and custom resource requests. Runtime isolation
+and resources come from the reviewed RuntimePool profile. For built-in runtimes,
+`spec.execution.workspace` can bind a dedicated RuntimePool through a sandbox provider when
+the operator enables `--acp-workspace-dispatch-enabled` plus `--agent-sandbox-enabled` or
+`--substrate-enabled`. External `runtimeRef` dispatch rejects execution workspaces. Other
+per-Task execution placement fields fail closed.
 
 ### Workspace/Publisher
 
@@ -140,7 +140,7 @@ operations reserve a durable `ExternalEffect` identity before execution.
 
 ### Current ACP constraints
 
-- External `AgentRuntime` v2 registration and conformance are supported, but `runtimeRef` Task dispatch remains fail-closed until the external v2 dispatcher support boundary is enabled.
+- External `AgentRuntime` v2 dispatch is admitted only for a current-generation ready, strict-governed registration. Orka freezes and revalidates the endpoint, authentication authority, profile, and observed runtime identity before each mutation; drift fails closed.
 - Non-empty write delivery uses the clean-room publisher and is successful only with a terminal independently verified `status.delivery` receipt.
 - Codex, Claude, Copilot, and OpenCode are supported built-in RuntimePool profiles.
 

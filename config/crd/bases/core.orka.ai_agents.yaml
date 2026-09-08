@@ -1436,7 +1436,6 @@ spec:
                       type: string
                     type: array
                   defaultMaxTurns:
-                    default: 50
                     description: DefaultMaxTurns is the default maximum agent loop
                       iterations for tasks using this Agent
                     format: int32

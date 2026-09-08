@@ -50,6 +50,7 @@ const (
 // This allows OpenAI-compatible clients to use Orka as a custom provider.
 type OpenAICompatHandler struct {
 	client                    client.Client
+	apiReader                 client.Reader
 	kubeClient                kubernetes.Interface
 	watchNamespace            string
 	enforceNamespaceIsolation bool
@@ -61,7 +62,7 @@ type OpenAICompatHandler struct {
 }
 
 // NewOpenAICompatHandler creates an OpenAI-compatible API handler.
-func NewOpenAICompatHandler(c client.Client, watchNamespace string, enforceNS bool, config ChatConfig, resolver *ProviderResolver, rs store.ResultStore, kubeClientOpt ...kubernetes.Interface) *OpenAICompatHandler {
+func NewOpenAICompatHandler(c client.Client, apiReader client.Reader, watchNamespace string, enforceNS bool, config ChatConfig, resolver *ProviderResolver, rs store.ResultStore, kubeClientOpt ...kubernetes.Interface) *OpenAICompatHandler {
 	var kubeClient kubernetes.Interface
 	if len(kubeClientOpt) > 0 {
 		kubeClient = kubeClientOpt[0]
@@ -69,6 +70,7 @@ func NewOpenAICompatHandler(c client.Client, watchNamespace string, enforceNS bo
 
 	return &OpenAICompatHandler{
 		client:                    c,
+		apiReader:                 apiReader,
 		kubeClient:                kubeClient,
 		watchNamespace:            watchNamespace,
 		enforceNamespaceIsolation: enforceNS,
@@ -286,8 +288,7 @@ func (h *OpenAICompatHandler) HandleChatCompletions(c fiber.Ctx) error {
 
 	// Inject Orka tools and run the server-side agentic loop by default.
 	// Set X-Orka-Tools: disabled to use as a transparent proxy instead.
-	orkaToolsEnabled, err := prepareCompatCoordinatorTools(c, ctx, compReq, compatCoordinatorSetup{
-		Client:              newExternalToolClient(h.client, h.kubeClient, userInfo, namespace, h.watchNamespace, h.enforceNamespaceIsolation, h.gatewayEventStore),
+	orkaToolsEnabled, err := prepareCompatCoordinatorTools(c, compReq, compatCoordinatorSetup{
 		Namespace:           namespace,
 		ToolUseAction:       "openAITools",
 		AuthorizationConfig: h.contextTokenAuthorization,
@@ -301,6 +302,7 @@ func (h *OpenAICompatHandler) HandleChatCompletions(c fiber.Ctx) error {
 	if orkaToolsEnabled {
 		proxyToolCtx = newCompatProxyToolContext(compatProxyToolContextConfig{
 			Client:                    h.client,
+			AuthorizationReader:       h.apiReader,
 			KubeClient:                h.kubeClient,
 			Namespace:                 namespace,
 			Provider:                  providerInfo,
