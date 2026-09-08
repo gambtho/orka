@@ -135,6 +135,9 @@ func (t registrationTemplate) validate() error {
 		t.Spec.Deployment.KubernetesRecovery != nil {
 		return fmt.Errorf("template requires an external endpoint without credentials, query, fragment, or recovery ownership")
 	}
+	if _, err := harnessv2.NewClient(endpoint); err != nil {
+		return fmt.Errorf("template endpoint must be a canonical harness v2 URL")
+	}
 	auth := t.Spec.ClientAuth
 	if auth.BearerAuthRef != nil {
 		return fmt.Errorf("template must use v2 authentication references")
@@ -143,6 +146,9 @@ func (t registrationTemplate) validate() error {
 		if ref == nil || len(validation.IsDNS1123Subdomain(ref.Name)) != 0 || len(validation.IsConfigMapKey(ref.Key)) != 0 {
 			return fmt.Errorf("template requires both v2 authentication Secret names and keys")
 		}
+	}
+	if *auth.ControllerBearerTokenSecretRef == *auth.OperationCapabilitySecretRef {
+		return fmt.Errorf("controller bearer token and operation capability must use distinct Secret keys")
 	}
 	return nil
 }

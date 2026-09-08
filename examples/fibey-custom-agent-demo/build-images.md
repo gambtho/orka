@@ -68,7 +68,9 @@ FIBEY_DIRECT_IMAGE="$FIBEY_REGISTRY/orka-acp-agentkit@$(jq -er '."containerimage
 ```
 
 Deploy `FIBEY_DIRECT_IMAGE` with Deployment and Service name
-`fibey-agentkit-runtime`, one replica, and container name `supervisor`.
+`fibey-agentkit-runtime`, one replica, `strategy.type: Recreate`, and container
+name `supervisor`. Drain the registered instance and settle its active Tasks
+before replacing it.
 The image starts `orka-acp-runtime` and sets `ORKA_ACP_PROVIDER=agentkit`.
 The supervisor launches the child with `--protocol acp` and supplies its
 loopback model proxy and MCP server. `AGENTKIT_PROTOCOL=orka` selects v1 and

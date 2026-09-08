@@ -111,6 +111,10 @@ func TestExportRegistrationRejectsMismatchWithoutOutput(t *testing.T) {
 		{name: "duplicate field", before: "allowBash: false", after: "allowBash: false\n      allowBash: true", want: "invalid registration template"},
 		{name: "wrong contract", before: "orka.harness.v2", after: "orka.harness.v1", want: "using orka.harness.v2"},
 		{name: "missing auth reference", before: "      key: token\n", want: "Secret names and keys"},
+		{name: "escaped path", before: ":8080\n", after: ":8080/%2Fadmin\n", want: "canonical harness v2 URL"},
+		{name: "backslash path", before: ":8080\n", after: ":8080/prefix\\othere\n", want: "canonical harness v2 URL"},
+		{name: "noncanonical path", before: ":8080\n", after: ":8080/prefix/../other\n", want: "canonical harness v2 URL"},
+		{name: "reused auth key", before: "fibey-agentkit-operation-auth\n      key: capability-secret", after: "fibey-agentkit-controller-auth\n      key: token", want: "distinct Secret keys"},
 		{name: "second document", before: "", after: "\n---\nkind: Secret\n", want: "exactly one document"},
 	}
 	for _, tt := range tests {
