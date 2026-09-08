@@ -1,0 +1,67 @@
+# Registration template only. Fill the identity and profile digests from your
+# composed supervisor, and verify limits against GET /v2/capabilities.
+# Bind both separately provisioned Secrets to this name and exact endpoint.
+# This file is deliberately excluded from kustomization.yaml.
+apiVersion: core.orka.ai/v1alpha1
+kind: AgentRuntime
+metadata:
+  name: fibey-agentkit-runtime
+spec:
+  contractVersion: orka.harness.v2
+  deployment:
+    mode: external-endpoint
+    endpoint: http://fibey-agentkit-runtime.orka-system.svc.cluster.local:8080
+  clientAuth:
+    controllerBearerTokenSecretRef:
+      name: fibey-agentkit-controller-auth
+      key: token
+    operationCapabilitySecretRef:
+      name: fibey-agentkit-operation-auth
+      key: capability-secret
+  capabilities:
+    runtimeInstanceID: fibey-agentkit-instance-01
+    profile:
+      digest: sha256:0000000000000000000000000000000000000000000000000000000000000000
+      digestSchemaVersion: 1
+      acpProfile: acp.v1
+      adapterName: agentkit-serve-acp
+      adapterDigest: sha256:0000000000000000000000000000000000000000000000000000000000000000
+      providerKind: agentkit
+      model: gpt-4.1
+      agentConfigurationDigest: sha256:0000000000000000000000000000000000000000000000000000000000000000
+      toolPolicyDigest: sha256:0000000000000000000000000000000000000000000000000000000000000000
+      approvalPolicyDigest: sha256:0000000000000000000000000000000000000000000000000000000000000000
+      mcpConfigurationDigest: sha256:0000000000000000000000000000000000000000000000000000000000000000
+      workspaceIntent: read
+      proxyCredentialRole: operator-managed
+      proxyCredentialScope: external-runtime
+      resourceClass: external
+    mcpPolicy:
+      allowedTools: []
+      disallowedTools: []
+      allowBash: false
+      approvalRequiredTools: []
+    limits:
+      maxResidentSessions: 10
+      maxConcurrentPrompts: 4
+      maxRequestBytes: 2097152
+      maxEventLineBytes: 1048576
+      maxTerminalResultBytes: 1048576
+      maxBufferedEvents: 16384
+      maxUpdateEventsPerSecond: 1000
+      minPromptLeaseMillis: 5000
+      maxPromptLeaseMillis: 120000
+      maxPendingPermissions: 32
+      maxWorkspaceDeltaBytes: 104857600
+    supportsDrain: true
+    supportsPublicationFinalization: true
+    workspaceGovernance:
+      mode: strict-governed
+      trusted: false
+      orkaOwnedWorkspaceDeltas: true
+      promptScopedBrokerAuthorization: true
+      noDirectSCMPublication: true
+      orkaOwnedCleanRoomPublication: true
+      exactInstanceFencing: true
+      duplicateSafeMutations: true
+      cancellationSettlement: true
