@@ -46,6 +46,8 @@ const (
 	DefaultACPQueueMaximumWait   = 5 * time.Minute
 )
 
+var errACPWorkspaceRecoveryPending = errors.New("execution workspace recovery is pending")
+
 //nolint:gocyclo // ACP queueing keeps durable planning, recovery, and binding gates auditable together.
 func (r *TaskReconciler) queueACPRuntimeTask(ctx context.Context, task *corev1alpha1.Task, _ *corev1alpha1.Agent) (ctrl.Result, error) {
 	if task == nil || task.Status.AgentExecutionBinding == nil {
@@ -137,6 +139,9 @@ func (r *TaskReconciler) queueACPRuntimeTask(ctx context.Context, task *corev1al
 		allowCreate, requiredUID,
 	)
 	if err != nil {
+		if errors.Is(err, errACPWorkspaceRecoveryPending) {
+			return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
+		}
 		if errors.Is(err, errACPRuntimeWorkspaceNamespace) {
 			return r.failACPPlanningTask(ctx, task, corev1alpha1.TaskExecutionReason("InvalidWorkspace"), err.Error())
 		}
@@ -1577,9 +1582,9 @@ func (r *TaskReconciler) recordACPRuntimePoolImageProvenance(
 
 // verifyACPWorkspaceReadyForPool repeats the complete workspace admission and
 // attachment handshake through the uncached reader after a RuntimePool has
-// materialized. Any withdrawn lifecycle gate deletes the pool before prompt
-// demand can survive against an orphaned, quarantined, expired, or revoked
-// workspace.
+// materialized. Recovery waits preserve the data-bearing pool without allowing
+// prompt dispatch. Withdrawn authority deletes the pool before prompt demand
+// can survive against an orphaned, quarantined, expired, or revoked workspace.
 func (r *TaskReconciler) verifyACPWorkspaceReadyForPool(
 	ctx context.Context,
 	pool *corev1alpha1.RuntimePool,
@@ -1610,12 +1615,16 @@ func (r *TaskReconciler) verifyACPWorkspaceReadyForPool(
 		if apierrors.IsNotFound(err) {
 			abortReason = "the linked workspace no longer exists"
 		} else {
-			abortReason = acpWorkspacePoolReadinessFailure(
+			readinessErr := acpWorkspacePoolReadinessFailure(
 				workspace, pool, workspaceUID, workspaceTaskUID, time.Now(),
 			)
-			if abortReason == "" {
+			if readinessErr == nil {
 				return nil
 			}
+			if errors.Is(readinessErr, errACPWorkspaceRecoveryPending) {
+				return fmt.Errorf("linked execution workspace %s: %w", workspaceName, readinessErr)
+			}
+			abortReason = readinessErr.Error()
 		}
 	}
 	if deleteErr := r.deleteExactACPRuntimePool(ctx, reader, pool); deleteErr != nil {
@@ -1669,47 +1678,63 @@ func acpWorkspacePoolReadinessFailure(
 	pool *corev1alpha1.RuntimePool,
 	workspaceUID, workspaceTaskUID string,
 	now time.Time,
-) string {
+) error {
 	attached := meta.FindStatusCondition(
 		workspace.Status.Conditions,
 		string(workspacev1alpha1.ConditionWorkspaceAttached),
 	)
 	switch {
 	case string(workspace.UID) != workspaceUID:
-		return "the linked workspace was replaced"
+		return errors.New("the linked workspace was replaced")
 	case !workspace.DeletionTimestamp.IsZero():
-		return "the linked workspace is deleting"
+		return errors.New("the linked workspace is deleting")
 	case workspace.Annotations[acpExecutionWorkspacePoolAnnotation] != pool.Name:
-		return "the linked workspace does not name this RuntimePool"
+		return errors.New("the linked workspace does not name this RuntimePool")
 	case workspace.Spec.DesiredState != workspacev1alpha1.ExecutionWorkspaceDesiredReady:
-		return fmt.Sprintf("the linked workspace desired state is %q", workspace.Spec.DesiredState)
+		return fmt.Errorf("the linked workspace desired state is %q", workspace.Spec.DesiredState)
 	case !workspaceCurrentlyAdmittedByCore(workspace):
-		return "core admission is no longer current"
+		return errors.New("core admission is no longer current")
 	case workspace.Status.ObservedGeneration != workspace.Generation:
-		return "provider status has not observed the current workspace generation"
-	case workspace.Status.State != workspacev1alpha1.ExecutionWorkspaceStateAttached:
-		return fmt.Sprintf("the linked workspace state is %q", workspace.Status.State)
+		return errors.New("provider status has not observed the current workspace generation")
 	case workspace.Spec.Attachment == nil:
-		return "the linked workspace attachment is being revoked"
+		return errors.New("the linked workspace attachment is being revoked")
 	case string(workspace.Spec.Attachment.TaskRef.UID) != workspaceTaskUID:
-		return "the linked workspace is attached to a different Task"
+		return errors.New("the linked workspace is attached to a different Task")
 	case workspace.Spec.Attachment.Epoch <= 0 ||
-		workspace.Spec.AttachmentEpoch != workspace.Spec.Attachment.Epoch ||
-		workspace.Status.AttachedEpoch != workspace.Spec.Attachment.Epoch:
-		return "the linked workspace attachment epoch is not fully enforced"
-	case attached == nil || attached.Status != metav1.ConditionTrue ||
-		attached.ObservedGeneration != workspace.Generation:
-		return "the linked workspace attachment condition is not current"
+		workspace.Spec.AttachmentEpoch != workspace.Spec.Attachment.Epoch:
+		return errors.New("the linked workspace attachment epoch is not fully enforced")
 	case !workspace.Spec.Attachment.ExpiresAt.After(now):
-		return "the linked workspace attachment has expired"
+		return errors.New("the linked workspace attachment has expired")
 	case strings.TrimSpace(workspace.Annotations[acpWorkspaceRevocationStartedAnnotation]) != "":
-		return "attachment revocation has started for the linked workspace"
-	default:
-		if remaining, bounded := acpWorkspaceMaxLifetimeRemaining(workspace, now); bounded && remaining <= 0 {
-			return "the linked workspace maximum lifetime has elapsed"
-		}
-		return ""
+		return errors.New("attachment revocation has started for the linked workspace")
 	}
+	if remaining, bounded := acpWorkspaceMaxLifetimeRemaining(workspace, now); bounded && remaining <= 0 {
+		return errors.New("the linked workspace maximum lifetime has elapsed")
+	}
+	provisioned := meta.FindStatusCondition(workspace.Status.Conditions, string(workspacev1alpha1.ConditionWorkspaceProvisioned))
+	if workspace.Status.State == workspacev1alpha1.ExecutionWorkspaceStateProvisioning &&
+		workspace.Annotations[acpWorkspaceResumedLineageAnnotation] == booleanTrueValue &&
+		workspace.Status.AttachedEpoch == 0 && pool.DeletionTimestamp.IsZero() &&
+		strings.TrimSpace(pool.Annotations[runtimePoolWorkspaceResumeLostAnnotation]) == "" &&
+		attached != nil && attached.Status == metav1.ConditionFalse &&
+		attached.Reason == string(workspacev1alpha1.ReasonProgressing) && attached.ObservedGeneration == workspace.Generation &&
+		provisioned != nil && provisioned.Status == metav1.ConditionFalse &&
+		provisioned.Reason == string(workspacev1alpha1.ReasonProgressing) && provisioned.ObservedGeneration == workspace.Generation {
+		// The adapter deliberately withdraws the enforced epoch during a
+		// recoverable outage. Keep the exact data lineage, but do not queue
+		// any prompt until the adapter restores the attachment handshake.
+		return errACPWorkspaceRecoveryPending
+	}
+	if workspace.Status.State != workspacev1alpha1.ExecutionWorkspaceStateAttached {
+		return fmt.Errorf("the linked workspace state is %q", workspace.Status.State)
+	}
+	if workspace.Status.AttachedEpoch != workspace.Spec.Attachment.Epoch {
+		return errors.New("the linked workspace attachment epoch is not fully enforced")
+	}
+	if attached == nil || attached.Status != metav1.ConditionTrue || attached.ObservedGeneration != workspace.Generation {
+		return errors.New("the linked workspace attachment condition is not current")
+	}
+	return nil
 }
 
 func acpBoundTaskRequestDigest(bound *verifiedAgentExecution, attempt int32, promptID string) (string, error) {

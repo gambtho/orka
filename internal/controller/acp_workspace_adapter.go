@@ -17,6 +17,7 @@ import (
 	coordinationv1 "k8s.io/api/coordination/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -376,13 +377,25 @@ func (r *ACPExecutionWorkspaceAdapterReconciler) Reconcile(ctx context.Context, 
 }
 
 func runtimePoolWorkspaceResumeSettled(pool *corev1alpha1.RuntimePool, foreign bool) bool {
-	return pool != nil && !foreign &&
-		pool.Status.Lifecycle == corev1alpha1.RuntimePoolLifecycleServing &&
-		pool.Status.AdmissionState == corev1alpha1.RuntimePoolAdmissionAccepting &&
-		pool.Status.ObservedGeneration == pool.Generation &&
-		strings.TrimSpace(pool.Annotations[sandboxSuspendedAnnotation]) == "" &&
-		strings.TrimSpace(pool.Annotations[substrateNativeCheckpointConsent]) == "" &&
-		strings.TrimSpace(pool.Annotations[substrateActorSuspendedAnnotation]) == ""
+	if pool == nil || foreign ||
+		pool.Status.Lifecycle != corev1alpha1.RuntimePoolLifecycleServing ||
+		pool.Status.ObservedGeneration != pool.Generation ||
+		strings.TrimSpace(pool.Annotations[sandboxSuspendedAnnotation]) != "" ||
+		strings.TrimSpace(pool.Annotations[substrateNativeCheckpointConsent]) != "" ||
+		strings.TrimSpace(pool.Annotations[substrateActorSuspendedAnnotation]) != "" {
+		return false
+	}
+	if pool.Status.AdmissionState == corev1alpha1.RuntimePoolAdmissionAccepting {
+		return true
+	}
+	// A single-session pool closes new admission as soon as its Task reserves
+	// the slot. It still serves the preserved data and its existing session;
+	// withdrawing that attachment would make normal execution erase its pool.
+	admission := meta.FindStatusCondition(pool.Status.Conditions, corev1alpha1.RuntimePoolConditionAdmissionReady)
+	return pool.Status.AdmissionState == corev1alpha1.RuntimePoolAdmissionClosed &&
+		admission != nil && admission.Status == metav1.ConditionFalse &&
+		admission.Reason == corev1alpha1.RuntimePoolReasonAtCapacity &&
+		admission.ObservedGeneration == pool.Generation
 }
 
 // reconcileSuspension drives a requested data-only suspension through the
