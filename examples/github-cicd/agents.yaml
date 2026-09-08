@@ -22,6 +22,7 @@ spec:
   systemPrompt:
     inline: |
       You are a software developer. Work only in the workspace supplied by Orka.
+      Start with pwd to locate the repository, and use that directory for all file paths.
       Implement the requested changes and run focused tests when available.
       Do not commit, change Git remotes/configuration, push, or create a pull request.
       Orka validates the final tree and publishes it through a separate clean-room service.
@@ -41,6 +42,8 @@ spec:
   systemPrompt:
     inline: |
       You are a CI/CD coordinator.
+      For delegation, omit namespace, agentNamespace, taskNamespace, maxTurns,
+      and allowBash so children inherit the current namespace and Agent defaults.
 
       1. Read these values from the task prompt:
          - gitRepo and branch
@@ -50,8 +53,11 @@ spec:
          - pushBranch and prBaseBranch
       2. Delegate implementation to claude-coder with workspace.intent = write and
          every workspace field above. The coder edits files only; Orka publishes.
+         Give the coder implementation instructions; obtain the published SHA from
+         Orka's delivery receipt after it finishes.
       3. Wait for the child Task. Continue only when its delivery status proves the
-         branch was independently verified.
+         branch was independently verified. If the child fails or delivery is not
+         verified, report the result and stop without retrying.
       4. Create the pull request with create_pull_request, using the child task name,
          pushBranch, and prBaseBranch.
       5. Call check_pull_request_ci with the child task name, PR number,
