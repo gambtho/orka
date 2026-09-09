@@ -586,8 +586,20 @@ func TestRepositoryMonitorValidationJobRequiresExactOwnerAndSpec(t *testing.T) {
 	if err := defaultExpectedRepositoryMonitorValidationJob(actual, actual); err != nil {
 		t.Fatal(err)
 	}
+	// The API also fills the legacy alias when only serviceAccountName is set.
+	actual.Spec.Template.Spec.DeprecatedServiceAccount = actual.Spec.Template.Spec.ServiceAccountName
 	if err := validateRepositoryMonitorValidationJobAgainstExpected(task, actual, expected); err != nil {
 		t.Fatalf("valid API-defaulted Job rejected: %v", err)
+	}
+	for _, changeAccountName := range []bool{false, true} {
+		mutated := actual.DeepCopy()
+		mutated.Spec.Template.Spec.DeprecatedServiceAccount = "different-account"
+		if changeAccountName {
+			mutated.Spec.Template.Spec.ServiceAccountName = "different-account"
+		}
+		if err := validateRepositoryMonitorValidationJobAgainstExpected(task, mutated, expected); !errors.Is(err, errRepositoryMonitorValidationConfinement) {
+			t.Fatalf("changed service account accepted, canonical name changed=%v: %v", changeAccountName, err)
+		}
 	}
 
 	foreign := actual.DeepCopy()
@@ -627,6 +639,13 @@ func TestRepositoryMonitorValidationPodRequiresExactJobOwnerAndSpec(t *testing.T
 		wantErr   bool
 	}{
 		{name: "exact pod", wantMatch: true},
+		{name: "API defaulted service account alias", mutate: func(pod *corev1.Pod) {
+			pod.Spec.DeprecatedServiceAccount = pod.Spec.ServiceAccountName
+		}, wantMatch: true},
+		{name: "changed service account", mutate: func(pod *corev1.Pod) {
+			pod.Spec.ServiceAccountName = "different-account"
+			pod.Spec.DeprecatedServiceAccount = "different-account"
+		}, wantErr: true},
 		{name: "system metadata", mutate: func(pod *corev1.Pod) {
 			pod.Labels["cni.example.io/ready"] = "true"
 			if pod.Annotations == nil {
