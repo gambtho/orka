@@ -1,73 +1,70 @@
-# Fibey with AgentKit, Foundry, and Orka harness v2
+# Run Fibey with Orka, AgentKit, and Azure AI Foundry
 
-Run the same custom AgentKit agent against the same synthetic Quincy North
-pump incident through two external `orka.harness.v2` runtimes:
+Fibey is an example assistant for investigating equipment alerts. In this demo,
+it reviews a fictional pump incident and suggests what to check next.
+
+AgentKit packages Fibey's instructions and model settings. You can run that
+agent in Kubernetes or host it in Azure AI Foundry. Orka sends the request and
+tracks the run in both cases. You'll try both options and compare the answers.
 
 ```mermaid
 flowchart LR
-    Task[Orka Task] --> Registration[Agent and AgentRuntime]
-    Registration --> Direct[Orka supervisor]
-    Direct --> ACP[AgentKit ACP child]
-    Registration --> Foundry[Orka supervisor and Foundry ACP child]
-    Foundry --> Broker[Foundry lifecycle broker]
-    Broker --> Hosted[AgentKit hosted in Foundry]
+    Request[Pump alert] --> Orka[Orka manages the run]
+    Orka --> Kubernetes[Fibey running in Kubernetes]
+    Orka --> Foundry[Fibey hosted in Azure AI Foundry]
 ```
 
-The direct runtime launches `agentkit-serve --protocol acp`. The Foundry runtime
-launches `agent-runtime-foundry --protocol acp` and sends Responses requests
-through its separate lifecycle broker. Both supervisors expose the v2 contract
-to Orka. The hosted AgentKit container exposes Foundry's Responses protocol.
+Both options use harness v2, Orka's interface for managing agent runs. This
+example analyzes the text in the request. It does not use tools or operate
+real equipment.
 
-This restores the incident and backend-selection workflow from the v0.1.3 demo.
-Each run now creates a new Task and checks its immutable v2 binding. The
-baseline uses `workspace.intent: read`, no tools, no repository, and one prompt
-per Task. It exercises inference, runtime selection, and execution identity. It does
-not establish hosted tool governance, conversation continuation, or recovery
-after an ambiguous remote operation.
+## Before you start
 
-## Prerequisites
+This walkthrough assumes both Fibey services are already deployed and connected
+to Orka. If you're setting them up, start with the [setup guide](build-images.md).
 
-- An Orka installation containing [external v2 dispatch](https://github.com/orka-agents/orka/pull/487), running with `--controller-mode=harness-v2`.
-- `kubectl`, `jq`, and access to the controller's watched namespace.
-- Two Ready external `AgentRuntime` registrations for the Fibey backends in that namespace:
+You'll need:
 
-| Registration | Backend |
-| --- | --- |
-| `fibey-agentkit-runtime` | AgentKit running directly through ACP |
-| `fibey-foundry-runtime` | Foundry ACP bridge calling the same AgentKit agent hosted in Foundry |
+- Access to a Kubernetes cluster with Orka running in harness v2 mode.
+- `kubectl` to communicate with the cluster and `jq` to display the results.
+- The following two services registered with Orka and marked `Ready`.
 
-The runtime deployment owns registration, credentials, identity, and profile
-configuration. Both backends must use the baked Fibey configuration, read
-intent, and an empty tool policy. Operators provisioning them can follow
-[build and register the backends](build-images.md).
+| Run option | Where Fibey runs | Name registered with Orka |
+| --- | --- | --- |
+| `agentkit` | Kubernetes | `fibey-agentkit-runtime` |
+| `foundry` | Azure AI Foundry | `fibey-foundry-runtime` |
 
-## Connect the Agents
+Orka calls each registered connection an `AgentRuntime`. The setup guide covers
+creating these connections and configuring their credentials.
 
-The demo uses the existing registrations through two small Agent resources.
-`kustomization.yaml` contains those Agents. Choose the existing v2 controller's
-context and watched namespace, then apply them:
+## 1. Connect the demo
+
+Run these commands from the root of your Orka checkout. Replace the two
+placeholder values with the context and namespace for your Orka installation.
+A context selects your cluster connection; a namespace groups resources within
+that cluster.
 
 ```bash
 set -euo pipefail
-FIBEY_CONTEXT=sertac-aks
-FIBEY_NAMESPACE=orka-system
+FIBEY_CONTEXT=your-cluster-context
+FIBEY_NAMESPACE=your-orka-namespace
 
 kubectl --context="$FIBEY_CONTEXT" -n "$FIBEY_NAMESPACE" apply \
   -k examples/fibey-custom-agent-demo
 ```
 
-The namespace must already have `orka.ai/controller-mode: harness-v2`.
-The submit helper checks that the selected runtime is Ready for its current
-registration generation, instance, and profile before creating a Task.
+This adds two Orka `Agent` entries, one for each hosting option. Each entry
+points to a service prepared during setup. Keep using the same terminal for
+the remaining steps.
 
-The Task selects `agentRuntime.allowedTools: []`. Bash denial belongs to the
-registered MCP policy. External v2 Tasks must omit `allowBash` entirely;
-setting it to `false` is still an unsupported runtime override.
+## 2. Run Fibey with both options
 
-## Run and compare
+Each command below creates a `Task`, Orka's record of one run. Both use the same
+request from [task.yaml](task.yaml): a pressure sensor reports a sudden drop
+after maintenance, while the other readings look normal.
 
-Run these commands from the Orka checkout. Give every invocation a new Task
-name. The helper requires an explicit context and namespace on every run.
+The last argument is the Task name. Choose a new name each time you run either
+command again.
 
 ```bash
 examples/fibey-custom-agent-demo/switch-backend.sh \
@@ -77,12 +74,13 @@ examples/fibey-custom-agent-demo/switch-backend.sh \
   foundry "$FIBEY_CONTEXT" "$FIBEY_NAMESPACE" fibey-quincy-foundry-01
 ```
 
-The helper preserves [task.yaml](task.yaml)'s prompt and read policy, creates
-one Task, then checks the controller's immutable binding against the preflight
-Agent and AgentRuntime identities. It reports binding success before inference
-finishes. It never patches an existing Task or reuses a Session across backends.
+On success, the script confirms that Orka assigned the Task to your chosen
+service. Fibey may still be preparing its answer.
 
-Wait for each Task and inspect its v2 result:
+## 3. Read and compare the answers
+
+Wait for both runs to finish, then display their results. If you chose different
+Task names above, use those names here too.
 
 ```bash
 kubectl --context="$FIBEY_CONTEXT" -n "$FIBEY_NAMESPACE" wait \
@@ -93,70 +91,45 @@ kubectl --context="$FIBEY_CONTEXT" -n "$FIBEY_NAMESPACE" get \
   task/fibey-quincy-agentkit-01 task/fibey-quincy-foundry-01 -o json |
   jq '.items[] | {
     name: .metadata.name,
-    phase: .status.phase,
-    contract: .status.agentExecutionBinding.contractVersion,
-    backend: .status.agentExecutionBinding.backend,
-    runtime: .status.execution.agentRuntimeName,
-    runtimeUID: .status.execution.agentRuntimeUID,
-    instance: .status.execution.runtimeInstanceID,
-    attempt: .status.execution.attempt,
-    outcome: .status.execution.outcome,
-    reason: .status.execution.reason,
-    delivery: .status.delivery.state,
-    result: .status.result
+    status: .status.phase,
+    service: .status.execution.agentRuntimeName,
+    answer: .status.result
   }'
 ```
 
-Expect `orka.harness.v2`, backend `external-endpoint`, the selected registration
-name and UID, and `execution.outcome: Succeeded`. `execution.runtimePoolName`
-should be absent. `status.harnessRuntime` belongs to v1 and is not the evidence
-for these runs. Compare the conclusions and use of evidence, not byte-identical
-wording from the models.
+Both runs should show `Succeeded`. The `service` should match the name in the
+table above, and `answer` contains Fibey's response.
 
-If creation, binding, or waiting fails, inspect that exact Task before another
-submission. A create error can have an ambiguous result. An existing Task name
-must not be reused. `execution.outcome: OutcomeUnknown` is unresolved remote
-execution, not a retryable model error. Keep the Task, finalizers, supporting
-Secrets, and Foundry ledger until normal cleanup establishes retirement.
+Look for an answer that uses the supplied evidence, identifies missing checks,
+and explains what is still uncertain. The wording can differ between runs.
 
-After successful settled runs, delete only the Tasks you created. Keep the
-runtime services and their ledgers available while Orka finalizes them:
+## If a run does not finish
+
+If submission or waiting fails, inspect that Task before starting another run.
+A submission error can still leave a Task running. For example, to inspect the
+Kubernetes run:
+
+```bash
+kubectl --context="$FIBEY_CONTEXT" -n "$FIBEY_NAMESPACE" get \
+  task/fibey-quincy-agentkit-01 -o yaml
+```
+
+Use the name of the run that needs attention. If you see `OutcomeUnknown`, Orka
+cannot yet confirm the outcome of the remote work. Do not resubmit or delete
+that Task. Keep its supporting services running and follow the setup guide's
+[troubleshooting instructions](build-images.md#troubleshoot-a-run).
+
+## Clean up
+
+After both runs succeed, delete the two Tasks you created, using the names you
+chose earlier. Keep the agent services running while Orka finishes the cleanup.
 
 ```bash
 kubectl --context="$FIBEY_CONTEXT" -n "$FIBEY_NAMESPACE" delete \
   task/fibey-quincy-agentkit-01 task/fibey-quincy-foundry-01 --wait=true --timeout=180s
 ```
 
-## Hosted supervisor and tool limitations
-
-The baseline hosts AgentKit in Foundry and keeps the v2 supervisor in Kubernetes.
-To host the supervisor itself in Foundry, follow the Foundry runtime's
-[hosted-v2 package](https://github.com/orka-agents/agent-runtime-foundry/blob/57988dbe9d6b9a5ed2a39ce10b3d5abc8a68a7c7/docs/foundry-hosted-v2.md).
-That adds another Hosted Agent and a Kubernetes `--protocol hosted-gateway`
-process. Register the gateway Service as `fibey-foundry-runtime`; the Agents,
-Task, and submit commands stay the same. The hosted lifetime has bounded
-WebSocket connections and needs drain/retirement before replacement.
-The operator must register that topology using the
-[external runtime contract](../../website/docs/guides/bring-your-own-agent-runtime.md#strict-governed-registration)
-before running the demo.
-
-Do not add AgentKit `brokeredTools` to this demo and assume the hosted tool loop
-works. At the companion revisions in the [build guide](build-images.md), AgentKit
-requires a continuation proof
-on hosted `function_call_output`, and the Foundry v2 broker does not forward that
-proof. The direct AgentKit ACP tool path is separate. A hosted tool extension
-needs a supported continuation-authentication contract and end-to-end validation
-before the shared allowlist can change.
-
-## Offline checks
-
-```bash
-bash scripts/tests/fibey-v2-demo-test.sh
-kubectl kustomize examples/fibey-custom-agent-demo
-go test ./internal/admission -run 'Test(Shipped|Documented)ManifestsDecodeStrictly' -count=1
-go test ./internal/controller -run TestFibeyDemo -count=1
-```
-
-These validate the manifests, controller compatibility, and submission behavior
-without a cluster, Azure, or a model. Successful live runs still require the
-configured hosted endpoint and provider credentials.
+This walkthrough covers one request per run. Tool use, follow-up messages, and
+recovery from interrupted remote work need separate testing. See the setup
+guide for [demo settings and limits](build-images.md#demo-settings-and-limits)
+and [checks you can run without a deployed agent](build-images.md#check-the-example-locally).
