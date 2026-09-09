@@ -5336,7 +5336,7 @@ func TestPromptLeaseRenewalRetryable(t *testing.T) {
 	}
 }
 
-func TestFrozenMCPPermissionDecisionAllowsOnlyProviderNativeToolsOnce(t *testing.T) {
+func TestFrozenMCPPermissionDecisionAllowsGrantedToolsOnce(t *testing.T) {
 	t.Parallel()
 	providerNativePolicy := harnessv2.MCPToolPolicy{
 		AllowedToolNames: []string{providerNativeToolRead},
@@ -5360,6 +5360,7 @@ func TestFrozenMCPPermissionDecisionAllowsOnlyProviderNativeToolsOnce(t *testing
 	tests := []struct {
 		name       string
 		policy     harnessv2.MCPToolPolicy
+		approval   harnessv2.MCPApprovalPolicy
 		permission *harnessv2.PermissionRequestedEvent
 		want       harnessv2.PermissionDecision
 	}{
@@ -5386,6 +5387,39 @@ func TestFrozenMCPPermissionDecisionAllowsOnlyProviderNativeToolsOnce(t *testing
 		{
 			name:   "brokered tool",
 			policy: brokeredPolicy,
+			permission: &harnessv2.PermissionRequestedEvent{
+				ToolName: "lookup", Options: options,
+			},
+			want: harnessv2.PermissionDecision{Outcome: harnessv2.PermissionDecisionSelected, OptionID: "allow-once"},
+		},
+		{
+			name:     "brokered tool requiring Orka approval",
+			policy:   brokeredPolicy,
+			approval: harnessv2.MCPApprovalPolicy{RequiredTools: []string{"lookup"}},
+			permission: &harnessv2.PermissionRequestedEvent{
+				ToolName: "lookup", Options: options,
+			},
+			want: harnessv2.PermissionDecision{Outcome: harnessv2.PermissionDecisionSelected, OptionID: "reject-once"},
+		},
+		{
+			name:   "implicit native write grant",
+			policy: harnessv2.MCPToolPolicy{AllowBash: true},
+			permission: &harnessv2.PermissionRequestedEvent{
+				ToolName: providerNativeToolWrite, Options: options,
+			},
+			want: harnessv2.PermissionDecision{Outcome: harnessv2.PermissionDecisionSelected, OptionID: "allow-once"},
+		},
+		{
+			name:   "explicit native deny all",
+			policy: harnessv2.MCPToolPolicy{AllowedToolNames: []string{}, AllowBash: true},
+			permission: &harnessv2.PermissionRequestedEvent{
+				ToolName: providerNativeToolWrite, Options: options,
+			},
+			want: harnessv2.PermissionDecision{Outcome: harnessv2.PermissionDecisionSelected, OptionID: "reject-once"},
+		},
+		{
+			name:   "implicit native grant does not grant brokered tools",
+			policy: harnessv2.MCPToolPolicy{AllowBash: true},
 			permission: &harnessv2.PermissionRequestedEvent{
 				ToolName: "lookup", Options: options,
 			},
@@ -5425,7 +5459,8 @@ func TestFrozenMCPPermissionDecisionAllowsOnlyProviderNativeToolsOnce(t *testing
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
-			if got := frozenMCPPermissionDecision(test.policy, test.permission); got != test.want {
+			configuration := harnessv2.MCPPolicyConfiguration{ToolPolicy: test.policy, ApprovalPolicy: test.approval}
+			if got := frozenMCPPermissionDecision(configuration, "claude", test.permission); got != test.want {
 				t.Fatalf("frozenMCPPermissionDecision() = %#v, want %#v", got, test.want)
 			}
 		})

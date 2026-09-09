@@ -12,6 +12,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/acp"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 )
 
@@ -194,15 +195,14 @@ func effectiveACPReasoningEffort(agent *corev1alpha1.Agent) string {
 }
 
 func validateACPProviderNativePolicy(provider string, intent corev1alpha1.WorkspaceIntent, allowed, disallowed []string, allowBash bool) error {
-	unrestricted := allowed == nil && len(disallowed) == 0 && allowBash
 	switch provider {
 	case string(corev1alpha1.AgentRuntimeClaude):
 		return nil
 	case string(corev1alpha1.AgentRuntimeCodex):
-		if unrestricted {
+		if acp.BuiltInRuntimeNativePolicyUnrestricted(provider, allowed, disallowed, allowBash) {
 			return nil
 		}
-		if intent == corev1alpha1.WorkspaceIntentRead && codexReadOnlyNativePolicy(allowed) {
+		if intent == corev1alpha1.WorkspaceIntentRead && codexReadOnlyNativePolicy(acp.BuiltInRuntimeEffectiveAllowedTools(allowed, disallowed, allowBash)) {
 			return nil
 		}
 		return fmt.Errorf("codex ACP runtime cannot exactly enforce provider-native tool restrictions")

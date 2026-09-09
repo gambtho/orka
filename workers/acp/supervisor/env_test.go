@@ -162,6 +162,33 @@ func TestCodexProviderSessionProjectionReadOnlySurface(t *testing.T) {
 	}
 }
 
+func TestCodexProviderSessionProjectionWithBrokeredMessaging(t *testing.T) {
+	paths := acp.SessionPaths{Home: "/sessions/private/home"}
+	proxy := ProviderProxyBinding{BaseURL: "http://127.0.0.1:43210/_orka/provider/session", Credential: "test-auth-token"}
+	for _, tt := range []struct {
+		name       string
+		allowed    []string
+		disallowed []string
+		allowBash  bool
+		wantError  bool
+	}{
+		{name: "native defaults with messaging", allowed: acp.BuiltInRuntimeNativeToolNames("codex"), allowBash: true},
+		{name: "messaging without native grants", allowed: []string{}, allowBash: true, wantError: true},
+		{name: "native deny", allowed: acp.BuiltInRuntimeNativeToolNames("codex"), disallowed: []string{providerToolWrite}, allowBash: true, wantError: true},
+		{name: "bash denied", allowed: acp.BuiltInRuntimeNativeToolNames("codex"), wantError: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			allowed := append(slices.Clone(tt.allowed), "send_message", "check_messages")
+			request := testProviderProjectionRequest(t, providerKindCodex, "gpt-test", "", "", allowed, tt.disallowed, tt.allowBash)
+			request.Profile.WorkspaceIntent = harnessv2.WorkspaceIntentWrite
+			_, err := codexSessionProjection(request, paths, proxy, "gpt-test")
+			if (err != nil) != tt.wantError {
+				t.Fatalf("Codex projection error = %v, want error %t", err, tt.wantError)
+			}
+		})
+	}
+}
+
 func TestClaudeProviderSessionProjection(t *testing.T) {
 	paths := acp.SessionPaths{Home: "/sessions/private/home"}
 	proxy := ProviderProxyBinding{BaseURL: "http://127.0.0.1:43210/_orka/provider/session", Credential: "test-auth-token"}
@@ -653,13 +680,20 @@ func testProviderProjectionRequest(
 		if !toolPolicy.Allows(name) {
 			continue
 		}
-		if _, ok := canonicalProviderNativeToolName(name); !ok {
-			t.Fatalf("unknown provider-native test tool %q", name)
-		}
-		toolPolicy.Tools = append(toolPolicy.Tools, harnessv2.MCPToolDescriptor{
+		descriptor := harnessv2.MCPToolDescriptor{
 			Name: name, Description: "provider native", Source: harnessv2.MCPToolSourceProviderNative,
 			Effect: harnessv2.MCPToolEffectReadOnly,
-		})
+		}
+		if _, ok := canonicalProviderNativeToolName(name); !ok {
+			switch name {
+			case "send_message", "check_messages":
+				descriptor.Source = harnessv2.MCPToolSourceBrokeredBuiltin
+				descriptor.InputSchema = json.RawMessage(`{"type":"object"}`)
+			default:
+				t.Fatalf("unknown projection test tool %q", name)
+			}
+		}
+		toolPolicy.Tools = append(toolPolicy.Tools, descriptor)
 	}
 	slices.SortFunc(toolPolicy.Tools, func(a, b harnessv2.MCPToolDescriptor) int { return strings.Compare(a.Name, b.Name) })
 	var err error
