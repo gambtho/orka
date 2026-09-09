@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path"
+	"reflect"
 	gorruntime "runtime"
 	"slices"
 	"strings"
@@ -245,11 +246,9 @@ func assertRepositoryMonitorValidationNetworkAndCredentialIsolation(t *testing.T
 	wantTolerations := []corev1.Toleration{
 		{Key: corev1.TaintNodeNotReady, Operator: corev1.TolerationOpExists, Effect: corev1.TaintEffectNoExecute, TolerationSeconds: new(int64(300))},
 		{Key: corev1.TaintNodeUnreachable, Operator: corev1.TolerationOpExists, Effect: corev1.TaintEffectNoExecute, TolerationSeconds: new(int64(300))},
+		{Key: corev1.TaintNodeMemoryPressure, Operator: corev1.TolerationOpExists, Effect: corev1.TaintEffectNoSchedule},
 	}
-	if !slices.EqualFunc(job.Spec.Template.Spec.Tolerations, wantTolerations, func(a, b corev1.Toleration) bool {
-		return a.Key == b.Key && a.Operator == b.Operator && a.Effect == b.Effect &&
-			a.TolerationSeconds != nil && b.TolerationSeconds != nil && *a.TolerationSeconds == *b.TolerationSeconds
-	}) {
+	if !reflect.DeepEqual(job.Spec.Template.Spec.Tolerations, wantTolerations) {
 		t.Fatalf("validation Pod tolerations = %#v, want explicit Kubernetes defaults", job.Spec.Template.Spec.Tolerations)
 	}
 	if gate.SecurityContext == nil || gate.SecurityContext.RunAsNonRoot == nil || !*gate.SecurityContext.RunAsNonRoot ||
@@ -642,6 +641,22 @@ func TestRepositoryMonitorValidationPodRequiresExactJobOwnerAndSpec(t *testing.T
 		{name: "API defaulted service account alias", mutate: func(pod *corev1.Pod) {
 			pod.Spec.DeprecatedServiceAccount = pod.Spec.ServiceAccountName
 		}, wantMatch: true},
+		{name: "API defaulted memory pressure toleration", mutate: func(pod *corev1.Pod) {
+			// Kubernetes adds this toleration to non-BestEffort Pods at admission.
+			toleration := corev1.Toleration{
+				Key: corev1.TaintNodeMemoryPressure, Operator: corev1.TolerationOpExists, Effect: corev1.TaintEffectNoSchedule,
+			}
+			if !slices.ContainsFunc(pod.Spec.Tolerations, func(existing corev1.Toleration) bool {
+				return existing.MatchToleration(&toleration)
+			}) {
+				pod.Spec.Tolerations = append(pod.Spec.Tolerations, toleration)
+			}
+		}, wantMatch: true},
+		{name: "unexpected toleration", mutate: func(pod *corev1.Pod) {
+			pod.Spec.Tolerations = append(pod.Spec.Tolerations, corev1.Toleration{
+				Key: "example.com/dedicated", Operator: corev1.TolerationOpExists, Effect: corev1.TaintEffectNoSchedule,
+			})
+		}, wantErr: true},
 		{name: "changed service account", mutate: func(pod *corev1.Pod) {
 			pod.Spec.ServiceAccountName = "different-account"
 			pod.Spec.DeprecatedServiceAccount = "different-account"
