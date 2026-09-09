@@ -26,7 +26,10 @@ to Orka. If you're setting them up, start with the [setup guide](build-images.md
 You'll need:
 
 - Access to a Kubernetes cluster with Orka running in harness v2 mode.
-- `kubectl` to communicate with the cluster and `jq` to display the results.
+- `kubectl` to communicate with the cluster and `jq`, which the demo script uses.
+- The [`orka` command-line tool](../../website/docs/reference/cli.md), which reads Fibey's answers.
+  Follow its [connection and authentication steps](../../website/docs/reference/cli.md#connection-and-authentication)
+  to connect to the same Orka installation before running the demo.
 - The following two services registered with Orka and marked `Ready`.
 
 | Run option | Where Fibey runs | Name registered with Orka |
@@ -39,15 +42,16 @@ creating these connections and configuring their credentials.
 
 ## 1. Connect the demo
 
-Run these commands from the root of your Orka checkout. Replace the two
-placeholder values with the context and namespace for your Orka installation.
+Run these commands from the root of your Orka checkout. Replace the example
+values with your cluster context, namespace, and Orka server address.
 A context selects your cluster connection; a namespace groups resources within
-that cluster.
+that cluster. The server address must point to Orka in that same cluster.
 
 ```bash
 set -euo pipefail
 FIBEY_CONTEXT=your-cluster-context
 FIBEY_NAMESPACE=your-orka-namespace
+FIBEY_SERVER=https://orka.example.com
 
 kubectl --context="$FIBEY_CONTEXT" -n "$FIBEY_NAMESPACE" apply \
   -k examples/fibey-custom-agent-demo
@@ -79,29 +83,32 @@ service. Fibey may still be preparing its answer.
 
 ## 3. Read and compare the answers
 
-Wait for both runs to finish, then display their results. If you chose different
-Task names above, use those names here too.
+Wait for both runs to finish. If you chose different Task names above, use
+those names here too.
 
 ```bash
 kubectl --context="$FIBEY_CONTEXT" -n "$FIBEY_NAMESPACE" wait \
   --for=jsonpath='{.status.phase}'=Succeeded \
   task/fibey-quincy-agentkit-01 task/fibey-quincy-foundry-01 --timeout=360s
-
-kubectl --context="$FIBEY_CONTEXT" -n "$FIBEY_NAMESPACE" get \
-  task/fibey-quincy-agentkit-01 task/fibey-quincy-foundry-01 -o json |
-  jq '.items[] | {
-    name: .metadata.name,
-    status: .status.phase,
-    service: .status.execution.agentRuntimeName,
-    answer: .status.result
-  }'
 ```
 
-Both runs should show `Succeeded`. The `service` should match the name in the
-table above, and `answer` contains Fibey's response.
+When the wait command succeeds, fetch the Kubernetes answer, then the Foundry
+answer. Each command prints the answer as text:
+
+```bash
+orka --server "$FIBEY_SERVER" -n "$FIBEY_NAMESPACE" \
+  task result fibey-quincy-agentkit-01
+
+orka --server "$FIBEY_SERVER" -n "$FIBEY_NAMESPACE" \
+  task result fibey-quincy-foundry-01
+```
 
 Look for an answer that uses the supplied evidence, identifies missing checks,
 and explains what is still uncertain. The wording can differ between runs.
+
+If a result command reports an authentication error, check the CLI's configured
+credentials and server address. If it reports that no result is available,
+inspect the existing Task as described below.
 
 ## If a run does not finish
 

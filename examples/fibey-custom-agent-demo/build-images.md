@@ -283,7 +283,7 @@ kubectl --context="$FIBEY_CONTEXT" -n "$FIBEY_NAMESPACE" get \
     outcome: .status.execution.outcome,
     reason: .status.execution.reason,
     delivery: .status.delivery.state,
-    result: .status.result
+    resultRef: .status.resultRef
   }'
 ```
 
@@ -293,6 +293,10 @@ should be absent. `status.harnessRuntime` belongs to v1 and is not evidence for
 these runs. This verifies inference, runtime selection, and execution identity.
 It does not validate hosted tool governance, conversation continuation, or
 recovery after an ambiguous remote operation.
+
+`resultRef.available: true` means Orka has stored an answer. Read the answer
+with `orka task result`, using the server, namespace, and credentials configured
+in the [walkthrough](README.md#3-read-and-compare-the-answers).
 
 ## Troubleshoot a run
 
