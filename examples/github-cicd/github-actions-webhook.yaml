@@ -27,13 +27,16 @@ jobs:
           REPOSITORY: ${{ github.repository }}
           BRANCH: ${{ github.event.workflow_run.head_branch }}
           HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          CI_RUN_ID: ${{ github.event.workflow_run.id }}
         run: |
           jq -n \
+            --arg name "ci-fix-${CI_RUN_ID}" \
             --arg namespace "$ORKA_NAMESPACE" \
             --arg repo "https://github.com/${REPOSITORY}.git" \
             --arg branch "$BRANCH" \
             --arg sha "$HEAD_SHA" \
             '{
+              name: $name,
               namespace: $namespace,
               type: "agent",
               agentRef: {name: "claude-coder"},
