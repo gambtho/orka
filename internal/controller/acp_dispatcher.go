@@ -294,6 +294,16 @@ func (d *ACPDispatcher) scheduleACPDeliveryRecoveries(ctx context.Context, tasks
 		if !taskDispatchableByACP(task) || task.Status.Execution == nil {
 			continue
 		}
+		if !task.DeletionTimestamp.IsZero() {
+			latest, recoverable, readErr := d.readRecoverableTask(ctx, task)
+			if readErr != nil {
+				return readErr
+			}
+			if !recoverable || latest.Status.Execution == nil || !taskDispatchableByACP(latest) {
+				continue
+			}
+			task = latest
+		}
 		if task.Status.Execution.ControllerEpoch < fence.Epoch || acpTaskHasUnvalidatedSourceIdentity(task) {
 			// The separate stale scan owns recovery while this epoch remains
 			// outside admission. Network waits cannot consume dispatch slots.
@@ -316,8 +326,10 @@ func (d *ACPDispatcher) scheduleACPDeliveryRecoveries(ctx context.Context, tasks
 		recoveryKind := ""
 		switch attempt.ExecutionState {
 		case store.PromptExecutionSucceeded:
+			terminalPhase := task.Status.Phase == corev1alpha1.TaskPhaseSucceeded ||
+				task.Status.Phase == corev1alpha1.TaskPhaseFailed || task.Status.Phase == corev1alpha1.TaskPhaseCancelled
 			if task.Status.Execution.State != corev1alpha1.TaskExecutionStateSucceeded ||
-				!store.IsTerminalPromptDeliveryState(attempt.DeliveryState) || task.Status.Delivery == nil {
+				!store.IsTerminalPromptDeliveryState(attempt.DeliveryState) || task.Status.Delivery == nil || !terminalPhase {
 				recoveryKind = acpSucceededOperation
 			}
 		case store.PromptExecutionFailed, store.PromptExecutionCancelled, store.PromptExecutionOutcomeUnknown:
@@ -2252,7 +2264,7 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 			if errors.As(publicationErr, &deliveryErr) {
 				return d.failTaskForDelivery(ctx, task, deliveryStatus, deliveryErr.message)
 			}
-			return publicationErr
+			return d.failTaskForDelivery(ctx, task, deliveryStatus, publicationErr.Error())
 		}
 	default:
 		return fmt.Errorf("unsupported workspace delta state %q", delta.Delta.State)

@@ -2401,15 +2401,19 @@ func TestACPDispatcherUsesFrozenAgentAndToolAfterLiveResourcesChange(t *testing.
 }
 
 func TestACPDispatcherWriteSessionFinalizesPublicationBeforeDeleteAndPersistsCleanupReceipt(t *testing.T) {
-	testACPDispatcherWriteSessionFinalization(t, false)
+	testACPDispatcherWriteSessionFinalization(t, false, false)
 }
 
 func TestACPDispatcherWriteSessionSurvivesCreateConflictRequeue(t *testing.T) {
-	testACPDispatcherWriteSessionFinalization(t, true)
+	testACPDispatcherWriteSessionFinalization(t, true, false)
+}
+
+func TestACPDispatcherWriteTaskSettlesPublicationOwnerConflict(t *testing.T) {
+	testACPDispatcherWriteSessionFinalization(t, false, true)
 }
 
 //nolint:goconst,gocyclo // The end-to-end write-session lifecycle assertions intentionally stay together.
-func testACPDispatcherWriteSessionFinalization(t *testing.T, requeueAfterCreateConflict bool) {
+func testACPDispatcherWriteSessionFinalization(t *testing.T, requeueAfterCreateConflict, publicationOwnerConflict bool) {
 	t.Helper()
 	scheme := runtime.NewScheme()
 	if err := corev1alpha1.AddToScheme(scheme); err != nil {
@@ -2441,6 +2445,10 @@ func testACPDispatcherWriteSessionFinalization(t *testing.T, requeueAfterCreateC
 			State: corev1alpha1.TaskExecutionStateQueued, Attempt: 1, PromptID: promptID, RuntimePoolName: "pool", RuntimePoolUID: "pool-uid",
 			RequestDigest: testControlDigestForDispatcher("write-session-request"), ControllerEpoch: 1,
 		}},
+	}
+	if publicationOwnerConflict {
+		task.Spec.SessionRef = nil
+		task.Spec.Workspace.PushBranch = "orka/claimed-branch"
 	}
 	spanHarness, parentSpanID := stampACPTaskTrace(t, task)
 	agent := &corev1alpha1.Agent{
@@ -2531,6 +2539,20 @@ func testACPDispatcherWriteSessionFinalization(t *testing.T, requeueAfterCreateC
 	if err != nil {
 		t.Fatal(err)
 	}
+	if publicationOwnerConflict {
+		claimID, err := store.CanonicalBranchClaimID("github.com/orka-agents/orka", "refs/heads/orka/claimed-branch")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := controlStore.CreateBranchClaim(ctx, &store.BranchClaim{
+			ID: claimID, RepositoryID: "github.com/orka-agents/orka", Ref: "refs/heads/orka/claimed-branch",
+			OwnerKind: store.BranchClaimOwnerTask, OwnerUID: "another-task", Generation: 1,
+			LastVerified: store.RemoteRefState{Absent: true}, Availability: store.BranchClaimAvailable,
+			RequestDigest: testControlDigestForDispatcher("existing-task-branch"), CreatedAt: time.Now().UTC(),
+		}, fence); err != nil {
+			t.Fatal(err)
+		}
+	}
 	task = prepareBoundACPDispatcherTaskForTest(t, ctx, kubeClient, scheme, controlStore, task, agent, images)
 	key := store.PromptAttemptKey{Namespace: task.Namespace, TaskUID: string(task.UID), Attempt: 1, PromptID: promptID}
 	attemptID, err := key.CanonicalID()
@@ -2619,6 +2641,51 @@ func testACPDispatcherWriteSessionFinalization(t *testing.T, requeueAfterCreateC
 	completed := &corev1alpha1.Task{}
 	if err := kubeClient.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: task.Name}, completed); err != nil {
 		t.Fatal(err)
+	}
+	if publicationOwnerConflict {
+		if completed.Status.Phase != corev1alpha1.TaskPhaseFailed || completed.Status.Execution == nil ||
+			completed.Status.Execution.Outcome != corev1alpha1.TaskExecutionOutcomeSucceeded || completed.Status.Delivery == nil ||
+			completed.Status.Delivery.Outcome != corev1alpha1.TaskDeliveryOutcomeDeliveryConflict ||
+			!strings.Contains(completed.Status.Message, "already claimed by a different owner") {
+			t.Fatalf("publication conflict did not settle Task: %#v", completed.Status)
+		}
+		if !taskScopedRuntimeSessionCleanupComplete(completed) {
+			t.Fatal("publication conflict left runtime cleanup incomplete")
+		}
+		attempt, err := controlStore.GetPromptAttempt(ctx, attemptID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if attempt.ExecutionState != store.PromptExecutionSucceeded || attempt.DeliveryState != store.PromptDeliveryConflict {
+			t.Fatalf("conflict attempt = %#v", attempt)
+		}
+		if exists, err := dispatcher.validateExistingStandaloneTaskProjection(ctx, completed, attempt); err != nil || !exists {
+			t.Fatalf("conflict terminal projection: exists=%v err=%v", exists, err)
+		}
+		if _, err := controlStore.GetPublication(ctx, publicationIDForTask(completed)); !errors.Is(err, store.ErrNotFound) {
+			t.Fatalf("owner conflict created a publication: %v", err)
+		}
+		claimID, err := store.CanonicalBranchClaimID("github.com/orka-agents/orka", "refs/heads/orka/claimed-branch")
+		if err != nil {
+			t.Fatal(err)
+		}
+		claim, err := controlStore.GetBranchClaim(ctx, claimID)
+		if err != nil || claim.OwnerUID != "another-task" {
+			t.Fatalf("original branch claim changed: claim=%#v err=%v", claim, err)
+		}
+		operationMu.Lock()
+		gotOperations := append([]string(nil), operations...)
+		gotFinalization := finalizationRequest
+		operationMu.Unlock()
+		if fmt.Sprint(gotOperations) != "[finalize delete]" ||
+			gotFinalization.TerminalState != harnessv2.PublicationTerminalDeliveryConflict || gotFinalization.TerminalReceiptDigest == "" {
+			t.Fatalf("conflict runtime finalization: operations=%v request=%#v", gotOperations, gotFinalization)
+		}
+		cancelEpoch()
+		if err := <-epochDone; err != nil {
+			t.Fatal(err)
+		}
+		return
 	}
 	if completed.Status.Phase != corev1alpha1.TaskPhaseSucceeded || completed.Status.Execution == nil ||
 		completed.Status.Execution.Outcome != corev1alpha1.TaskExecutionOutcomeSucceeded || completed.Status.Delivery == nil ||
