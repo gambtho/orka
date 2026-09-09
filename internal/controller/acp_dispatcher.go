@@ -294,16 +294,8 @@ func (d *ACPDispatcher) scheduleACPDeliveryRecoveries(ctx context.Context, tasks
 		if !taskDispatchableByACP(task) || task.Status.Execution == nil {
 			continue
 		}
-		if !task.DeletionTimestamp.IsZero() {
-			latest, recoverable, readErr := d.readRecoverableTask(ctx, task)
-			if readErr != nil {
-				return readErr
-			}
-			if !recoverable || latest.Status.Execution == nil || !taskDispatchableByACP(latest) {
-				continue
-			}
-			task = latest
-		}
+		// Current-epoch terminal recovery also owns pending runtime cleanup for
+		// deleting Tasks. Requiring its cleanup receipt here would block retries.
 		if task.Status.Execution.ControllerEpoch < fence.Epoch || acpTaskHasUnvalidatedSourceIdentity(task) {
 			// The separate stale scan owns recovery while this epoch remains
 			// outside admission. Network waits cannot consume dispatch slots.
