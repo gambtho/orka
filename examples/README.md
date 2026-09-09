@@ -9,7 +9,6 @@ credentials, repository settings, and controller configuration in its README.
 
 | Example | What it shows | Read more |
 | --- | --- | --- |
-| [`tavily/`](tavily) | Using Tavily as an alternative to built-in web search by declaring an HTTP API as a `Tool` | [Tool CRD schema](../website/docs/reference/api-reference.md#tool-crd-schema) |
 | [`code-review/`](code-review) | One code-and-review pass: opens a PR on approval, or reports requested changes and stops | [Multi-agent coordination](../website/docs/reference/multi-agent-coordination.md) |
 | [`github-cicd/`](github-cicd) | Publishing one implementation, opening a PR, and reporting its CI status; includes an optional direct CI-repair workflow | [Agent runtimes](../website/docs/concepts/agent-runtimes.md) |
 | [`self-bootstrapping/`](self-bootstrapping) | A coordinator that creates the specialist agents it needs, then delegates to them | [Multi-agent coordination](../website/docs/reference/multi-agent-coordination.md) |
