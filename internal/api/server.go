@@ -543,18 +543,23 @@ func (s *Server) Start(ctx context.Context) error {
 	}
 }
 
-// apiPathPrefixes are the request prefixes served by an API rather than by the
+// apiPathRoots are the request path roots served by an API rather than by the
 // dashboard. A 404 under one of them is a routing answer the caller needs to
-// see, not a client-side route for the SPA to resolve. Lower case, matched
-// against a folded path: see routeLookupPath.
-var apiPathPrefixes = []string{"/api", "/openai/", "/anthropic/", "/internal/", "/webhooks/"}
+// see, not a client-side route for the SPA to resolve. Lower case and without
+// a trailing slash, matched against a normalized path: see routeLookupPath.
+var apiPathRoots = []string{"/api", "/openai", "/anthropic", "/internal", "/webhooks"}
 
-// routeLookupPath folds path the way the router matches it. Fiber is
-// case-insensitive by default, so /OPENAI/v1/chat/completions reaches the
-// registered handler and an unrouted /OPENAI/v1/responses has to be classified
-// the same way a lower-case one is.
+// routeLookupPath normalizes path the way the router matches it. Fiber is
+// case-insensitive and non-strict about a trailing slash by default, so
+// /OPENAI/v1/chat/completions and /openai/v1/chat/completions/ both reach the
+// registered handler. Unrouted paths have to be classified the same way, or a
+// caller gets a different answer for a spelling the router treats as identical.
 func routeLookupPath(path string) string {
-	return strings.ToLower(path)
+	folded := strings.ToLower(path)
+	for len(folded) > 1 && strings.HasSuffix(folded, "/") {
+		folded = folded[:len(folded)-1]
+	}
+	return folded
 }
 
 // spaFallbackEligible reports whether a 404 for path is served as the SPA
@@ -562,8 +567,8 @@ func routeLookupPath(path string) string {
 // predicate so the recorded status matches what the client receives.
 func spaFallbackEligible(path string) bool {
 	folded := routeLookupPath(path)
-	for _, prefix := range apiPathPrefixes {
-		if strings.HasPrefix(folded, prefix) {
+	for _, root := range apiPathRoots {
+		if folded == root || strings.HasPrefix(folded, root+"/") {
 			return false
 		}
 	}
@@ -661,12 +666,12 @@ func compatRouteNotFound(c fiber.Ctx) (bool, error) {
 	}
 
 	switch {
-	case strings.HasPrefix(path, "/openai/"):
+	case path == "/openai" || strings.HasPrefix(path, "/openai/"):
 		return true, c.Status(status).JSON(OAIError{Error: OAIErrorDetail{
 			Message: message,
 			Type:    OAIErrorTypeInvalidRequest,
 		}})
-	case strings.HasPrefix(path, "/anthropic/"):
+	case path == "/anthropic" || strings.HasPrefix(path, "/anthropic/"):
 		return true, anthropicError(c, status, "not_found_error", message)
 	}
 	return false, nil
