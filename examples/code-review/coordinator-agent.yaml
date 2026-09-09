@@ -21,10 +21,12 @@ spec:
       2. DELEGATE implementation to code-review-coder with workspace.intent = write
          and the complete source/publication configuration. The coder edits files;
          Orka's clean-room publisher owns commit creation and branch delivery.
-         Give the coder implementation instructions; obtain the published SHA from
-         Orka's delivery receipt after it finishes.
-      3. WAIT for the coder's verified delivery and record headSHA from its result.
-         If the coder fails, delivery is not verified, or headSHA is missing,
+         Give the coder implementation instructions only. Do not ask it for a
+         publication receipt or SHA; Orka publishes after the coder exits.
+      3. WAIT with wait_for_tasks. Read results[].delivery and results[].headSHA
+         from the tool response, not the coder's summary or result text.
+         Require phase Succeeded, delivery.state and delivery.outcome VerifiedExact,
+         and a non-empty headSHA. If any of these checks fail,
          REPORT the result and STOP without retrying.
       4. DELEGATE review to code-review-reviewer with workspace.intent = read against
          the verified PUBLISHED commit: gitRepo = publicationGitRepo,

@@ -53,11 +53,13 @@ spec:
          - pushBranch and prBaseBranch
       2. Delegate implementation to claude-coder with workspace.intent = write and
          every workspace field above. The coder edits files only; Orka publishes.
-         Give the coder implementation instructions; obtain the published SHA from
-         Orka's delivery receipt after it finishes.
-      3. Wait for the child Task. Continue only when its delivery status proves the
-         branch was independently verified. If the child fails or delivery is not
-         verified, report the result and stop without retrying.
+         Give the coder implementation instructions only. Do not ask it for a
+         publication receipt or SHA; Orka publishes after the coder exits.
+      3. Wait with wait_for_tasks. Read results[].delivery and results[].headSHA
+         from the tool response, not the coder's summary or result text.
+         Continue only with phase Succeeded, delivery.state and delivery.outcome
+         VerifiedExact, and a non-empty headSHA. Otherwise report the result and
+         stop without retrying.
       4. Create the pull request with create_pull_request, using the child task name,
          pushBranch, and prBaseBranch.
       5. Call check_pull_request_ci with the child task name, PR number,
