@@ -546,7 +546,7 @@ func (s *Server) Start(ctx context.Context) error {
 // apiPathPrefixes are the request prefixes served by an API rather than by the
 // dashboard. A 404 under one of them is a routing answer the caller needs to
 // see, not a client-side route for the SPA to resolve.
-var apiPathPrefixes = []string{"/api", "/openai/", "/anthropic/", "/internal/"}
+var apiPathPrefixes = []string{"/api", "/openai/", "/anthropic/", "/internal/", "/webhooks/"}
 
 // spaFallbackEligible reports whether a 404 for path is served as the SPA
 // index page instead of a JSON error. Telemetry middleware uses the same
