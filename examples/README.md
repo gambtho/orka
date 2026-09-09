@@ -39,6 +39,38 @@ credential Secret names reflect one working setup. Swap in the models and Secret
 exist in your cluster. Note that built-in runtime Agents *must* set `spec.model.name` — the
 ACP session has no default model, and admission rejects an Agent without one.
 
+**Native coordinators need access to their Provider endpoint.** When a Provider points
+at Orka's Vekil provider-auth proxy, the default proxy NetworkPolicy admits ACP runtime
+Pods only. Native AI coordinators also need this namespace-local ingress rule. Apply it
+in the controller's watched namespace; it allows the controller and native AI workers
+to use the authenticated proxy on port 8080:
+
+```yaml
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: orka-native-provider-access
+spec:
+  podSelector:
+    matchLabels:
+      orka.ai/network-role: provider-auth-proxy
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              orka.ai/task-type: ai
+        - podSelector:
+            matchLabels:
+              orka.ai/network-role: controller
+      ports:
+        - protocol: TCP
+          port: 8080
+```
+
+The Provider must reference that proxy's credential Secret in the same namespace.
+For a different Provider endpoint, configure its network access and credentials instead.
+
 **Repository examples need repository-specific values.** Replace repository URLs,
 branches, and credential references before creating Tasks or monitors. Writing
 RepositoryMonitors also need a real digest-pinned `spec.validation.image` with

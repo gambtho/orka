@@ -207,6 +207,9 @@ func validateACPProviderNativePolicy(provider string, intent corev1alpha1.Worksp
 		}
 		return fmt.Errorf("codex ACP runtime cannot exactly enforce provider-native tool restrictions")
 	case string(corev1alpha1.AgentRuntimeCopilot):
+		if acp.BuiltInRuntimeNativePolicyUnrestricted(provider, allowed, disallowed, allowBash) {
+			return nil
+		}
 		for _, name := range allowed {
 			if strings.EqualFold(strings.TrimSpace(name), "WebSearch") {
 				return fmt.Errorf("copilot ACP runtime cannot exactly enforce the WebSearch provider-native tool")

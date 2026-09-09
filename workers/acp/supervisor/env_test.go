@@ -338,7 +338,8 @@ func TestCopilotUnrestrictedProjectionKeepsPermanentExclusions(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(projection.AdditionalArgs) != 1 {
+	if len(projection.AdditionalArgs) != 3 || !slices.Contains(projection.AdditionalArgs, "--allow-tool=shell") ||
+		!slices.Contains(projection.AdditionalArgs, "--allow-tool=write") {
 		t.Fatalf("Copilot unrestricted projection args = %v", projection.AdditionalArgs)
 	}
 	excluded := strings.Split(strings.TrimPrefix(projection.AdditionalArgs[0], "--excluded-tools="), ",")
@@ -346,6 +347,74 @@ func TestCopilotUnrestrictedProjectionKeepsPermanentExclusions(t *testing.T) {
 		if !slices.Contains(excluded, excludedID) {
 			t.Fatalf("Copilot unrestricted projection omitted permanent exclusion %q: %v", excludedID, excluded)
 		}
+	}
+}
+
+func TestCopilotProviderSessionProjectionWithBrokeredMessaging(t *testing.T) {
+	paths := acp.SessionPaths{Home: "/sessions/private/home"}
+	proxy := ProviderProxyBinding{BaseURL: "http://127.0.0.1:43210/_orka/provider/session", Credential: "test-auth-token"}
+	for _, tt := range []struct {
+		name       string
+		disallowed []string
+		allowBash  bool
+		wantError  bool
+	}{
+		{name: "native defaults with messaging", allowBash: true},
+		{name: "native deny retains unsupported web search", disallowed: []string{providerToolWrite}, allowBash: true, wantError: true},
+		{name: "bash denied retains unsupported web search", wantError: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			allowed := append(acp.BuiltInRuntimeNativeToolNames("copilot"), "send_message", "check_messages")
+			request := testProviderProjectionRequest(t, providerKindCopilot, "copilot-test", "", "", allowed, tt.disallowed, tt.allowBash)
+			request.Profile.WorkspaceIntent = harnessv2.WorkspaceIntentWrite
+			projection, err := copilotSessionProjection(request, paths, proxy, "copilot-test")
+			if tt.wantError {
+				if err == nil || !strings.Contains(err.Error(), providerToolWebSearch) {
+					t.Fatalf("restricted Copilot projection error = %v", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := []string{
+				"--excluded-tools=" + strings.Join(copilotAlwaysExcludedToolIDs, ","),
+				"--allow-tool=shell", "--allow-tool=write", "--allow-tool=orka",
+			}
+			if !slices.Equal(projection.AdditionalArgs, want) {
+				t.Fatalf("delegation changed native Copilot exclusions: %v, want %v", projection.AdditionalArgs, want)
+			}
+		})
+	}
+}
+
+func TestCopilotPermissionRulesPreserveRestrictedPolicies(t *testing.T) {
+	for _, tt := range []struct {
+		name      string
+		allowed   []string
+		allowBash bool
+		wantRules []string
+	}{
+		{name: "deny all", allowed: []string{}, wantRules: []string{}},
+		{name: "native read", allowed: []string{providerToolRead}, wantRules: []string{}},
+		{name: "native write", allowed: []string{providerToolWrite}, wantRules: []string{"--allow-tool=write"}},
+		{name: "native edit", allowed: []string{providerToolEdit}, wantRules: []string{"--allow-tool=write"}},
+		{name: "native shell", allowed: []string{providerToolBash}, allowBash: true, wantRules: []string{"--allow-tool=shell"}},
+		{
+			name: "read and brokered messaging", allowed: []string{providerToolRead, "check_messages", "send_message"},
+			wantRules: []string{"--allow-tool=orka"},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			request := testProviderProjectionRequest(t, providerKindCopilot, "copilot-test", "", "", tt.allowed, nil, tt.allowBash)
+			projection, err := copilotSessionProjection(request, acp.SessionPaths{}, ProviderProxyBinding{}, "copilot-test")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !slices.Equal(projection.AdditionalArgs[1:], tt.wantRules) {
+				t.Fatalf("Copilot permission rules = %v, want %v", projection.AdditionalArgs[1:], tt.wantRules)
+			}
+		})
 	}
 }
 

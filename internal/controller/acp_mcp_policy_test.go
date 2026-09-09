@@ -162,6 +162,76 @@ func TestDelegatedCodexPolicyPreservesNativeDefaultsAndExplicitRestrictions(t *t
 	}
 }
 
+func TestDelegatedCopilotPolicyPreservesNativeDefaultsAndRestrictions(t *testing.T) {
+	for _, tt := range []struct {
+		name       string
+		allowed    []string
+		disallowed []string
+		wantError  bool
+	}{
+		{name: "implicit native defaults"},
+		{name: "explicit full native grant", allowed: acp.BuiltInRuntimeNativeToolNames("copilot")},
+		{name: "explicit deny all", allowed: []string{}},
+		{name: "restricted web search", allowed: []string{providerNativeToolWebSearch}, wantError: true},
+		{name: "deny only retaining web search", disallowed: []string{providerNativeToolWrite}, wantError: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			task := &corev1alpha1.Task{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "child", Namespace: "default", UID: "child-uid",
+					Labels: map[string]string{labels.LabelParentTask: "parent"},
+				},
+				Spec: corev1alpha1.TaskSpec{
+					Type:         corev1alpha1.TaskTypeAgent,
+					AgentRuntime: &corev1alpha1.AgentRuntimeSpec{AllowedTools: tt.allowed, DisallowedTools: tt.disallowed},
+					Workspace:    &corev1alpha1.WorkspaceConfig{Intent: corev1alpha1.WorkspaceIntentWrite},
+				},
+			}
+			agent := &corev1alpha1.Agent{
+				ObjectMeta: metav1.ObjectMeta{Name: "coder", Namespace: "default", UID: "agent-uid", Generation: 1},
+				Spec: corev1alpha1.AgentSpec{
+					Model: &corev1alpha1.ModelConfig{Name: "model"},
+					Runtime: &corev1alpha1.AgentCLIRuntime{
+						Type: corev1alpha1.AgentRuntimeCopilot, ContractVersion: new(corev1alpha1.AgentRuntimeContractHarnessV2),
+					},
+				},
+			}
+			plan, err := PlanACPRuntime(task, agent, ACPRuntimeImages{Copilot: "docker.io/example/copilot@sha256:" + strings.Repeat("c", 64)})
+			if tt.wantError {
+				if err == nil || !strings.Contains(err.Error(), providerNativeToolWebSearch) {
+					t.Fatalf("restricted Copilot policy error = %v", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			registry := tools.NewRegistry()
+			registry.Register(tools.NewSendMessageTool())
+			registry.Register(tools.NewCheckMessagesTool())
+			configuration, err := buildRuntimeSessionMCPConfigurationWithRegistry(context.Background(), nil, task, agent, plan.Profile, registry)
+			if err != nil {
+				t.Fatal(err)
+			}
+			native := tt.allowed
+			if native == nil {
+				native = acp.BuiltInRuntimeNativeToolNames("copilot")
+			}
+			want := append(slices.Clone(native), "check_messages", "send_message")
+			slices.Sort(want)
+			if !slices.Equal(configuration.ToolPolicy.AllowedToolNames, want) {
+				t.Fatalf("delegated Copilot grants = %v, want %v", configuration.ToolPolicy.AllowedToolNames, want)
+			}
+			for _, name := range []string{"check_messages", "send_message"} {
+				descriptor, ok := configuration.ToolPolicy.Descriptor(name)
+				if !ok || descriptor.Source != harnessv2.MCPToolSourceBrokeredBuiltin {
+					t.Fatalf("delegation did not freeze brokered grant %q", name)
+				}
+			}
+		})
+	}
+}
+
 func TestBuildExternalRuntimeSessionMCPConfigurationClassifiesToolPolicyMismatchPermanent(t *testing.T) {
 	policy := testAgentRuntimeMCPPolicy()
 	profile, _, _ := testAgentRuntimeProfileClaimsAndLimits()

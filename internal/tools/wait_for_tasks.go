@@ -32,6 +32,7 @@ import (
 // WaitForTasksTool implements waiting for child tasks to complete
 type WaitForTasksTool struct {
 	k8sClient client.Client
+	maxWait   time.Duration
 }
 
 // WaitForTasksArgs are the arguments for the wait_for_tasks tool
@@ -114,21 +115,31 @@ func (t *WaitForTasksTool) Description() string {
 
 // Parameters returns the JSON Schema for parameters
 func (t *WaitForTasksTool) Parameters() json.RawMessage {
-	return json.RawMessage(`{
+	timeoutDefault := "10m"
+	timeoutDescription := "Max wait duration, e.g. '5m' (default: '10m')"
+	if t.maxWait > 0 {
+		timeoutDefault = t.maxWait.String()
+		timeoutDescription = fmt.Sprintf(
+			"Max wait duration (default and maximum: %s). Longer waits are clamped. Repeat for the same tasks while completed is false.",
+			timeoutDefault,
+		)
+	}
+	return json.RawMessage(fmt.Sprintf(`{
 		"type": "object",
 		"properties": {
 			"tasks": {
-				"type": "` + jsonSchemaTypeArray + `",
+				"type": "`+jsonSchemaTypeArray+`",
 				"items": {"type": "string"},
 				"description": "Child task names to wait for"
 			},
 			"timeout": {
 				"type": "string",
-				"description": "Max wait duration, e.g. '5m' (default: '10m')"
+				"description": %q,
+				"default": %q
 			}
 		},
 		"required": ["tasks"]
-	}`)
+	}`, timeoutDescription, timeoutDefault))
 }
 
 // Execute waits for the specified tasks to complete and returns their results
@@ -146,10 +157,16 @@ func (t *WaitForTasksTool) Execute(ctx context.Context, args json.RawMessage) (s
 	timeoutStr := waitArgs.Timeout
 	if timeoutStr == "" {
 		timeoutStr = "10m"
+		if t.maxWait > 0 {
+			timeoutStr = t.maxWait.String()
+		}
 	}
 	timeout, err := time.ParseDuration(timeoutStr)
 	if err != nil {
 		return "", fmt.Errorf("invalid timeout %q: %w", timeoutStr, err)
+	}
+	if t.maxWait > 0 {
+		timeout = min(timeout, t.maxWait)
 	}
 
 	ns := ""
