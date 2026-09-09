@@ -40,6 +40,7 @@ func TestSubstrateMCPLegacyIdentityResumesWithoutReplacingActor(t *testing.T) {
 				pool = &corev1alpha1.SubstrateActorPool{
 					ObjectMeta: metav1.ObjectMeta{Name: testMCPPoolName, Namespace: tool.Namespace},
 					Spec:       corev1alpha1.SubstrateActorPoolSpec{TemplateRef: template, TargetActors: 1},
+					Status:     corev1alpha1.SubstrateActorPoolStatus{TemplateUID: "native-template-uid"},
 				}
 				tool.Spec.MCP.SubstrateActor.PoolRef = &corev1alpha1.SubstrateActorPoolReference{Name: pool.Name, Namespace: pool.Namespace}
 				qualified = workspace.SubstrateActorKey(template.Namespace, deterministicSubstratePoolActorID(deterministicSubstratePoolActorPrefix(pool.Namespace, pool.Name), 0))

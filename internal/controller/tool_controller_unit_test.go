@@ -1104,6 +1104,7 @@ func TestToolReconcilerMCPSubstrateActorUsesPoolRef(t *testing.T) {
 	defer srv.Close()
 	pool := &corev1alpha1.SubstrateActorPool{
 		ObjectMeta: metav1.ObjectMeta{Name: testMCPPoolName, Namespace: defaultNS},
+		Status:     corev1alpha1.SubstrateActorPoolStatus{TemplateUID: "validated-native-template-uid"},
 		Spec: corev1alpha1.SubstrateActorPoolSpec{
 			TemplateRef:  corev1alpha1.WorkspaceTemplateReference{Name: "mcp-template", Namespace: "ate-demo"},
 			TargetActors: 5,
@@ -1138,7 +1139,7 @@ func TestToolReconcilerMCPSubstrateActorUsesPoolRef(t *testing.T) {
 			return executor, nil
 		},
 	}
-	r.SubstrateTemplateValidator = substrateFixtureTemplateValidator(r.Client)
+	r.SubstrateTemplateValidator = substrateActorPoolFixtureValidator(r.Client)
 
 	if _, err := r.Reconcile(context.Background(), mcpToolRequest()); err != nil {
 		t.Fatalf("Reconcile() error = %v", err)
@@ -1212,6 +1213,7 @@ func TestToolReconcilerMCPSubstrateActorWaitsForLegacyTaskCleanup(t *testing.T) 
 	defer srv.Close()
 	pool := &corev1alpha1.SubstrateActorPool{
 		ObjectMeta: metav1.ObjectMeta{Name: testMCPPoolName, Namespace: defaultNS},
+		Status:     corev1alpha1.SubstrateActorPoolStatus{TemplateUID: "validated-native-template-uid"},
 		Spec: corev1alpha1.SubstrateActorPoolSpec{
 			TemplateRef:  corev1alpha1.WorkspaceTemplateReference{Name: "mcp-template", Namespace: "ate-demo"},
 			TargetActors: 1,
@@ -1275,7 +1277,7 @@ func TestToolReconcilerMCPSubstrateActorWaitsForLegacyTaskCleanup(t *testing.T) 
 			return executor, nil
 		},
 	}
-	r.SubstrateTemplateValidator = substrateFixtureTemplateValidator(r.Client)
+	r.SubstrateTemplateValidator = substrateActorPoolFixtureValidator(r.Client)
 	ctx := context.Background()
 	if _, err := r.Reconcile(ctx, mcpToolRequest()); err != nil {
 		t.Fatalf("Reconcile() ownership update error = %v", err)
@@ -1346,6 +1348,7 @@ func TestToolReconcilerMCPSubstrateActorBootsPrecreatedPooledActor(t *testing.T)
 	defer srv.Close()
 	pool := &corev1alpha1.SubstrateActorPool{
 		ObjectMeta: metav1.ObjectMeta{Name: testMCPPoolName, Namespace: defaultNS},
+		Status:     corev1alpha1.SubstrateActorPoolStatus{TemplateUID: "validated-native-template-uid"},
 		Spec: corev1alpha1.SubstrateActorPoolSpec{
 			TemplateRef:  corev1alpha1.WorkspaceTemplateReference{Name: "mcp-template", Namespace: "ate-demo"},
 			TargetActors: 5,
@@ -1380,7 +1383,7 @@ func TestToolReconcilerMCPSubstrateActorBootsPrecreatedPooledActor(t *testing.T)
 			return executor, nil
 		},
 	}
-	r.SubstrateTemplateValidator = substrateFixtureTemplateValidator(r.Client)
+	r.SubstrateTemplateValidator = substrateActorPoolFixtureValidator(r.Client)
 
 	if _, err := r.Reconcile(context.Background(), mcpToolRequest()); err != nil {
 		t.Fatalf("Reconcile() ownership update error = %v", err)
@@ -1418,6 +1421,7 @@ func TestToolReconcilerMCPSubstrateActorMigratesPooledLeaseOutsideTarget(t *test
 
 	pool := &corev1alpha1.SubstrateActorPool{
 		ObjectMeta: metav1.ObjectMeta{Name: testMCPPoolName, Namespace: defaultNS},
+		Status:     corev1alpha1.SubstrateActorPoolStatus{TemplateUID: "validated-native-template-uid"},
 		Spec: corev1alpha1.SubstrateActorPoolSpec{
 			TemplateRef:  corev1alpha1.WorkspaceTemplateReference{Name: "mcp-template", Namespace: "ate-demo"},
 			TargetActors: 3,
@@ -1486,7 +1490,7 @@ func TestToolReconcilerMCPSubstrateActorMigratesPooledLeaseOutsideTarget(t *test
 			return executor, nil
 		},
 	}
-	r.SubstrateTemplateValidator = substrateFixtureTemplateValidator(r.Client)
+	r.SubstrateTemplateValidator = substrateActorPoolFixtureValidator(r.Client)
 
 	if _, err := r.Reconcile(context.Background(), mcpToolRequest()); err != nil {
 		t.Fatalf("Reconcile() migration metadata error = %v", err)
@@ -1546,6 +1550,7 @@ func TestToolReconcilerMCPSubstrateActorProbesPoolOnLeaseCollision(t *testing.T)
 
 	pool := &corev1alpha1.SubstrateActorPool{
 		ObjectMeta: metav1.ObjectMeta{Name: testMCPPoolName, Namespace: defaultNS},
+		Status:     corev1alpha1.SubstrateActorPoolStatus{TemplateUID: "validated-native-template-uid"},
 		Spec: corev1alpha1.SubstrateActorPoolSpec{
 			TemplateRef:  corev1alpha1.WorkspaceTemplateReference{Name: "mcp-template", Namespace: "ate-demo"},
 			TargetActors: 3,
@@ -1600,7 +1605,7 @@ func TestToolReconcilerMCPSubstrateActorProbesPoolOnLeaseCollision(t *testing.T)
 			return executor, nil
 		},
 	}
-	r.SubstrateTemplateValidator = substrateFixtureTemplateValidator(r.Client)
+	r.SubstrateTemplateValidator = substrateActorPoolFixtureValidator(r.Client)
 
 	if _, err := r.Reconcile(context.Background(), mcpToolRequest()); err != nil {
 		t.Fatalf("Reconcile() ownership update error = %v", err)

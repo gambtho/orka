@@ -67,7 +67,15 @@ PY
   kubectl() {
     case "$*" in
       '-n orka-system apply -f -') cat >"${TMP_ROOT}/identity.json" ;;
-      '-n orka-system create token native-cleanup-client --duration=5m')
+      '-n orka-system create token native-cleanup-client --duration='*m)
+        local minutes="${6#--duration=}"
+        minutes="${minutes%m}"
+        [[ "${minutes}" =~ ^[0-9]+$ ]] || return 9
+        # Match the API server's minimum TokenRequest lifetime.
+        if (( 10#${minutes} < 10 )); then
+          echo 'cleanup TokenRequest duration is below the Kubernetes minimum' >&2
+          return 8
+        fi
         [[ -z "${token_failure}" ]] || return 7
         printf 'fixture-cleanup-token\n'
         ;;

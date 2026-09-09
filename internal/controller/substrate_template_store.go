@@ -328,8 +328,8 @@ func (s *nativeSubstrateTemplateStore) materialize(
 		}
 		observed, err = api.Control.CreateActorTemplate(ctx, &ateapipb.CreateActorTemplateRequest{ActorTemplate: native})
 		switch status.Code(err) {
-		case codes.InvalidArgument, codes.FailedPrecondition, codes.Unauthenticated:
-			// Upstream rejects authentication before invoking the create handler
+		case codes.InvalidArgument, codes.FailedPrecondition, codes.Unauthenticated, codes.PermissionDenied:
+			// Upstream rejects authentication and authorization before invoking the create handler
 			// and returns these validation errors before persisting a template. This is
 			// the sole create attempt for the freshly recorded intent, so corrected
 			// credentials or configuration may safely retry or choose another revision.

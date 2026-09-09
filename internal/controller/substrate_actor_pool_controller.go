@@ -100,6 +100,17 @@ func (r *SubstrateActorPoolReconciler) Reconcile(ctx context.Context, req ctrl.R
 		return r.updateSubstrateActorPoolStatus(ctx, pool, corev1alpha1.SubstrateActorPoolPhaseFailed, workspace.Density{}, err.Error())
 	}
 	template.UID = templateRequest.TemplateUID
+	if template.UID == "" {
+		return r.updateSubstrateActorPoolStatus(ctx, pool, corev1alpha1.SubstrateActorPoolPhaseFailed, workspace.Density{}, "native ActorTemplate UID is unavailable")
+	}
+	if pool.Status.TemplateUID == "" {
+		pool.Status.TemplateUID = template.UID
+		if err := r.Status().Update(ctx, pool); err != nil {
+			return ctrl.Result{}, err
+		}
+	} else if pool.Status.TemplateUID != template.UID {
+		return r.updateSubstrateActorPoolStatus(ctx, pool, corev1alpha1.SubstrateActorPoolPhaseFailed, workspace.Density{}, "native ActorTemplate was replaced; create another pool to use its new identity")
+	}
 	if !controllerutil.ContainsFinalizer(pool, substrateActorPoolFinalizer) {
 		controllerutil.AddFinalizer(pool, substrateActorPoolFinalizer)
 		if err := r.Update(ctx, pool); err != nil {

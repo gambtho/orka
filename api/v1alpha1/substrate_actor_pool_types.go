@@ -56,6 +56,11 @@ type SubstrateActorPoolStatus struct {
 	// +optional
 	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
 
+	// TemplateUID pins the first admitted native ActorTemplate lifetime.
+	// A same-name replacement requires a new pool.
+	// +optional
+	TemplateUID string `json:"templateUID,omitempty"`
+
 	// WorkerCount is the number of workers reported by Substrate for this pool.
 	// +optional
 	WorkerCount int32 `json:"workerCount,omitempty"`

@@ -27,7 +27,7 @@ func nativeTemplateRecoveryHarness(t *testing.T) (*nativeSubstrateTemplateStore,
 }
 
 func TestNativeSubstrateTemplateRejectedCreateAllowsCorrectedRevision(t *testing.T) {
-	for _, code := range []codes.Code{codes.InvalidArgument, codes.FailedPrecondition, codes.Unauthenticated} {
+	for _, code := range []codes.Code{codes.InvalidArgument, codes.FailedPrecondition, codes.Unauthenticated, codes.PermissionDenied} {
 		for _, operation := range []string{"create", "update"} {
 			t.Run(code.String()+"/"+operation, func(t *testing.T) {
 				store, api, pool := nativeTemplateRecoveryHarness(t)
@@ -53,8 +53,8 @@ func TestNativeSubstrateTemplateRejectedCreateAllowsCorrectedRevision(t *testing
 				}
 				api.createErr = nil
 				nonce := "corrected"
-				if code == codes.Unauthenticated {
-					// Control credentials rotate independently of template content.
+				if code == codes.Unauthenticated || code == codes.PermissionDenied {
+					// Control access changes independently of template content.
 					// The exact rejected revision must become retryable too.
 					nonce = "rejected"
 				}

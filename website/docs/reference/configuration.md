@@ -400,11 +400,15 @@ spec:
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `templateRef.name` | string | required | Substrate `ActorTemplate` used for pool members. |
-| `templateRef.namespace` | string | Pool namespace | Namespace containing the `ActorTemplate`. |
+| `templateRef.namespace` | string | Pool namespace | Native Substrate Atespace containing the `ActorTemplate`. |
 | `workerPoolRef.name` | string | empty | Optional Substrate `WorkerPool` used for capacity and density reporting. |
 | `workerPoolRef.namespace` | string | Pool namespace | Namespace containing the `WorkerPool`. |
 | `targetActors` | integer | `0` | Desired stateful actor count, capped at `1000`. References from Tasks or Tools require at least `1`. |
 | `precreateActors` | boolean | `false` | Pre-create deterministic warm actors up to `targetActors`. |
+
+`spec.templateRef` is immutable. Orka records the first accepted native template
+UID in `status.templateUID`, including for empty pools. Replacing the native
+template under the same name requires a new pool.
 
 For built-in OpenCode Agents, `spec.model.name` must use literal
 `provider/model` form and both `spec.model.contextWindow` and

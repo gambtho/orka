@@ -214,8 +214,11 @@ Actor scale-to-zero does not imply WorkerPool Pod scale-to-zero. Upstream
 currently provides one Actor slot per worker. Worker capacity and autoscaling
 remain operator responsibilities.
 
-`SubstrateActorPool.spec.templateRef` is immutable. Existing deterministic pool
-members keep their template and Atespace, so create another pool to change either.
+`SubstrateActorPool.spec.templateRef` is immutable. Orka persists the first
+accepted native ActorTemplate UID in `status.templateUID`, even when the pool
+has no Actors. MCP Tools wait for this binding and reject a different native
+template UID before acquiring an Actor lease. Create another pool to change
+the template or Atespace, or to use a template recreated under the same name.
 The original pool retains responsibility for cleaning up its Actors.
 
 ## Checkpoints, forks, and recovery
@@ -239,6 +242,11 @@ waits for suspension and never interrupts an attached Task. When Ready, the
 checkpoint exposes an immutable digest, class revision, and timestamp, without
 native identifiers or storage URLs. Its private reference keeps the Data Tag
 and original template alive after source workspace deletion.
+
+If the source workspace disappears before Orka acquires that private reference,
+export fails with phase `Failed` and reason `SourceMissing`. Temporary read
+errors leave the checkpoint `Pending` with reason `SourceUnavailable` so Orka
+can retry.
 
 A fresh Task or Session restores the exact accepted reference:
 

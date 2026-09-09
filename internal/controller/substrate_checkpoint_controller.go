@@ -73,6 +73,9 @@ func (r *SubstrateCheckpointReconciler) Reconcile(ctx context.Context, req ctrl.
 	if checkpoint.Status.Digest == "" {
 		ws := &workspacev1alpha1.ExecutionWorkspace{}
 		if err := pools.nativeSubstrateReader().Get(ctx, types.NamespacedName{Namespace: checkpoint.Namespace, Name: checkpoint.Spec.WorkspaceRef.Name}, ws); err != nil {
+			if apierrors.IsNotFound(err) {
+				return r.phase(ctx, checkpoint, "Failed", "SourceMissing", "the pinned source workspace was deleted before checkpoint selection")
+			}
 			return r.phase(ctx, checkpoint, "Pending", "SourceUnavailable", "source workspace is unavailable")
 		}
 		if ws.UID != checkpoint.Spec.WorkspaceRef.UID || ws.Labels[workspacev1alpha1.ProviderControllerLabel] != acpWorkspaceControllerLabelValue {
@@ -128,6 +131,9 @@ func (r *SubstrateCheckpointReconciler) Reconcile(ctx context.Context, req ctrl.
 		ws := &workspacev1alpha1.ExecutionWorkspace{}
 		if err := pools.nativeSubstrateReader().Get(ctx,
 			types.NamespacedName{Namespace: checkpoint.Namespace, Name: checkpoint.Spec.WorkspaceRef.Name}, ws); err != nil {
+			if apierrors.IsNotFound(err) {
+				return r.phase(ctx, checkpoint, "Failed", "SourceMissing", "the pinned source workspace was deleted before checkpoint reference acquisition")
+			}
 			return r.phase(ctx, checkpoint, "Pending", "SourceUnavailable", "source workspace is unavailable before reference acquisition")
 		}
 		pool := &corev1alpha1.RuntimePool{}

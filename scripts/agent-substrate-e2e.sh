@@ -339,7 +339,7 @@ create_cleanup_api_identity() {
   (
     umask 077
     rm -f "${TMP_ROOT}/native-cleanup-token" "${TMP_ROOT}/native-cleanup-header"
-    kubectl -n orka-system create token native-cleanup-client --duration=5m >"${TMP_ROOT}/native-cleanup-token" || exit 1
+    kubectl -n orka-system create token native-cleanup-client --duration=10m >"${TMP_ROOT}/native-cleanup-token" || exit 1
     [[ -s "${TMP_ROOT}/native-cleanup-token" ]] || exit 1
     {
       printf 'Authorization: Bearer '

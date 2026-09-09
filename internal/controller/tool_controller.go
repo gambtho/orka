@@ -613,6 +613,12 @@ func (r *ToolReconciler) resolveSubstrateMCPActorPool(
 	if err != nil {
 		return "", "", nil, err
 	}
+	if pool.Status.TemplateUID == "" {
+		return "", "", nil, fmt.Errorf("substrate actor poolRef %q in namespace %q has not pinned its native ActorTemplate UID", poolName, poolNamespace)
+	}
+	if pool.Status.TemplateUID != templateRequest.TemplateUID {
+		return "", "", nil, fmt.Errorf("substrate actor poolRef %q in namespace %q has a different native ActorTemplate UID; create another pool to use its new identity", poolName, poolNamespace)
+	}
 	return poolName, poolNamespace, pool, nil
 }
 
