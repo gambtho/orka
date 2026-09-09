@@ -293,8 +293,8 @@ func assertRepositoryMonitorValidationOutputAndStorage(t *testing.T, job *batchv
 	if strings.Contains(strings.Join(worker.Args, " "), repositoryMonitorValidationTestCommand) {
 		t.Fatalf("validation worker args exposed the repository-selected command: %#v", worker.Args)
 	}
-	if worker.TerminationMessagePath != "/dev/null" {
-		t.Fatalf("validation termination message path = %q, want /dev/null", worker.TerminationMessagePath)
+	if worker.TerminationMessagePath != corev1.TerminationMessagePathDefault || worker.TerminationMessagePolicy != corev1.TerminationMessageReadFile {
+		t.Fatalf("validation termination message configuration = %q/%q, want the standard file path without log fallback", worker.TerminationMessagePath, worker.TerminationMessagePolicy)
 	}
 	for _, container := range append(append([]corev1.Container{}, job.Spec.Template.Spec.InitContainers...), job.Spec.Template.Spec.Containers...) {
 		if got := container.Resources.Requests[corev1.ResourceEphemeralStorage]; got.Cmp(repositoryValidationStorageRequest) != 0 {

@@ -619,7 +619,9 @@ func (b *JobBuilder) buildContainerWithOptions(ctx context.Context, task *corev1
 					repositoryMonitorValidationShellWrapper,
 					path.Join(repositoryMonitorValidationCommandMount, repositoryMonitorValidationCommandFile),
 				}
-				container.TerminationMessagePath = "/dev/null"
+				// Kubelet mounts a regular file here. Mounting it over /dev/null
+				// replaces the device and prevents the container runtime from starting.
+				container.TerminationMessagePath = corev1.TerminationMessagePathDefault
 				container.TerminationMessagePolicy = corev1.TerminationMessageReadFile
 			}
 		} else {
