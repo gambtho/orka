@@ -385,6 +385,20 @@ func TestCustomErrorHandler_CompatAPI404_ReturnsProviderError(t *testing.T) {
 			},
 		},
 		{
+			name: "openai upper case",
+			path: "/OPENAI/v1/nonexistent",
+			assertErr: func(t *testing.T, body []byte) {
+				t.Helper()
+				var payload OAIError
+				if err := json.Unmarshal(body, &payload); err != nil {
+					t.Fatalf("body is not an OpenAI error envelope: %v (%s)", err, body)
+				}
+				if payload.Error.Type != "invalid_request_error" {
+					t.Errorf("error.type = %q, want invalid_request_error", payload.Error.Type)
+				}
+			},
+		},
+		{
 			name: "anthropic",
 			path: "/anthropic/v1/nonexistent",
 			assertErr: func(t *testing.T, body []byte) {

@@ -131,7 +131,7 @@ func effectiveStatusCode(c fiber.Ctx, err error) int {
 		}
 	}
 	if status == fiber.StatusNotFound {
-		if _, unsupported := unsupportedCompatRoutes[c.Path()]; unsupported {
+		if _, unsupported := unsupportedCompatRoutes[routeLookupPath(c.Path())]; unsupported {
 			status = fiber.StatusNotImplemented
 		}
 	}

@@ -545,19 +545,29 @@ func (s *Server) Start(ctx context.Context) error {
 
 // apiPathPrefixes are the request prefixes served by an API rather than by the
 // dashboard. A 404 under one of them is a routing answer the caller needs to
-// see, not a client-side route for the SPA to resolve.
+// see, not a client-side route for the SPA to resolve. Lower case, matched
+// against a folded path: see routeLookupPath.
 var apiPathPrefixes = []string{"/api", "/openai/", "/anthropic/", "/internal/", "/webhooks/"}
+
+// routeLookupPath folds path the way the router matches it. Fiber is
+// case-insensitive by default, so /OPENAI/v1/chat/completions reaches the
+// registered handler and an unrouted /OPENAI/v1/responses has to be classified
+// the same way a lower-case one is.
+func routeLookupPath(path string) string {
+	return strings.ToLower(path)
+}
 
 // spaFallbackEligible reports whether a 404 for path is served as the SPA
 // index page instead of a JSON error. Telemetry middleware uses the same
 // predicate so the recorded status matches what the client receives.
 func spaFallbackEligible(path string) bool {
+	folded := routeLookupPath(path)
 	for _, prefix := range apiPathPrefixes {
-		if strings.HasPrefix(path, prefix) {
+		if strings.HasPrefix(folded, prefix) {
 			return false
 		}
 	}
-	return path != "/healthz" && path != "/readyz"
+	return folded != "/healthz" && folded != "/readyz"
 }
 
 // spaIndexHTML returns the embedded SPA index page, or false when the UI
@@ -628,6 +638,7 @@ func customErrorHandler(c fiber.Ctx, err error) error {
 
 // unsupportedCompatRoutes names endpoints of the emulated provider APIs that
 // Orka deliberately does not serve, and the supported route to use instead.
+// Keys are lower case and looked up with a folded path.
 // Saying so costs a client one line in its log rather than a parse failure
 // several frames from the cause.
 var unsupportedCompatRoutes = map[string]string{
@@ -637,7 +648,7 @@ var unsupportedCompatRoutes = map[string]string{
 // compatRouteNotFound answers an unrouted compatibility-API path in the error
 // format that API's clients expect. It reports whether it handled the path.
 func compatRouteNotFound(c fiber.Ctx) (bool, error) {
-	path := c.Path()
+	path := routeLookupPath(c.Path())
 	status := fiber.StatusNotFound
 
 	message, unsupported := unsupportedCompatRoutes[path]
