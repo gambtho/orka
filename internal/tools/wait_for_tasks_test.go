@@ -445,7 +445,7 @@ func TestWaitForTasksTool_Execute_AuthorizesRepositoryValidationBinding(t *testi
 	monitor, parent := runValidationFixtures()
 	validationTask := buildRepositoryValidationTask(parent, monitor, runValidationTestImage, runValidationTestHeadSHA)
 	validationTask.Annotations[labels.AnnotationRepositoryValidationCommandDigest] = RepositoryValidationCommandDigest("go test ./...")
-	validationTask.Status.Phase = corev1alpha1.TaskPhaseSucceeded
+	validationTask.Status.Phase = corev1alpha1.TaskPhaseRunning
 	bindingStore := newRunValidationBindingStore()
 	bindingEvent, err := RepositoryValidationCommandBindingEvent(parent, monitor, validationTask, runValidationTestImage, runValidationTestHeadSHA, "go test ./...")
 	if err != nil {
@@ -467,16 +467,25 @@ func TestWaitForTasksTool_Execute_AuthorizesRepositoryValidationBinding(t *testi
 		RepositoryValidationBindings: bindingStore,
 	})
 
-	result, err := NewWaitForTasksTool(fakeClient).Execute(toolCtx, json.RawMessage(fmt.Sprintf(`{"tasks":[%q]}`, validationTask.Name)))
-	if err != nil {
-		t.Fatalf("Execute() error = %v", err)
-	}
-	var waitResult WaitForTasksResult
-	if err := json.Unmarshal([]byte(result), &waitResult); err != nil {
-		t.Fatal(err)
-	}
-	if !waitResult.Completed || len(waitResult.Results) != 1 || waitResult.Results[0].Task != validationTask.Name {
-		t.Fatalf("authorized validation child result = %#v", waitResult)
+	tool := NewWaitForTasksTool(fakeClient)
+	args := json.RawMessage(fmt.Sprintf(`{"tasks":[%q],"timeout":"1ms"}`, validationTask.Name))
+	for _, phase := range []corev1alpha1.TaskPhase{corev1alpha1.TaskPhaseRunning, corev1alpha1.TaskPhaseSucceeded} {
+		validationTask.Status.Phase = phase
+		if err := fakeClient.Status().Update(toolCtx, validationTask); err != nil {
+			t.Fatal(err)
+		}
+		result, err := tool.Execute(toolCtx, args)
+		if err != nil {
+			t.Fatalf("Execute() error = %v", err)
+		}
+		var waitResult WaitForTasksResult
+		if err := json.Unmarshal([]byte(result), &waitResult); err != nil {
+			t.Fatal(err)
+		}
+		if waitResult.Completed != (phase == corev1alpha1.TaskPhaseSucceeded) || len(waitResult.Results) != 1 ||
+			waitResult.Results[0].Task != validationTask.Name || waitResult.Results[0].Phase != string(phase) {
+			t.Fatalf("authorized validation child poll at %s = %#v", phase, waitResult)
+		}
 	}
 }
 
