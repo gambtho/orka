@@ -368,6 +368,9 @@ func TestEffectiveStatusCodeReportsSPAFallbackAsSuccess(t *testing.T) {
 		{"api path", "/api/v1/missing", fiber.StatusNotFound},
 		{"healthz", "/healthz", fiber.StatusNotFound},
 		{"readyz", "/readyz", fiber.StatusNotFound},
+		{"openai compat path", "/openai/v1/nonexistent", fiber.StatusNotFound},
+		{"openai unimplemented endpoint", "/openai/v1/responses", fiber.StatusNotImplemented},
+		{"anthropic compat path", "/anthropic/v1/messages/count_tokens", fiber.StatusNotFound},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
