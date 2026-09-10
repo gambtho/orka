@@ -974,6 +974,8 @@ func setTransactionCredentialAuthorizationEnv(
 type aiConfig struct {
 	providerType    string
 	model           string
+	temperature     string
+	maxTokens       string
 	prompt          string
 	systemPrompt    string
 	baseURL         string
@@ -1003,6 +1005,12 @@ func resolveAIConfig(task *corev1alpha1.Task, agent *corev1alpha1.Agent, provide
 			}
 			if agent.Spec.Model.Name != "" {
 				cfg.model = agent.Spec.Model.Name
+			}
+			if agent.Spec.Model.Temperature != nil {
+				cfg.temperature = strconv.FormatFloat(*agent.Spec.Model.Temperature, 'f', -1, 64)
+			}
+			if agent.Spec.Model.MaxTokens != nil {
+				cfg.maxTokens = strconv.FormatInt(int64(*agent.Spec.Model.MaxTokens), 10)
 			}
 		}
 		if agent.Spec.SystemPrompt != nil {
@@ -1086,15 +1094,26 @@ func (b *JobBuilder) addAIEnvVars(ctx context.Context, //nolint:gocyclo
 		cfg.systemPrompt = b.resolveConfigMapValue(ctx, agent.Namespace, agent.Spec.SystemPrompt.ConfigMapRef)
 	}
 
-	envVars = append(envVars, workerenv.AIWorkerEnv{
+	for _, envVar := range (workerenv.AIWorkerEnv{
 		Provider:        cfg.providerType,
 		Model:           cfg.model,
+		Temperature:     cfg.temperature,
+		MaxTokens:       cfg.maxTokens,
 		Prompt:          cfg.prompt,
 		SystemPrompt:    cfg.systemPrompt,
 		BaseURL:         cfg.baseURL,
 		AzureAPIVersion: cfg.azureAPIVersion,
 		ControllerMode:  string(b.ControllerMode),
-	}.EnvVars()...)
+	}).EnvVars() {
+		switch envVar.Name {
+		case workerenv.AITemperature, workerenv.AIMaxTokens:
+			// Reserve omitted settings too, so Task env and Agent Secret EnvFrom
+			// cannot supply values outside the Agent's model configuration.
+			envVars = setControllerEnvValue(envVars, envVar.Name, envVar.Value)
+		default:
+			envVars = append(envVars, envVar)
+		}
+	}
 
 	disableCoordinationToolInjection := task.Annotations[labels.AnnotationDisableCoordinationToolInject] == scheduledRunLabelValue
 
