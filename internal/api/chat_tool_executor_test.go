@@ -628,21 +628,24 @@ func TestExecute_InvalidJSON(t *testing.T) {
 
 func TestExecute_ChildSessionNamespace(t *testing.T) {
 	for _, tt := range []struct {
-		name       string
-		namespace  any
-		sessionRef string
-		schedule   string
-		isolation  bool
-		watchNS    string
-		wantError  string
-		wantTaskNS string
+		name         string
+		namespace    any
+		sessionRef   string
+		schedule     any
+		isolation    bool
+		watchNS      string
+		wantError    string
+		wantTaskNS   string
+		wantSchedule string
 	}{
 		{name: "default namespace rejects active session", sessionRef: "sess-12345678", wantError: "invalid_arguments"},
 		{name: "explicit namespace rejects active session", namespace: "default", sessionRef: "sess-12345678", wantError: "invalid_arguments"},
 		{name: "other namespace permits same name", namespace: "other", sessionRef: "sess-12345678", wantTaskNS: "other"},
 		{name: "stringified namespace permits same name", namespace: 789, sessionRef: "sess-12345678", wantTaskNS: "789"},
 		{name: "same namespace permits other session", sessionRef: "child-session", wantTaskNS: "default"},
-		{name: "scheduled parent permits active session", sessionRef: "sess-12345678", schedule: "0 */6 * * *", wantTaskNS: "default"},
+		{name: "empty schedule rejects active session", sessionRef: "sess-12345678", schedule: "", wantError: "invalid_arguments"},
+		{name: "scheduled parent permits active session", sessionRef: "sess-12345678", schedule: "0 */6 * * *", wantTaskNS: "default", wantSchedule: "0 */6 * * *"},
+		{name: "stringified schedule permits active session", sessionRef: "sess-12345678", schedule: 123, wantTaskNS: "default", wantSchedule: "123"},
 		{name: "namespace isolation remains enforced", namespace: "other", sessionRef: "sess-12345678", isolation: true, wantError: "permission_denied"},
 		{name: "watch namespace remains enforced", namespace: "other", sessionRef: "sess-12345678", watchNS: "default", wantError: "permission_denied"},
 	} {
@@ -650,7 +653,10 @@ func TestExecute_ChildSessionNamespace(t *testing.T) {
 			e := newTestExecutor()
 			e.enforceNamespaceIsolation = tt.isolation
 			e.watchNamespace = tt.watchNS
-			args := map[string]any{"name": "child", "prompt": "hello", "sessionRef": tt.sessionRef, "schedule": tt.schedule}
+			args := map[string]any{"name": "child", "prompt": "hello", "sessionRef": tt.sessionRef}
+			if tt.schedule != nil {
+				args["schedule"] = tt.schedule
+			}
 			if tt.namespace != nil {
 				args["namespace"] = tt.namespace
 			}
@@ -681,8 +687,8 @@ func TestExecute_ChildSessionNamespace(t *testing.T) {
 				t.Fatalf("created %d Tasks, want 1", len(tasks.Items))
 			}
 			task := tasks.Items[0]
-			if task.Spec.Schedule != tt.schedule {
-				t.Fatalf("child schedule = %q, want %q", task.Spec.Schedule, tt.schedule)
+			if task.Spec.Schedule != tt.wantSchedule {
+				t.Fatalf("child schedule = %q, want %q", task.Spec.Schedule, tt.wantSchedule)
 			}
 			if task.Namespace != tt.wantTaskNS || task.Spec.SessionRef == nil || task.Spec.SessionRef.Name != tt.sessionRef {
 				t.Fatalf("unexpected child session: namespace=%q sessionRef=%+v", task.Namespace, task.Spec.SessionRef)

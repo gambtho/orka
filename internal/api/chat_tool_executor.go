@@ -183,7 +183,10 @@ func (e *ToolExecutor) Execute(ctx context.Context, toolCall llm.ToolCall) (stri
 	}
 	// Scheduled parents do not acquire the session lock, and their future runs
 	// are not part of this chat turn's wait set.
-	schedule, _ := args["schedule"].(string)
+	var schedule string
+	if value, present := args["schedule"]; present {
+		schedule = fmt.Sprint(value)
+	}
 	if toolCall.Name == chatCreateAITaskTool && schedule == "" &&
 		strings.TrimSpace(sessionRef) != "" && targetNamespace == e.namespace &&
 		strings.TrimSpace(sessionRef) == strings.TrimSpace(e.sessionID) {
