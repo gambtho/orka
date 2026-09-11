@@ -22,23 +22,29 @@ import (
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/controller"
+	"github.com/orka-agents/orka/internal/executionmode"
 	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/llm"
 	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/internal/tools"
 )
 
-const taskCreatedMsg = "Task created"
+const (
+	taskCreatedMsg   = "Task created"
+	toolNamespaceArg = "namespace"
+)
 
 // ToolExecutor executes orchestrator LLM tool calls by creating and managing
 // Kubernetes resources (Tasks, Agents, Tools, Sessions).
 type ToolExecutor struct {
 	client                    client.Client
+	policyReader              client.Reader
 	kubeClient                kubernetes.Interface
 	sessionManager            *controller.SessionManager
 	namespace                 string
 	provider                  string
 	providerType              string
+	executionMode             executionmode.Mode
 	sessionID                 string
 	taskSeq                   atomic.Int32
 	tasksCreated              int
@@ -47,6 +53,8 @@ type ToolExecutor struct {
 	watchNamespace            string
 	enforceNamespaceIsolation bool
 	resultStore               store.ResultStore
+	gatewayEventStore         store.GatewayEventStore
+	userInfo                  *UserInfo
 	registry                  *tools.Registry
 	allowedToolNames          map[string]struct{}
 	authorizeTaskCreate       func(context.Context, *corev1alpha1.Task) error
@@ -55,6 +63,17 @@ type ToolExecutor struct {
 	authorizeAgentUpdate      func(context.Context, *corev1alpha1.Agent) error
 	authorizeAgentDelete      func(context.Context, *corev1alpha1.Agent) error
 	authorizeSecretRead       func(context.Context, string, string) error
+}
+
+// SetExecutionMode supplies the immutable installation mode used by trusted
+// Agent-producing chat tools.
+func (e *ToolExecutor) SetExecutionMode(mode executionmode.Mode) {
+	e.executionMode = mode
+}
+
+// SetPolicyReader supplies the authoritative reader used by coordination tools.
+func (e *ToolExecutor) SetPolicyReader(reader client.Reader) {
+	e.policyReader = reader
 }
 
 // NewToolExecutor creates a new ToolExecutor.
@@ -152,7 +171,16 @@ func (e *ToolExecutor) Execute(ctx context.Context, toolCall llm.ToolCall) (stri
 		recordRejectedToolCall(ctx, toolCall, resultStr)
 		return resultStr, marshalErr
 	}
-	if sessionRef, _ := args["sessionRef"].(string); strings.TrimSpace(sessionRef) != "" &&
+	// Match the effective string values used by the tools when constructing Tasks.
+	targetNamespace := e.namespace
+	if value, present := args[toolNamespaceArg]; present && fmt.Sprint(value) != "" {
+		targetNamespace = fmt.Sprint(value)
+	}
+	var sessionRef string
+	if value, present := args["sessionRef"]; present {
+		sessionRef = fmt.Sprint(value)
+	}
+	if strings.TrimSpace(sessionRef) != "" && targetNamespace == e.namespace &&
 		strings.TrimSpace(sessionRef) == strings.TrimSpace(e.sessionID) {
 		result := toolError("invalid_arguments", "child task sessionRef cannot reuse the active chat session", "Use a different session name or omit sessionRef")
 		resultStr, err := marshalResult(result)
@@ -166,6 +194,7 @@ func (e *ToolExecutor) Execute(ctx context.Context, toolCall llm.ToolCall) (stri
 	// Set up ToolContext for registry-based tools
 	tc := &tools.ToolContext{
 		Client:                    e.client,
+		PolicyReader:              e.policyReader,
 		KubeClient:                e.kubeClient,
 		Namespace:                 e.namespace,
 		SessionID:                 e.sessionID,
@@ -173,6 +202,7 @@ func (e *ToolExecutor) Execute(ctx context.Context, toolCall llm.ToolCall) (stri
 		Tenant:                    e.namespace,
 		Provider:                  e.provider,
 		ProviderType:              e.providerType,
+		ExecutionMode:             e.executionMode,
 		WatchNamespace:            e.watchNamespace,
 		EnforceNamespaceIsolation: e.enforceNamespaceIsolation,
 		ResultStore:               e.resultStore,
@@ -216,6 +246,7 @@ func (e *ToolExecutor) Execute(ctx context.Context, toolCall llm.ToolCall) (stri
 		},
 		IncrementTasks: func() { e.tasksCreated++ },
 	}
+	authorizeExternalToolContext(tc, e.userInfo, e.gatewayEventStore)
 	toolCtx = tools.WithToolContext(toolCtx, tc)
 
 	// Marshal args to JSON for the Tool interface
