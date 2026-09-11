@@ -199,11 +199,17 @@ func (m *SessionManager) AppendMessages(ctx context.Context, task *corev1alpha1.
 		return nil
 	}
 
-	if _, err := m.store.GetSession(ctx, task.Namespace, task.Spec.SessionRef.Name); err != nil {
+	session, err := m.store.GetSession(ctx, task.Namespace, task.Spec.SessionRef.Name)
+	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			return nil
 		}
 		return err
+	}
+	// Rejected Tasks and scheduled parents can finish without ever acquiring
+	// this Session. Only its current Task incarnation may append a transcript.
+	if task.Name == "" || session.ActiveTask != task.Name || session.ActiveTaskUID != string(task.UID) {
+		return nil
 	}
 
 	var prompt, response string
@@ -247,7 +253,11 @@ func (m *SessionManager) AppendMessages(ctx context.Context, task *corev1alpha1.
 		return nil
 	}
 
-	return m.store.AppendMessages(ctx, task.Namespace, task.Spec.SessionRef.Name, messages)
+	fenced, ok := m.store.(store.FencedSessionWriteStore)
+	if !ok {
+		return fmt.Errorf("session store does not support fenced transcript writes")
+	}
+	return fenced.AppendMessagesWithLock(ctx, task.Namespace, task.Spec.SessionRef.Name, task.Name, string(task.UID), messages)
 }
 
 // LoadTranscript loads the session transcript for a task.

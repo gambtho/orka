@@ -616,6 +616,7 @@ func TestSessionManager_AppendMessages_WithPromptAndResult(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      testTask,
 			Namespace: "default",
+			UID:       "completed-task-uid",
 		},
 		Spec: corev1alpha1.TaskSpec{
 			Prompt: "What is the answer?",
@@ -631,6 +632,7 @@ func TestSessionManager_AppendMessages_WithPromptAndResult(t *testing.T) {
 		},
 	}
 
+	require.NoError(t, sm.AcquireLock(ctx, task))
 	err := sm.AppendMessages(ctx, task, ss)
 	if err != nil {
 		t.Fatalf("AppendMessages() error = %v", err)
@@ -673,6 +675,7 @@ func TestSessionManager_AppendMessages_PromptIncludedSkipsDuplicateUserMessage(t
 		},
 		Status: corev1alpha1.TaskStatus{ResultRef: &corev1alpha1.ResultReference{Available: true}},
 	}
+	require.NoError(t, sm.AcquireLock(ctx, task))
 	if err := sm.AppendMessages(ctx, task, ss); err != nil {
 		t.Fatal(err)
 	}
@@ -715,6 +718,7 @@ func TestSessionManager_AppendMessages_NilResultStore(t *testing.T) {
 		},
 	}
 
+	require.NoError(t, sm.AcquireLock(ctx, task))
 	err := sm.AppendMessages(ctx, task, nil)
 	if err != nil {
 		t.Fatalf("AppendMessages() error = %v", err)

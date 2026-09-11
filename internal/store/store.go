@@ -130,7 +130,7 @@ type ExpiringSessionLockStore interface {
 }
 
 // FencedSessionWriteStore binds transcript and token writes to the exact active
-// transient lock owner so an expired request cannot write after takeover.
+// Task or transient lock owner so a stale owner cannot write after takeover.
 type FencedSessionWriteStore interface {
 	AppendMessagesWithLock(ctx context.Context, namespace, name, ownerName, ownerUID string, messages []SessionMessage) error
 	UpdateTokenCountsWithLock(ctx context.Context, namespace, name, ownerName, ownerUID string, inputTokens, outputTokens int) error

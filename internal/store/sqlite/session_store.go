@@ -784,7 +784,7 @@ func (s *Store) AppendMessages(ctx context.Context, namespace, name string, mess
 	return s.appendMessages(ctx, namespace, name, "", "", messages)
 }
 
-// AppendMessagesWithLock requires the exact transient lock owner through the
+// AppendMessagesWithLock requires the exact active lock owner through the
 // whole transaction, preventing writes after lease expiry and takeover.
 func (s *Store) AppendMessagesWithLock(
 	ctx context.Context,
