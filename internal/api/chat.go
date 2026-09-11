@@ -50,6 +50,9 @@ const (
 	chatDurabilityTimeout = 10 * time.Second
 	chatRoleUser          = "user"
 	chatError             = "error"
+	chatProviderKey       = "provider"
+	chatModelKey          = "model"
+	chatSuccessKey        = "success"
 )
 
 const (
@@ -580,9 +583,9 @@ func (ch *ChatHandler) sendChatStream(c fiber.Ctx, req chatStreamRequest) error 
 			_ = writeSSE(w, event, data)
 		}
 		statusData, _ := json.Marshal(map[string]string{
-			"sessionId": req.sessionID,
-			"provider":  req.provider.Name(),
-			"model":     req.model,
+			"sessionId":     req.sessionID,
+			chatProviderKey: req.provider.Name(),
+			chatModelKey:    req.model,
 		})
 		emitSSE("status", string(statusData))
 
@@ -1146,7 +1149,7 @@ func (ch *ChatHandler) executeToolCalls(
 
 		result, execErr := executor.Execute(ctx, tc)
 		if execErr != nil {
-			errResult := map[string]any{"success": false, chatError: execErr.Error()}
+			errResult := map[string]any{chatSuccessKey: false, chatError: execErr.Error()}
 			if errJSON, jsonErr := json.Marshal(errResult); jsonErr == nil {
 				result = string(errJSON)
 			} else {
@@ -1348,8 +1351,8 @@ func (ch *ChatHandler) HandleChatConfig(c fiber.Ctx) error {
 	}
 	return c.JSON(fiber.Map{
 		"enabled":                 ch.config.Enabled,
-		"provider":                provider,
-		"model":                   model,
+		chatProviderKey:           provider,
+		chatModelKey:              model,
 		"requireExplicitProvider": requireExplicitProvider,
 		"maxIterations":           ch.config.MaxIterations,
 		"maxDuration":             ch.config.MaxDuration.String(),
