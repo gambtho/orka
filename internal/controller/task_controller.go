@@ -126,6 +126,7 @@ type TaskReconciler struct {
 	ACPArtifactRetirer                artifactcap.IdentityRetirer
 	ACPPublicationReclaimer           ACPPublicationReclaimer
 	ControllerEpochManager            *ControllerEpochManager
+	ControllerNamespace               string
 	ACPAdmissionGate                  *ACPAdmissionGate
 	HarnessV1Enabled                  bool
 	HarnessV1Endpoint                 string
@@ -203,7 +204,6 @@ type TaskReconciler struct {
 // The Events-v1 retention recorder needs write verbs: recording emits create
 // and patch requests that the read-only grant rejects at the API server.
 // +kubebuilder:rbac:groups=events.k8s.io,resources=events,verbs=get;list;create;patch
-// +kubebuilder:rbac:groups=ate.dev,resources=actortemplates,verbs=get;list;watch
 // +kubebuilder:rbac:groups=extensions.agents.x-k8s.io,resources=sandboxtemplates,verbs=get;list;watch
 // +kubebuilder:rbac:groups=extensions.agents.x-k8s.io,resources=sandboxclaims,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=extensions.agents.x-k8s.io,resources=sandboxwarmpools,verbs=get;list;watch
@@ -543,6 +543,13 @@ func (r *TaskReconciler) handleDeletion(ctx context.Context, task *corev1alpha1.
 				return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
 			}
 		} else {
+			prepared, err := r.prepareACPClassWorkspaceDeletion(ctx, task)
+			if err != nil {
+				return ctrl.Result{}, err
+			}
+			if !prepared {
+				return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
+			}
 			ready, err := r.acpTaskDeletionReady(ctx, task)
 			if err != nil {
 				return ctrl.Result{}, err

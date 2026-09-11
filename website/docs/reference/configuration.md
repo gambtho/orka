@@ -400,11 +400,15 @@ spec:
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `templateRef.name` | string | required | Substrate `ActorTemplate` used for pool members. |
-| `templateRef.namespace` | string | Pool namespace | Namespace containing the `ActorTemplate`. |
+| `templateRef.namespace` | string | Pool namespace | Native Substrate Atespace containing the `ActorTemplate`. |
 | `workerPoolRef.name` | string | empty | Optional Substrate `WorkerPool` used for capacity and density reporting. |
 | `workerPoolRef.namespace` | string | Pool namespace | Namespace containing the `WorkerPool`. |
 | `targetActors` | integer | `0` | Desired stateful actor count, capped at `1000`. References from Tasks or Tools require at least `1`. |
 | `precreateActors` | boolean | `false` | Pre-create deterministic warm actors up to `targetActors`. |
+
+`spec.templateRef` is immutable. Orka records the first accepted native template
+UID in `status.templateUID`, including for empty pools. Replacing the native
+template under the same name requires a new pool.
 
 For built-in OpenCode Agents, `spec.model.name` must use literal
 `provider/model` form and both `spec.model.contextWindow` and
@@ -985,6 +989,7 @@ below happens until you turn them on.
 | `--workspace-class-use-admission-enabled=true` | — | **Required.** The controller refuses to start without it. |
 | `--acp-workspace-dispatch-enabled` | — | Lets agent Tasks actually request a workspace. |
 | `--agent-sandbox-enabled` *or* `--substrate-enabled` | — | Picks the backend. Without one, workspace Tasks fail closed. |
+| `--substrate-direct-egress-enabled` | `ORKA_SUBSTRATE_DIRECT_EGRESS_ENABLED` | Required for native Substrate ACP admission. Acknowledges ateapi's `--egress-gateway-address=` configuration so worker NetworkPolicies see actual destinations. Defaults to `false`; suspension and cleanup still work. |
 | `--enable-fake-workspace-provider` | `ORKA_ENABLE_FAKE_WORKSPACE_PROVIDER` | Development only — see below. |
 
 The source Helm chart enables both admission gates for `harness-v2`. It does not expose
@@ -1077,7 +1082,7 @@ slot-scoped.
 | `onDetach` | agent-sandbox | Substrate |
 | --- | --- | --- |
 | `Delete` | Works | Works |
-| `Suspend` | Works, when the profile sets `agentSandbox.suspend` | **Fails closed** — see below |
+| `Suspend` | Works, when the profile sets `agentSandbox.suspend` | Works with a DataOnly Substrate profile and the native provider pin |
 
 `Delete` is always executable.
 
@@ -1089,16 +1094,12 @@ Sandbox to `operatingMode: Suspended` so its Pod terminates while the PVC surviv
 Resume rotates the bootstrap material, refreshes the Sandbox blueprint, and returns the
 Sandbox to `Running` against the preserved volume.
 
-Substrate suspension is **contract-only today**. A session-reused class may declare
-`substrate.suspend.mode: DataOnly`, and the derived ActorTemplate does carry a
-controller-owned `DurableDir` volume with an explicit `onPause: Data`, `onCommit: Data`,
-`onResume.fromData: ColdBoot` policy — but the in-tree client rejects such pools before it
-creates an actor, because it cannot produce the proof the contract demands: an immutable
-Actor and ActorSnapshot UID/version with observed `Data` scope, compared atomically
-against the resume mutation. Pools suspended by an older controller without that proof
-stay quarantined; Orka never infers consent from a later observation. Full-memory restore
-is disabled outright — only repository and workspace data may survive, never process
-memory or credentials. ADR 0030 records the protocol requirement.
+Substrate DataOnly suspension uses verified native Tags, exact worker Pod
+termination, and fresh Actors for cold continuation. Its native lifecycle calls
+have no UID/version preconditions; Orka journals its own operation intents and
+requires fresh authenticated admission. Full-memory restore remains disabled.
+See [Substrate workspaces](../concepts/substrate.md) for the trusted provider
+boundary, checkpoint export, restore authorization, and explicit recovery.
 
 #### Expiry
 
@@ -1118,7 +1119,7 @@ ADRs 0026–0030 carry the full contract.
 
 ### Agent Sandbox controller settings
 
-Workspace-provider-backed ACP RuntimeSession dispatch requires `--acp-workspace-dispatch-enabled` plus the matching provider flag (`--agent-sandbox-enabled` or `--substrate-enabled`); with either unset, `Task.spec.execution.workspace` agent Tasks fail closed. The Substrate backend also uses `--substrate-api-*`, `--substrate-router-url`, and `--substrate-actor-dns-suffix`. The agent-sandbox router, template, timeout, and cleanup settings below belong to the earlier worker-path prototype and are not used by the ACP RuntimePool backend, which renders its own sandbox templates:
+Workspace-provider-backed ACP RuntimeSession dispatch requires `--acp-workspace-dispatch-enabled` plus the matching provider flag (`--agent-sandbox-enabled` or `--substrate-enabled`); with either unset, `Task.spec.execution.workspace` agent Tasks fail closed. The Substrate backend also uses `--substrate-api-*`, `--substrate-router-url`, and `--substrate-actor-dns-suffix`. Native ACP additionally requires `--substrate-direct-egress-enabled`, available through Helm as `controller.substrate.directEgressEnabled`. See [Substrate setup](../concepts/substrate.md) for the provider configuration this acknowledges. The agent-sandbox router, template, timeout, and cleanup settings below belong to the earlier worker-path prototype and are not used by the ACP RuntimePool backend, which renders its own sandbox templates:
 
 | Flag | Environment variable | Helm value | Default |
 |------|----------------------|------------|---------|

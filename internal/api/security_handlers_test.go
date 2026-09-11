@@ -1495,12 +1495,18 @@ func TestSecurityFindingMutationsResolveCanonicalAlias(t *testing.T) {
 		require.Equal(t, http.StatusAccepted, resp.StatusCode)
 		require.NoError(t, handlers.client.List(context.Background(), &tasks, client.InNamespace("demo")))
 		require.Len(t, tasks.Items, 2)
-		names := map[string]bool{}
+		// Task names include a timestamp. Check their canonical scan scope
+		// without generating new names against a later wall-clock second.
+		scanRuns := make([]string, 0, len(tasks.Items))
 		for i := range tasks.Items {
-			names[tasks.Items[i].Name] = true
+			task := &tasks.Items[i]
+			require.Equal(t, "finding-1", task.Labels[labels.LabelSecurityFindingID])
+			scanRunID := task.Labels[labels.LabelSecurityScanID]
+			prefix := fmt.Sprintf("scan-1-validation-%s-finding-1-%s-", security.StageValidation, scanRunID)
+			require.True(t, strings.HasPrefix(task.Name, prefix), "task %q does not identify its canonical scan occurrence", task.Name)
+			scanRuns = append(scanRuns, scanRunID)
 		}
-		require.True(t, names[security.ScanStageTaskName("scan-1", "validation", security.StageValidation, "finding-1-scan-run-1")])
-		require.True(t, names[security.ScanStageTaskName("scan-1", "validation", security.StageValidation, "finding-1-scan-run-3")])
+		require.ElementsMatch(t, []string{"scan-run-1", "scan-run-3"}, scanRuns)
 	})
 
 	t.Run("generate patch", func(t *testing.T) {
