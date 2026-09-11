@@ -6,6 +6,12 @@ description: "Running Orka's gateways: delivery guarantees, bounds, and what to 
 
 Generic gateways are enabled by default. They use the controller SQLite database for normalized ingress events, Session transcript provenance, and outbound delivery state.
 
+## External adapters
+
+The experimental [A2A adapter](https://github.com/orka-agents/orka-gateway-a2a) lets A2A clients call Orka Agents through the gateway. It runs separately from Orka and supports a text-only A2A subset.
+
+See its [setup guide](https://github.com/orka-agents/orka-gateway-a2a/blob/main/docs/getting-started.md) and [compatibility notes](https://github.com/orka-agents/orka-gateway-a2a/blob/main/docs/compatibility.md) for supported Orka versions, native-Agent prerequisites, and conformance limits.
+
 ## Default service levels and bounds
 
 The documented local reference target is p95 durable ingress acknowledgement below 500 ms for a 1,000-event burst with 100 active Sessions. This is an admission SLO, not an end-to-end model response SLO.
