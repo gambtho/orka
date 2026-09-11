@@ -574,7 +574,8 @@ func (s *Store) AcquireChatTurn(
 
 // ReleaseChatTurn clears a reservation only when it is still owned by turnID.
 // If this reservation created the Session, failed turns remove that row only
-// while it is still empty and otherwise untouched.
+// while it is still empty and otherwise untouched. Bound Kubernetes identities
+// must remain for coordinated cleanup.
 func (s *Store) ReleaseChatTurn(
 	ctx context.Context,
 	namespace, name, turnID string,
@@ -588,6 +589,7 @@ func (s *Store) ReleaseChatTurn(
 			`DELETE FROM sessions
 			 WHERE namespace = ? AND name = ? AND chat_turn_id = ?
 			   AND session_type = ? AND owner_type <> ? AND active_task = ''
+			   AND control_session_uid = ''
 			   AND message_count = 0 AND input_tokens = 0 AND output_tokens = 0
 			   AND NOT EXISTS (
 			     SELECT 1 FROM session_cleanup_intents
