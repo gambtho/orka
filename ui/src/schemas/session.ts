@@ -59,6 +59,7 @@ export const transcriptMessageSchema = z.object({
     id: z.string(),
     name: z.string(),
     arguments: z.unknown(),
+    argumentsText: z.string().optional(),
   })).optional(),
   timestamp: z.string().optional(),
   model: z.string().optional(),

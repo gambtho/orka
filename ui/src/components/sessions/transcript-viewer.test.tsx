@@ -145,6 +145,17 @@ describe('TranscriptViewer', () => {
     expect(content[1]).toBeVisible()
   })
 
+  it('uses exact argument text from the Session API when JSON numbers exceed browser precision', () => {
+    const argumentsText = '{\n  "big": 9223372036854775807,\n  "decimal": 0.1234567890123456789,\n  "nested": [\n    9007199254740993,\n    -0,\n    1.2300e+42\n  ],\n  "zero": -0\n}'
+    const transcript = `{"role":"assistant","content":"","toolCalls":[{"id":"precise-call","name":"read_value","arguments":{"big":9223372036854775807,"decimal":0.1234567890123456789,"nested":[9007199254740993,-0,1.2300e+42],"zero":-0},"argumentsText":${JSON.stringify(argumentsText)}}]}`
+
+    const { container } = render(<TranscriptViewer transcript={transcript} />)
+    fireEvent.click(screen.getByText('Tool call:'))
+    const content = container.querySelector('details pre')
+    expect(content?.textContent).toBe(argumentsText)
+    expect(content).toBeVisible()
+  })
+
   it('shows standalone named and unknown tool results without inventing a status', () => {
     const jsonl = [
       { role: 'tool', name: 'file_read', content: 'plain text result', toolCallID: 'missing-call' },

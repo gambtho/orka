@@ -1,6 +1,7 @@
 package sqlite
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"database/sql"
@@ -1021,7 +1022,13 @@ func scanSessionMessage(row gatewayRowScanner) (store.SessionMessage, error) {
 		}
 	}
 	if toolCallsJSON.Valid && toolCallsJSON.String != "" {
-		if err := json.Unmarshal([]byte(toolCallsJSON.String), &msg.ToolCalls); err != nil {
+		data := []byte(toolCallsJSON.String)
+		if !json.Valid(data) {
+			return msg, fmt.Errorf("failed to unmarshal tool_calls: invalid JSON")
+		}
+		decoder := json.NewDecoder(bytes.NewReader(data))
+		decoder.UseNumber()
+		if err := decoder.Decode(&msg.ToolCalls); err != nil {
 			return msg, fmt.Errorf("failed to unmarshal tool_calls: %w", err)
 		}
 	}

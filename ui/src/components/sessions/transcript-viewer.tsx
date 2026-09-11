@@ -80,7 +80,13 @@ export function TranscriptViewer({ transcript }: { transcript?: string }) {
                   <pre className="whitespace-pre-wrap text-sm font-sans">{msg.content}</pre>
                 )}
                 {toolCalls.map((call, callIndex) => (
-                  <ToolDetails key={callIndex} kind="call" name={call.name} id={call.id} content={call.arguments} />
+                  <ToolDetails
+                    key={callIndex}
+                    kind="call"
+                    name={call.name}
+                    id={call.id}
+                    content={typeof call.argumentsText === 'string' ? call.argumentsText : call.arguments}
+                  />
                 ))}
                 {(msg.model || msg.inputTokens || msg.outputTokens) && (
                   <div className="mt-2 flex gap-2 text-xs opacity-70">
