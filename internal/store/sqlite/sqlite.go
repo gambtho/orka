@@ -335,6 +335,10 @@ func migrate(db *sql.DB) error {
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_security_scan_runs_repo
 			ON security_scan_runs(namespace, repository_scan, started_at DESC)`,
+		`CREATE INDEX IF NOT EXISTS idx_security_scan_runs_admission
+			ON security_scan_runs(namespace, repository_scan)`,
+		`CREATE INDEX IF NOT EXISTS idx_security_scan_runs_active
+			ON security_scan_runs(namespace, repository_scan) WHERE phase IN ('pending', 'running')`,
 		`CREATE TABLE IF NOT EXISTS security_scan_task_ingestions (
 			namespace TEXT NOT NULL,
 			repository_scan TEXT NOT NULL,
@@ -1114,6 +1118,10 @@ func migrate(db *sql.DB) error {
 		return fmt.Errorf("migration failed: %w", err)
 	}
 	if err := ensureSQLiteColumns(db, "security_scan_runs", []sqliteColumnMigration{
+		{Name: "repository_scan_uid", Definition: "repository_scan_uid TEXT NOT NULL DEFAULT ''"},
+		{Name: "repository_scan_generation", Definition: "repository_scan_generation INTEGER NOT NULL DEFAULT 0"},
+		{Name: "cancellation_version", Definition: "cancellation_version INTEGER NOT NULL DEFAULT 0"},
+		{Name: "cancellation_pending", Definition: "cancellation_pending BOOLEAN NOT NULL DEFAULT FALSE"},
 		{Name: "slice_count", Definition: "slice_count INTEGER NOT NULL DEFAULT 0"},
 		{Name: "reviewed_slice_count", Definition: "reviewed_slice_count INTEGER NOT NULL DEFAULT 0"},
 		{Name: "skipped_slice_count", Definition: "skipped_slice_count INTEGER NOT NULL DEFAULT 0"},
@@ -1124,6 +1132,10 @@ func migrate(db *sql.DB) error {
 		{Name: "idempotency_key", Definition: "idempotency_key TEXT NOT NULL DEFAULT ''"},
 	}); err != nil {
 		return err
+	}
+	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_security_scan_runs_cancellation
+		ON security_scan_runs(namespace, repository_scan) WHERE cancellation_pending = TRUE`); err != nil {
+		return fmt.Errorf("migration failed: %w", err)
 	}
 	if err := ensureSQLiteColumns(db, "security_findings", []sqliteColumnMigration{
 		{Name: "slice_id", Definition: "slice_id TEXT NOT NULL DEFAULT ''"},
