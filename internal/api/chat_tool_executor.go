@@ -30,8 +30,9 @@ import (
 )
 
 const (
-	taskCreatedMsg   = "Task created"
-	toolNamespaceArg = "namespace"
+	taskCreatedMsg       = "Task created"
+	toolNamespaceArg     = "namespace"
+	chatCreateAITaskTool = "create_ai_task"
 )
 
 // ToolExecutor executes orchestrator LLM tool calls by creating and managing
@@ -180,7 +181,11 @@ func (e *ToolExecutor) Execute(ctx context.Context, toolCall llm.ToolCall) (stri
 	if value, present := args["sessionRef"]; present {
 		sessionRef = fmt.Sprint(value)
 	}
-	if strings.TrimSpace(sessionRef) != "" && targetNamespace == e.namespace &&
+	// Scheduled parents do not acquire the session lock, and their future runs
+	// are not part of this chat turn's wait set.
+	schedule, _ := args["schedule"].(string)
+	scheduledAIParent := toolCall.Name == chatCreateAITaskTool && schedule != ""
+	if !scheduledAIParent && strings.TrimSpace(sessionRef) != "" && targetNamespace == e.namespace &&
 		strings.TrimSpace(sessionRef) == strings.TrimSpace(e.sessionID) {
 		result := toolError("invalid_arguments", "child task sessionRef cannot reuse the active chat session", "Use a different session name or omit sessionRef")
 		resultStr, err := marshalResult(result)
