@@ -936,6 +936,7 @@ See [charts/orka/values.yaml](https://github.com/orka-agents/orka/blob/main/char
 | `--outbound-access-trusted-gateway-services` | `ORKA_OUTBOUND_ACCESS_TRUSTED_GATEWAY_SERVICES` env or `""` | Comma-separated exact `namespace/name:port` cross-namespace gateway Service refs; wildcards are rejected |
 | `--outbound-access-trusted-token-endpoint-services` | `ORKA_OUTBOUND_ACCESS_TRUSTED_TOKEN_ENDPOINT_SERVICES` env or `""` | Comma-separated exact `namespace/name:port` cross-namespace token endpoint Service refs; wildcards are rejected |
 | `--task-provenance-admission-enabled` | `ORKA_TASK_PROVENANCE_ADMISSION_ENABLED` env or `false` | Enable validating admission that rejects untrusted direct Kubernetes Task writes to Orka-managed provenance fields (`spec.requestedBy`, `spec.transaction`, and transaction metadata labels/annotations) |
+| `--task-provenance-admission-external` | `ORKA_TASK_PROVENANCE_ADMISSION_EXTERNAL` env or `false` | Declare that a separately deployed fail-closed Task provenance webhook protects coordination ancestry and workspace settlement metadata without hosting a manager webhook |
 | `--task-provenance-admission-trusted-users` | `ORKA_TASK_PROVENANCE_ADMISSION_TRUSTED_USERS` env or controller ServiceAccount usernames | Comma-separated Kubernetes usernames trusted to set Orka-managed Task provenance fields |
 | `--task-provenance-admission-trusted-service-accounts` | `ORKA_TASK_PROVENANCE_ADMISSION_TRUSTED_SERVICE_ACCOUNTS` env or configured AI/vendor worker ServiceAccounts | Comma-separated ServiceAccount names trusted in the target Task namespace to set Orka-managed Task provenance fields for child Task creation. Explicit values override the worker ServiceAccount defaults. |
 | `--ai-worker-image` | `ghcr.io/orka-agents/orka/ai-worker:latest` | Native AI worker container image |
@@ -985,7 +986,7 @@ below happens until you turn them on.
 | Flag | Environment variable | Purpose |
 | --- | --- | --- |
 | `--enable-workspace-provider-api` | `ORKA_ENABLE_WORKSPACE_PROVIDER_API` | Enables the provider, class, pool, and workspace reconcilers. |
-| `--task-provenance-admission-enabled=true` | — | **Required.** The controller refuses to start without it. |
+| `--task-provenance-admission-enabled=true` *or* `--task-provenance-admission-external=true` | — | **Required.** Task provenance must be protected by a controller-served or separately deployed webhook. |
 | `--workspace-class-use-admission-enabled=true` | — | **Required.** The controller refuses to start without it. |
 | `--acp-workspace-dispatch-enabled` | — | Lets agent Tasks actually request a workspace. |
 | `--agent-sandbox-enabled` *or* `--substrate-enabled` | — | Picks the backend. Without one, workspace Tasks fail closed. |
@@ -995,12 +996,11 @@ below happens until you turn them on.
 The source Helm chart enables both admission gates for `harness-v2`. It does not expose
 values for the provider API, workspace dispatch, or backend gates.
 
-`--task-provenance-admission-enabled` is not optional bookkeeping. Orka stores workspace
-settlement state on the Task under reserved `acp.workspace.orka.ai/` metadata, and the
-provenance admission webhook is the only thing stopping a client from writing that
-metadata directly. Install the webhook — either the controller-served one or the
-dedicated admission runtime — at the same time as the flag, or the protection is declared
-but not enforced.
+Task provenance protection is required because Orka stores workspace settlement state
+under reserved `acp.workspace.orka.ai/` Task metadata. The provenance webhook prevents
+clients from forging that metadata. Use `--task-provenance-admission-enabled` for the
+controller-served webhook. With the dedicated admission runtime, install and verify the
+fail-closed webhook configuration before enabling `--task-provenance-admission-external`.
 
 :::warning[Upgrades need the CRDs applied by hand]
 Helm installs a chart's `crds/` on first install and never updates them. Before enabling
@@ -1216,7 +1216,29 @@ The REST API rejects client-supplied `requestedBy` and `transaction` fields and 
 
 The webhook denies untrusted `CREATE` or `UPDATE` requests that set or modify Orka-managed provenance fields: `spec.requestedBy`, `spec.transaction`, `orka.ai/transaction-*` labels/annotations, `orka.ai/context-token-profile`, and the child token Secret annotation. By default, trusted writers are the Orka controller ServiceAccount usernames in the controller namespace and the configured AI and vendor worker ServiceAccount names in the target Task namespace; override them with `--task-provenance-admission-trusted-users` and `--task-provenance-admission-trusted-service-accounts`.
 
+Worker-created coordination children must name the caller's active Task as parent, verified through the request's Pod identity and the live Pod, Job, and Task ownership chain. A worker-created Task may omit `sessionRef` or inherit its parent's reference unchanged, including any history cutoff. Workers cannot introduce arbitrary sessions through a new child or an ownerless Task. Trusted controller writers can establish separately authorized session references.
+
+The webhook also makes coordination parent names and the parent Task controller-owner identity immutable after creation, including for trusted workers and controllers. Kubernetes cleanup controllers may remove ownership when orphaning a dependent; that Task then loses access through the removed parent. Internal cross-task transcript searches and coordination messages require protection through manager-hosted admission (`--task-provenance-admission-enabled=true`) or a separately deployed webhook (`--task-provenance-admission-external=true`). With both flags disabled, internal transcript search is limited to the caller's own session and coordination message requests are denied.
+
+Enabling either flag asserts that all retained Task ancestry was created under these checks. Admission does not validate old edges retroactively, and an unchanged update does not attest them. Before first enabling ancestry trust, or upgrading from a validator that did not authenticate coordination parents, follow the Task cleanup requirement below.
+
+Internal transcript search applies `sessionRef.maxMessages` and `sessionRef.throughMessageId` before matching messages or limiting results. When multiple Tasks reference the same session, search uses the intersection of their permitted history windows. An unbounded reference cannot widen a bounded one, and a missing cutoff message yields no matches for that session.
+
 How admission is deployed depends on the installation method. Helm releases install and enable Task-provenance admission automatically: the chart renders `task-provenance.<mode>.orka.ai` with `failurePolicy: Fail` against the release-local controller webhook Service and runs the controller with `--task-provenance-admission-enabled=true`, trusting the release controller identity. For Kustomize installations, admission deployment is opt-in and served by the dedicated admission runtime, not the controller manager: install `config/orka-admission` (Deployment, Service, NetworkPolicy, and RBAC for the admission runtime), then apply `config/orka-admission-webhooks` — which includes `taskprovenance.core.orka.ai` with `failurePolicy: Fail` — only after the readiness, TLS Secret, and CA-injection prerequisites in `config/orka-admission-webhooks/README.md` are met and the trusted identities embedded in `validating_webhook.yaml` match the admission-runtime arguments.
+
+The first `config/acp-production` workload wave leaves ancestry trust disabled. Enable `--task-provenance-admission-external=true` in the controller's post-admission configuration only after the separate webhook is installed and rejects unauthorized Task provenance changes. The flag enables ancestry trust for both internal worker API and brokered MCP coordination policy. Keep it disabled if the webhook wave is omitted, and disable it and complete the controller rollout before removing the webhook.
+
+### Upgrading internal worker authorization
+
+If existing Tasks were created without authenticated ancestry admission, prevent new Task creation in each affected watched namespace throughout the cutover. Drain all Tasks under the old controller, including ACP and remote-runtime agent Tasks. Preserve required outputs outside Task cleanup, then delete every pre-existing Task in those namespaces and wait for its finalizers to finish. Retained terminal Tasks must also be removed because their session references participate in coordination searches.
+
+Install the updated fail-closed admission policy before enabling either provenance flag and allowing Task creation again. An unchanged update or retained labels and owner references do not attest legacy ancestry. Helm enables the flag automatically, so complete this cleanup before upgrading that release. Routine restarts with continuously enforced ancestry admission do not require this cleanup.
+
+Before upgrading from a controller that does not record `Task.status.jobUID`, pause Task producers and drain all Job-backed Tasks while the old controller is still running. Wait until their attempts are terminal and their results and artifacts are stored. Apply the CRDs from the exact target chart, upgrade the controller and admission components, then resume Task producers. A rolling upgrade with active legacy Job-backed Tasks is not supported.
+
+The new authorization checks require the controller-recorded Job UID. They reject workers whose Tasks have only `status.jobName`, including otherwise valid Pods from the previous controller. Orka does not backfill UIDs by looking up Job names: namespace Job creators can replace those Jobs. Do not patch missing UIDs from a name lookup; finish the attempt before upgrading or explicitly submit a new Task after the upgrade.
+
+Built-in harness v1 artifact uploads also require the wrapper's Kubernetes workload identity. Configure the bound wrapper endpoint as a Kubernetes Service in the auth Secret's namespace. The uploading Pod must belong to a live ReplicaSet and Deployment selected by that Service. A worker Pod with a copy of the wrapper bearer does not receive artifact access.
 
 ## Prometheus metrics
 

@@ -124,17 +124,17 @@ func splitCommaList(raw string) []string {
 	return out
 }
 
-func validateWorkspaceProviderSecurityConfig(apiEnabled, classUseAdmissionEnabled, provenanceAdmissionEnabled bool) error {
+func validateWorkspaceProviderSecurityConfig(apiEnabled, classUseAdmissionEnabled, provenanceProtected bool) error {
 	if apiEnabled && !classUseAdmissionEnabled {
 		return fmt.Errorf("workspace provider API requires workspace class use admission")
 	}
-	if apiEnabled && !provenanceAdmissionEnabled {
+	if apiEnabled && !provenanceProtected {
 		// Settlement authorizes controller-privileged revocation and deletion
 		// through the reserved acp.workspace.orka.ai/ Task metadata; without
 		// the provenance webhook those keys are forgeable by any direct
 		// Kubernetes Task writer, so class-backed workspaces must never be
 		// served without it.
-		return fmt.Errorf("workspace provider API requires Task provenance admission (--task-provenance-admission-enabled) to protect the reserved workspace settlement metadata")
+		return fmt.Errorf("workspace provider API requires Task provenance admission (--task-provenance-admission-enabled or --task-provenance-admission-external) to protect the reserved workspace settlement metadata")
 	}
 	return nil
 }
@@ -253,6 +253,7 @@ func main() {
 	var metricsCertPath, metricsCertName, metricsCertKey string
 	var webhookCertPath, webhookCertName, webhookCertKey string
 	var taskProvenanceAdmissionEnabled bool
+	var taskProvenanceAdmissionExternal bool
 	var workspaceClassUseAdmissionEnabled bool
 	var taskProvenanceAdmissionTrustedUsers string
 	var taskProvenanceAdmissionTrustedServiceAccounts string
@@ -405,7 +406,11 @@ func main() {
 	flag.BoolVar(&taskProvenanceAdmissionEnabled, "task-provenance-admission-enabled",
 		envBool("ORKA_TASK_PROVENANCE_ADMISSION_ENABLED"),
 		"Enable validating admission that rejects untrusted direct Task writes to Orka-managed "+
-			"provenance fields.")
+			"provenance fields. Requires removal of Tasks whose ancestry predates authenticated admission.")
+	flag.BoolVar(&taskProvenanceAdmissionExternal, "task-provenance-admission-external",
+		envBool("ORKA_TASK_PROVENANCE_ADMISSION_EXTERNAL"),
+		"Task provenance is protected by a separately deployed fail-closed admission webhook. "+
+			"Requires removal of Tasks whose ancestry predates authenticated admission.")
 	flag.StringVar(&taskProvenanceAdmissionTrustedUsers, "task-provenance-admission-trusted-users",
 		os.Getenv("ORKA_TASK_PROVENANCE_ADMISSION_TRUSTED_USERS"),
 		"Comma-separated Kubernetes usernames trusted to set Orka-managed Task provenance fields. "+
@@ -774,6 +779,7 @@ func main() {
 	opts.BindFlags(flag.CommandLine)
 	acpUpgradeDrainOptions.BindFlags(flag.CommandLine)
 	flag.Parse()
+	taskProvenanceProtected := taskProvenanceAdmissionEnabled || taskProvenanceAdmissionExternal
 	if handled, err := controller.RunACPUpgradeDrainTriggerMode(context.Background(), acpUpgradeDrainOptions); handled {
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "ACP planned-upgrade drain trigger failed")
@@ -981,7 +987,7 @@ func main() {
 	if err := validateWorkspaceProviderSecurityConfig(
 		workspaceProviderAPIEnabled,
 		workspaceClassUseAdmissionEnabled,
-		taskProvenanceAdmissionEnabled,
+		taskProvenanceProtected,
 	); err != nil {
 		setupLog.Error(err, "invalid workspace provider security configuration")
 		os.Exit(1)
@@ -1156,7 +1162,7 @@ func main() {
 			taskProvenanceAdmissionTrustedServiceAccounts,
 			currentPodNamespace(),
 		)
-		orkaadmission.RegisterTaskProvenanceWebhook(mgr.GetWebhookServer(), mgr.GetScheme(), admissionConfig)
+		orkaadmission.RegisterTaskProvenanceWebhook(mgr.GetWebhookServer(), mgr.GetScheme(), admissionConfig, mgr.GetAPIReader())
 		setupLog.Info("enabled Task provenance validating admission",
 			"trustedUsers", strings.Join(admissionConfig.TrustedUsernames, ","),
 			"trustedServiceAccounts", strings.Join(admissionConfig.TrustedServiceAccountNames, ","),
@@ -1232,7 +1238,7 @@ func main() {
 
 	sqliteStore, err := sqlite.OpenLockedStore(storePath)
 	if err != nil {
-		setupLog.Error(err, "unable to acquire the exclusive SQLite store and run migrations", "path", storePath)
+		setupLog.Error(err, "unable to acquire and initialize the exclusive SQLite store", "path", storePath)
 		os.Exit(1)
 	}
 	if err := mgr.Add(sqliteStore); err != nil {
@@ -1554,7 +1560,7 @@ func main() {
 		MaxTasksPerNamespace:              maxTasksPerNamespaceValue,
 		ExecutionWorkspaceDefaultProvider: executionWorkspaceDefaultProvider,
 		WorkspaceProviderAPIEnabled:       workspaceProviderAPIEnabled,
-		WorkspaceSettlementProtected:      taskProvenanceAdmissionEnabled,
+		WorkspaceSettlementProtected:      taskProvenanceProtected,
 		ACPWorkspaceDispatchEnabled:       acpWorkspaceDispatchEnabled,
 		AgentSandboxEnabled:               agentSandboxEnabled,
 		AgentSandboxConfig:                agentSandboxConfig,
@@ -1731,7 +1737,7 @@ func main() {
 		if !workspaceAPIsInstalled {
 			setupLog.Info("workspace CRDs are not installed; skipping cleanup-only workspace controllers")
 		}
-		if workspaceAPIsInstalled && !taskProvenanceAdmissionEnabled {
+		if workspaceAPIsInstalled && !taskProvenanceProtected {
 			// Class-backed settlement performs controller-privileged deletion
 			// from the reserved Task metadata; without the provenance webhook
 			// those keys are forgeable. Cleanup-only installations (the stock
@@ -1912,6 +1918,8 @@ func main() {
 		Store:                     sqliteStore,
 		ResultStore:               sqliteStore,
 		ArtifactStore:             sqliteStore,
+		DurableControlStore:       durableControlStore,
+		ControllerEpochManager:    controllerEpochManager,
 		EnforceNamespaceIsolation: enforceNamespaceIsolation,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "RepositoryMonitor")
@@ -1979,6 +1987,7 @@ func main() {
 		Clientset:                 kubeClient,
 		APIReader:                 mgr.GetAPIReader(),
 		ControllerEpochs:          publisherControllerEpochs,
+		TaskProvenanceProtected:   taskProvenanceProtected,
 		E2EPromptFaultEnabled:     strings.TrimSpace(acpE2EPromptWriteAmbiguityMarker) != "",
 		Chat: api.ChatConfig{
 			Enabled:                chatEnabled,
@@ -2012,6 +2021,10 @@ func main() {
 				if !ok || task.Namespace != request.Namespace || task.UID != string(request.Metadata.TaskUID) {
 					return nil, fmt.Errorf("authenticated ACP MCP task context is unavailable")
 				}
+				dataGuard, ok := controller.ACPMCPTaskDataGuardFromContext(ctx)
+				if !ok {
+					return nil, fmt.Errorf("authenticated ACP MCP prompt data guard is unavailable")
+				}
 				return &tools.ToolContext{
 					Client: mgr.GetClient(), PolicyReader: mgr.GetAPIReader(), KubeClient: kubeClient, Namespace: request.Namespace,
 					SessionID: string(request.Authorization.RuntimeSessionUID), TaskID: task.Name,
@@ -2019,10 +2032,14 @@ func main() {
 					OperationID: string(request.Metadata.OperationID), ExternalEffects: durableControlStore,
 					Tenant: request.Namespace, WatchNamespace: watchNamespace,
 					EnforceNamespaceIsolation: enforceNamespaceIsolation, Brokered: true,
-					TaskProvenanceProtected:      taskProvenanceAdmissionEnabled,
+					TaskProvenanceProtected:      taskProvenanceProtected,
 					RepositoryValidationBindings: sqliteStore,
-					ResultStore:                  sqliteStore, MessageStore: sqliteStore, SessionDeleter: sessionManager,
-					MemoryReader: sqliteStore, MemoryProposalWriter: sqliteStore, TranscriptSearcher: sqliteStore,
+					ResultStore:                  sqliteStore, SessionDeleter: sessionManager,
+					MessageStore: api.NewTaskMessageStore(mgr.GetAPIReader(), sqliteStore,
+						crclient.ObjectKey{Namespace: task.Namespace, Name: task.Name}, task.UID, taskProvenanceProtected, dataGuard),
+					MemoryReader: sqliteStore, MemoryProposalWriter: sqliteStore,
+					TranscriptSearcher: api.NewTaskTranscriptSearcher(mgr.GetAPIReader(), sqliteStore, sqliteStore,
+						crclient.ObjectKey{Namespace: task.Namespace, Name: task.Name}, task.UID, taskProvenanceProtected, dataGuard),
 				}, nil
 			},
 		})

@@ -5,13 +5,14 @@ import (
 	"database/sql"
 	"errors"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/orka-agents/orka/internal/store"
 )
 
-func TestChatTurnMigrationPreservesExistingSession(t *testing.T) {
+func TestChatTurnRejectsHistoricalSchemaWithoutChangingSession(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "legacy-sessions.db")
 	legacyDB, err := sql.Open("sqlite", dbPath)
 	if err != nil {
@@ -43,35 +44,37 @@ func TestChatTurnMigrationPreservesExistingSession(t *testing.T) {
 		_ = legacyDB.Close()
 		t.Fatal(err)
 	}
+	before := storedSchemaSQL(t, legacyDB)
 	if err := legacyDB.Close(); err != nil {
 		t.Fatal(err)
 	}
 
 	db, err := NewDB(dbPath)
+	if db != nil {
+		_ = db.Close()
+		t.Fatal("NewDB() accepted a historical chat schema")
+	}
+	if err == nil || !strings.Contains(err.Error(), "unsupported SQLite schema") {
+		t.Fatalf("NewDB() error = %v, want unsupported SQLite schema", err)
+	}
+
+	legacyDB, err = sql.Open("sqlite", dbPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = db.Close() })
-	s := NewStore(db, dbPath)
-	now := time.Now().UTC()
-	created, err := s.AcquireChatTurn(context.Background(), &store.SessionRecord{
-		Namespace: "default", Name: "legacy-chat", SessionType: "chat",
-	}, "turn-migrated", now.Add(time.Minute))
-	if err != nil {
-		t.Fatalf("AcquireChatTurn() after migration error = %v", err)
+	t.Cleanup(func() { _ = legacyDB.Close() })
+	if after := storedSchemaSQL(t, legacyDB); after != before {
+		t.Fatal("NewDB() rewrote the rejected historical schema")
 	}
-	if created {
-		t.Fatal("AcquireChatTurn() reported an existing migrated session as newly created")
-	}
-	if err := s.ReleaseChatTurn(context.Background(), "default", "legacy-chat", "turn-migrated", created); err != nil {
-		t.Fatalf("ReleaseChatTurn() after migration error = %v", err)
-	}
-	session, err := s.GetSession(context.Background(), "default", "legacy-chat")
-	if err != nil {
+	var sessionType string
+	var messages, inputTokens, outputTokens int
+	if err := legacyDB.QueryRow(`SELECT session_type, message_count, input_tokens, output_tokens
+		FROM sessions WHERE namespace = 'default' AND name = 'legacy-chat'`).
+		Scan(&sessionType, &messages, &inputTokens, &outputTokens); err != nil {
 		t.Fatal(err)
 	}
-	if session.SessionType != "chat" || session.MessageCount != 3 || session.InputTokens != 11 || session.OutputTokens != 7 {
-		t.Fatalf("session changed during migration: %+v", session)
+	if sessionType != "chat" || messages != 3 || inputTokens != 11 || outputTokens != 7 {
+		t.Fatalf("rejected session changed: type=%q messages=%d input=%d output=%d", sessionType, messages, inputTokens, outputTokens)
 	}
 }
 
