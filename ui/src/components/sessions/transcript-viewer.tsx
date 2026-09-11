@@ -17,10 +17,7 @@ function parseTranscript(jsonl?: string): TranscriptMessage[] {
 }
 
 function formatToolContent(content: unknown): string {
-  if (typeof content === 'string') {
-    try { return JSON.stringify(JSON.parse(content), null, 2) }
-    catch { return content }
-  }
+  if (typeof content === 'string') return content
   return JSON.stringify(content, null, 2) ?? ''
 }
 

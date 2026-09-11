@@ -96,7 +96,7 @@ describe('TranscriptViewer', () => {
     expect(call.closest('details')).toHaveAttribute('open')
     expect(result.closest('details')).toHaveAttribute('open')
     expect(screen.getByText(/"namespace": "default"/)).toBeVisible()
-    expect(screen.getByText(/"success": true/)).toBeVisible()
+    expect(screen.getByText('{"success":true,"data":[]}')).toBeVisible()
     expect(screen.getAllByText('Call ID: call-1')).toHaveLength(2)
     expect(screen.getByText('No tasks found')).toBeVisible()
     expect([...container.querySelectorAll('pre')].every((element) => element.textContent)).toBe(true)
@@ -124,6 +124,25 @@ describe('TranscriptViewer', () => {
       'Tool result: list_tasks',
       'Tool result: get_task',
     ])
+  })
+
+  it('preserves serialized tool arguments and results verbatim', () => {
+    const argumentsText = '{"id":9223372036854775807}'
+    const resultText = '{\n  "id": 9223372036854775807,\n  "value": 0.1234567890123456789,\n  "zero": -0\n}\n'
+    const transcript = [
+      { role: 'assistant', toolCalls: [{ id: 'precise-call', name: 'read_value', arguments: argumentsText }] },
+      { role: 'tool', toolCallID: 'precise-call', content: resultText },
+    ].map((message) => JSON.stringify(message)).join('\n')
+
+    const { container } = render(<TranscriptViewer transcript={transcript} />)
+    fireEvent.click(screen.getByText('Tool call:'))
+    fireEvent.click(screen.getByText('Tool result:'))
+    const content = container.querySelectorAll('details pre')
+    expect(content).toHaveLength(2)
+    expect(content[0].textContent).toBe(argumentsText)
+    expect(content[1].textContent).toBe(resultText)
+    expect(content[0]).toBeVisible()
+    expect(content[1]).toBeVisible()
   })
 
   it('shows standalone named and unknown tool results without inventing a status', () => {
