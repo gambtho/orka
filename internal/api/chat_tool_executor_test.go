@@ -730,6 +730,24 @@ func TestExecute_FencesStringifiedSessionIdentity(t *testing.T) {
 	}
 }
 
+func TestExecute_NonCreatingToolIgnoresSessionRef(t *testing.T) {
+	e := newTestExecutor()
+	result, err := e.Execute(context.Background(), llm.ToolCall{
+		ID: "list-call", Name: "list_tasks",
+		Arguments: mustJSON(map[string]any{"sessionRef": e.sessionID}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var tr ToolResult
+	if err := json.Unmarshal([]byte(result), &tr); err != nil {
+		t.Fatal(err)
+	}
+	if !tr.Success {
+		t.Fatalf("non-creating tool rejected unused sessionRef: %s", result)
+	}
+}
+
 func TestExecute_UnknownTool(t *testing.T) {
 	e := newTestExecutor()
 	tc := llm.ToolCall{

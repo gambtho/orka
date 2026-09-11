@@ -184,8 +184,8 @@ func (e *ToolExecutor) Execute(ctx context.Context, toolCall llm.ToolCall) (stri
 	// Scheduled parents do not acquire the session lock, and their future runs
 	// are not part of this chat turn's wait set.
 	schedule, _ := args["schedule"].(string)
-	scheduledAIParent := toolCall.Name == chatCreateAITaskTool && schedule != ""
-	if !scheduledAIParent && strings.TrimSpace(sessionRef) != "" && targetNamespace == e.namespace &&
+	if toolCall.Name == chatCreateAITaskTool && schedule == "" &&
+		strings.TrimSpace(sessionRef) != "" && targetNamespace == e.namespace &&
 		strings.TrimSpace(sessionRef) == strings.TrimSpace(e.sessionID) {
 		result := toolError("invalid_arguments", "child task sessionRef cannot reuse the active chat session", "Use a different session name or omit sessionRef")
 		resultStr, err := marshalResult(result)
