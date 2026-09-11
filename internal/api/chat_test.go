@@ -776,7 +776,7 @@ func TestSaveChatSession(t *testing.T) {
 		assert.ErrorIs(t, getErr, store.ErrNotFound)
 	})
 
-	t.Run("only appends new messages (skips persisted)", func(t *testing.T) {
+	t.Run("appends only turn messages using the persisted count as a revision fence", func(t *testing.T) {
 		// Create a session with 2 messages already persisted
 		now := time.Now()
 		err := ss.CreateSession(ctx, &store.SessionRecord{
@@ -790,29 +790,26 @@ func TestSaveChatSession(t *testing.T) {
 
 		err = ss.AppendMessages(ctx, "default", "partial-session", []store.SessionMessage{
 			{Role: "user", Content: "old message", Timestamp: now},
+			{Role: "assistant", Content: "old response", Timestamp: now},
 		})
 		require.NoError(t, err)
 		turnID := reserveTestChatTurn(t, ch, "partial-session")
 
 		messages := []llm.Message{
-			{Role: "user", Content: "old message"},
 			{Role: "assistant", Content: "new response"},
 		}
-		// persistedCount=1 means skip first message
-		err = ch.saveChatSession(ctx, "default", "partial-session", messages, 1, ChatUsage{}, turnID)
+		err = ch.saveChatSession(ctx, "default", "partial-session", messages, 2, ChatUsage{}, turnID)
 		require.NoError(t, err)
 
 		stored, err := ss.LoadTranscript(ctx, "default", "partial-session", 0)
 		require.NoError(t, err)
-		assert.Len(t, stored, 2) // 1 old + 1 new
+		require.Len(t, stored, 3) // 2 old + 1 new
+		assert.Equal(t, "new response", stored[2].Content)
 	})
 
 	t.Run("no new messages is a no-op", func(t *testing.T) {
 		turnID := reserveTestChatTurn(t, ch, "noop-session")
-		messages := []llm.Message{
-			{Role: "user", Content: "already saved"},
-		}
-		err := ch.saveChatSession(ctx, "default", "noop-session", messages, 1, ChatUsage{}, turnID)
+		err := ch.saveChatSession(ctx, "default", "noop-session", nil, 0, ChatUsage{}, turnID)
 		require.NoError(t, err)
 	})
 
@@ -1521,6 +1518,191 @@ func TestRunToolLoop(t *testing.T) {
 		assert.True(t, hasToolResult, "should have tool_result SSE event")
 		assert.True(t, hasMessage, "should have message SSE event")
 	})
+}
+
+func TestRunToolLoopPreservesTranscriptAcrossTruncation(t *testing.T) {
+	for _, truncation := range []string{"configured", "context overflow"} {
+		for _, maxIterations := range []int{3, 2} {
+			for _, historyCount := range []int{4, 8} {
+				t.Run(fmt.Sprintf("%s/limit=%d/history=%d", truncation, maxIterations, historyCount), func(t *testing.T) {
+					ctx := context.Background()
+					const sessionID = "truncated-session"
+					fakeClient := fake.NewClientBuilder().WithScheme(newTestScheme()).Build()
+					ss := newTestSessionStore(t)
+					rs := newTestResultStore(t)
+					cfg := DefaultChatConfig()
+					cfg.MaxIterations = maxIterations
+					cfg.MaxSessionSize = 0
+					if truncation == "configured" {
+						cfg.MaxSessionSize = 400
+					}
+					ch := newTestChatHandler(t, fakeClient, ss, rs, cfg)
+
+					now := time.Now().UTC()
+					require.NoError(t, ss.CreateSession(ctx, &store.SessionRecord{
+						Namespace: "default", Name: sessionID, SessionType: "chat",
+						CreatedAt: now, UpdatedAt: now, InputTokens: 17, OutputTokens: 19,
+					}))
+					history := []store.SessionMessage{
+						{Role: "user", Content: "old request"},
+						{Role: "assistant", Content: "old tool call", ToolCalls: []llm.ToolCall{
+							{ID: "old-call", Name: "list_tasks", Arguments: json.RawMessage(`{}`)},
+						}},
+						{Role: "tool", ToolCallID: "old-call", Name: "list_tasks", Content: strings.Repeat("old result ", 200)},
+						{Role: "assistant", Content: "old answer"},
+					}
+					for len(history) < historyCount {
+						history = append(history,
+							store.SessionMessage{Role: "user", Content: "another old request"},
+							store.SessionMessage{Role: "assistant", Content: "another old answer"},
+						)
+					}
+					require.NoError(t, ss.AppendMessages(ctx, "default", sessionID, history))
+					original, err := ss.LoadTranscript(ctx, "default", sessionID, 0)
+					require.NoError(t, err)
+					turnID := reserveTestChatTurn(t, ch, sessionID)
+					messages, err := ch.loadChatSession(ctx, "default", sessionID)
+					require.NoError(t, err)
+					messages = append(messages, llm.Message{Role: "user", Content: "new request"})
+
+					firstTool := llm.ToolCall{ID: "new-call-1", Name: "list_tasks", Arguments: json.RawMessage(`{}`)}
+					secondTool := llm.ToolCall{ID: "new-call-2", Name: "list_tasks", Arguments: json.RawMessage(`{}`)}
+					// This intermediate exchange must survive even when it is too big
+					// for configured context or the halved overflow-retry budget.
+					intermediate := strings.Repeat("new intermediate reasoning ", 200)
+					provider := &mockAnthropicProvider{responses: []*llm.CompletionResponse{
+						{Content: intermediate, ToolCalls: []llm.ToolCall{firstTool}, InputTokens: 2, OutputTokens: 3},
+						{Content: "checking again", ToolCalls: []llm.ToolCall{secondTool}, InputTokens: 5, OutputTokens: 7},
+						{Content: "final answer", InputTokens: 11, OutputTokens: 13},
+					}}
+					if truncation == "context overflow" {
+						provider.responses = append(provider.responses[:1], append([]*llm.CompletionResponse{nil}, provider.responses[1:]...)...)
+						provider.errors = []error{nil, &llm.ProviderError{StatusCode: 400, Message: "context length exceeded"}}
+					}
+					exec := NewToolExecutor(fakeClient, nil, "default", sessionID, "", false, 5, time.Minute, rs)
+					content, usage, toolCalls, runErr := ch.runToolLoop(
+						ctx, provider, messages, "system prompt", exec.registry.ToLLMTools(chattools.ChatToolNames()), exec,
+						sessionID, "default", "test-model", 0.7, 4096, historyCount, nil, turnID,
+					)
+
+					// Check provider-facing truncation actually happened, independently
+					// of the durable transcript assertions below.
+					if truncation == "context overflow" {
+						require.Len(t, provider.requests, 4)
+						assert.Less(t, len(provider.requests[2].Messages), len(provider.requests[1].Messages))
+					} else {
+						require.Len(t, provider.requests, 3)
+						assert.Less(t, len(provider.requests[0].Messages), len(messages))
+					}
+					require.NoError(t, runErr)
+					assert.Equal(t, "final answer", content)
+					assert.Equal(t, 3, usage.LLMCalls)
+					assert.Equal(t, 2, usage.ToolCalls)
+					assert.Equal(t, 18, usage.InputTokens)
+					assert.Equal(t, 23, usage.OutputTokens)
+					require.Len(t, toolCalls, 2)
+
+					wantNew := []llm.Message{
+						{Role: "user", Content: "new request"},
+						{Role: "assistant", Content: intermediate, ToolCalls: []llm.ToolCall{firstTool}},
+						{Role: "tool", ToolCallID: "new-call-1", Name: "list_tasks", Content: `{"success":true,"data":[]}`},
+						{Role: "assistant", Content: "checking again", ToolCalls: []llm.ToolCall{secondTool}},
+						{Role: "tool", ToolCallID: "new-call-2", Name: "list_tasks", Content: `{"success":true,"data":[]}`},
+					}
+					if maxIterations == 2 {
+						wantNew = append(wantNew, llm.Message{Role: "user", Content: "[System: You have reached the maximum number of iterations. Please provide a final summary of what you accomplished.]"})
+						assert.Empty(t, provider.requests[len(provider.requests)-1].Tools)
+					}
+					wantNew = append(wantNew, llm.Message{Role: "assistant", Content: "final answer"})
+					stored, err := ss.LoadTranscript(ctx, "default", sessionID, 0)
+					require.NoError(t, err)
+					require.Len(t, stored, historyCount+len(wantNew))
+					assert.Equal(t, original, stored[:historyCount], "old transcript must remain unchanged")
+					loaded, err := ch.loadChatSession(ctx, "default", sessionID)
+					require.NoError(t, err)
+					assert.Equal(t, wantNew, loaded[historyCount:], "persist every new message, not synthetic truncation notes")
+					seenIDs := make(map[string]bool)
+					var lastOrder int64
+					for _, msg := range stored {
+						assert.NotEmpty(t, msg.ID)
+						assert.False(t, seenIDs[msg.ID], "message IDs must be unique")
+						seenIDs[msg.ID] = true
+						assert.Greater(t, msg.Order, lastOrder)
+						lastOrder = msg.Order
+					}
+					session, err := ss.GetSession(ctx, "default", sessionID)
+					require.NoError(t, err)
+					assert.Equal(t, len(stored), session.MessageCount)
+					assert.Equal(t, 35, session.InputTokens)
+					assert.Equal(t, 42, session.OutputTokens)
+				})
+			}
+		}
+	}
+}
+
+func TestRunToolLoopPreservesContinuationAndProgressAcrossTruncation(t *testing.T) {
+	ctx := context.Background()
+	const sessionID = "continuation-session"
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "running-task", Namespace: "default",
+			Labels: map[string]string{labels.LabelChatSession: sessionID},
+		},
+		Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseRunning},
+	}
+	fakeClient := fake.NewClientBuilder().WithScheme(newTestScheme()).WithObjects(task).
+		WithStatusSubresource(task).Build()
+	ss := newTestSessionStore(t)
+	rs := newTestResultStore(t)
+	cfg := DefaultChatConfig()
+	cfg.MaxIterations = 6
+	cfg.MaxSessionSize = 100
+	ch := newTestChatHandler(t, fakeClient, ss, rs, cfg)
+	turnID := reserveTestChatTurn(t, ch, sessionID)
+	provider := &chatMockProvider{}
+	for range 5 {
+		provider.responses = append(provider.responses, &llm.CompletionResponse{
+			Content: "still waiting", InputTokens: 2, OutputTokens: 3,
+		})
+	}
+	provider.responses = append(provider.responses, &llm.CompletionResponse{
+		Content: "finished", InputTokens: 5, OutputTokens: 7,
+	})
+	provider.beforeReturn = func() {
+		if provider.callCount == 6 {
+			task.Status.Phase = corev1alpha1.TaskPhaseSucceeded
+			require.NoError(t, fakeClient.Status().Update(ctx, task))
+		}
+	}
+	exec := NewToolExecutor(fakeClient, nil, "default", sessionID, "", false, 5, time.Minute, rs)
+	exec.tasksCreated = 1
+	content, usage, _, err := ch.runToolLoop(
+		ctx, provider, []llm.Message{{Role: "user", Content: "wait for task"}}, "system prompt", nil, exec,
+		sessionID, "default", "test-model", 0.7, 4096, 0, nil, turnID,
+	)
+	require.NoError(t, err)
+	assert.Equal(t, "finished", content)
+	assert.Equal(t, 6, usage.LLMCalls)
+	assert.Equal(t, 1, usage.TasksCreated)
+	assert.Equal(t, 15, usage.InputTokens)
+	assert.Equal(t, 22, usage.OutputTokens)
+	want := make([]llm.Message, 1, 13)
+	want[0] = llm.Message{Role: "user", Content: "wait for task"}
+	for range 5 {
+		want = append(want,
+			llm.Message{Role: "assistant", Content: "still waiting"},
+			llm.Message{Role: "user", Content: "[System: You have tasks still running. Do NOT stop. Call wait_for_task again for each running task until it reaches Succeeded or Failed, then call fetch_task_output to get the result.]"},
+		)
+	}
+	want = append(want,
+		llm.Message{Role: "user", Content: "[System: Progress check — summarize what you've done so far and what remains.]"},
+		llm.Message{Role: "assistant", Content: "finished"},
+	)
+	stored, err := ch.loadChatSession(ctx, "default", sessionID)
+	require.NoError(t, err)
+	require.Len(t, stored, len(want))
+	assert.Equal(t, want, stored)
 }
 
 // --- HandleChat ---

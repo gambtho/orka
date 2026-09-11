@@ -16,6 +16,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -914,6 +915,16 @@ func (ch *ChatHandler) runToolLoop(
 ) (string, ChatUsage, []ToolCallInfo, error) {
 	var usage ChatUsage
 	var allToolCalls []ToolCallInfo
+	if persistedCount < 0 || persistedCount > len(messages) {
+		return "", usage, nil, fmt.Errorf("invalid persisted message count %d for %d messages", persistedCount, len(messages))
+	}
+	// Provider context may shrink or gain synthetic truncation notes. Keep the
+	// new turn separately; persistedCount only fences its database commit.
+	turnMessages := slices.Clone(messages[persistedCount:])
+	appendTurnMessages := func(newMessages ...llm.Message) {
+		turnMessages = append(turnMessages, newMessages...)
+		messages = append(messages, newMessages...)
+	}
 	repetitionTracker := make(map[string]int)
 	start := time.Now()
 	taskClient := newExternalToolClient(executor.client, executor.kubeClient, executor.userInfo, namespace, executor.watchNamespace, executor.enforceNamespaceIsolation, executor.gatewayEventStore)
@@ -940,7 +951,7 @@ func (ch *ChatHandler) runToolLoop(
 		}
 
 		if content, hit, err := ch.handleIterationLimit(
-			iterCtx, iteration, provider, messages, systemPrompt, model, namespace, sessionID,
+			iterCtx, iteration, provider, messages, turnMessages, systemPrompt, model, namespace, sessionID,
 			maxTokens, persistedCount, temperature, emitSSE, executor, &usage, turnID, start,
 		); hit {
 			setUsageSpanAttributes(iterSpan, usage)
@@ -953,7 +964,7 @@ func (ch *ChatHandler) runToolLoop(
 		}
 
 		if iteration > 0 && iteration%5 == 0 {
-			messages = append(messages, llm.Message{
+			appendTurnMessages(llm.Message{
 				Role:    chatRoleUser,
 				Content: "[System: Progress check — summarize what you've done so far and what remains.]",
 			})
@@ -985,7 +996,7 @@ func (ch *ChatHandler) runToolLoop(
 					msgData, _ := json.Marshal(map[string]string{"content": resp.Content})
 					emitSSE("message", string(msgData))
 				}
-				messages = append(messages,
+				appendTurnMessages(
 					llm.Message{Role: "assistant", Content: resp.Content},
 					llm.Message{Role: chatRoleUser, Content: "[System: You have tasks still running. Do NOT stop. Call wait_for_task again for each running task until it reaches Succeeded or Failed, then call fetch_task_output to get the result.]"},
 				)
@@ -994,7 +1005,7 @@ func (ch *ChatHandler) runToolLoop(
 				continue
 			}
 			content, err := ch.handleFinalResponse(
-				iterCtx, resp.Content, messages, namespace, sessionID, persistedCount,
+				iterCtx, resp.Content, turnMessages, namespace, sessionID, persistedCount,
 				emitSSE, executor, &usage, turnID, start,
 			)
 			setUsageSpanAttributes(iterSpan, usage)
@@ -1006,9 +1017,8 @@ func (ch *ChatHandler) runToolLoop(
 			return content, usage, allToolCalls, err
 		}
 
-		var newToolCalls []ToolCallInfo
-		var iterBump int
-		messages, newToolCalls, iterBump = ch.executeToolCalls(iterCtx, resp, executor, emitSSE, messages, repetitionTracker)
+		toolMessages, newToolCalls, iterBump := ch.executeToolCalls(iterCtx, resp, executor, emitSSE, repetitionTracker)
+		appendTurnMessages(toolMessages...)
 		allToolCalls = append(allToolCalls, newToolCalls...)
 		usage.ToolCalls += len(newToolCalls)
 		iteration += iterBump
@@ -1022,7 +1032,7 @@ func (ch *ChatHandler) handleIterationLimit(
 	ctx context.Context,
 	iteration int,
 	provider llm.Provider,
-	messages []llm.Message,
+	messages, turnMessages []llm.Message,
 	systemPrompt, model, namespace, sessionID string,
 	maxTokens, persistedCount int,
 	temperature float64,
@@ -1036,10 +1046,12 @@ func (ch *ChatHandler) handleIterationLimit(
 		return "", false, nil
 	}
 
-	messages = append(messages, llm.Message{
+	terminationPrompt := llm.Message{
 		Role:    chatRoleUser,
 		Content: "[System: You have reached the maximum number of iterations. Please provide a final summary of what you accomplished.]",
-	})
+	}
+	messages = append(messages, terminationPrompt)
+	turnMessages = append(turnMessages, terminationPrompt)
 
 	resp, err := provider.Complete(ctx, &llm.CompletionRequest{
 		Model:        model,
@@ -1056,7 +1068,7 @@ func (ch *ChatHandler) handleIterationLimit(
 	usage.InputTokens += resp.InputTokens
 	usage.OutputTokens += resp.OutputTokens
 
-	finalMessages := append(messages, llm.Message{Role: "assistant", Content: resp.Content})
+	finalMessages := append(turnMessages, llm.Message{Role: "assistant", Content: resp.Content})
 	usage.Duration = time.Since(start).Round(time.Millisecond).String()
 	usage.TasksCreated = executor.tasksCreated
 	if err := ch.saveChatSession(
@@ -1111,20 +1123,19 @@ func (ch *ChatHandler) callLLMWithRetry(
 }
 
 // executeToolCalls iterates over tool calls from the LLM response, emits SSE events,
-// executes each tool, tracks repetitions, and appends results to messages.
+// executes each tool, tracks repetitions, and returns the new transcript messages.
 func (ch *ChatHandler) executeToolCalls(
 	ctx context.Context,
 	resp *llm.CompletionResponse,
 	executor *ToolExecutor,
 	emitSSE func(event, data string),
-	messages []llm.Message,
 	repetitionTracker map[string]int,
 ) ([]llm.Message, []ToolCallInfo, int) {
-	messages = append(messages, llm.Message{
+	messages := []llm.Message{{
 		Role:      "assistant",
 		Content:   resp.Content,
 		ToolCalls: resp.ToolCalls,
-	})
+	}}
 
 	toolCalls := make([]ToolCallInfo, 0, len(resp.ToolCalls))
 	var iterationBump int
@@ -1198,7 +1209,7 @@ func (ch *ChatHandler) executeToolCalls(
 func (ch *ChatHandler) handleFinalResponse(
 	ctx context.Context,
 	content string,
-	messages []llm.Message,
+	turnMessages []llm.Message,
 	namespace, sessionID string,
 	persistedCount int,
 	emitSSE func(event, data string),
@@ -1207,7 +1218,7 @@ func (ch *ChatHandler) handleFinalResponse(
 	turnID string,
 	start time.Time,
 ) (string, error) {
-	finalMessages := append(messages, llm.Message{Role: "assistant", Content: content})
+	finalMessages := append(turnMessages, llm.Message{Role: "assistant", Content: content})
 	usage.Duration = time.Since(start).Round(time.Millisecond).String()
 	usage.TasksCreated = executor.tasksCreated
 	if err := ch.saveChatSession(
@@ -1277,16 +1288,11 @@ func (ch *ChatHandler) loadChatSession(ctx context.Context, namespace, sessionID
 func (ch *ChatHandler) saveChatSession(
 	ctx context.Context,
 	namespace, sessionID string,
-	messages []llm.Message,
+	newMessages []llm.Message,
 	persistedCount int,
 	usage ChatUsage,
 	turnID string,
 ) error {
-	if persistedCount < 0 || persistedCount > len(messages) {
-		return fmt.Errorf("invalid persisted message count %d for %d messages", persistedCount, len(messages))
-	}
-
-	newMessages := messages[persistedCount:]
 	if len(newMessages) == 0 {
 		if usage.InputTokens != 0 || usage.OutputTokens != 0 {
 			return fmt.Errorf("cannot commit token usage without new transcript messages")
