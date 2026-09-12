@@ -105,6 +105,12 @@ func prepareNativeRemoteTools(
 	}
 	state.task = task.DeepCopy()
 	state.agent = agent.DeepCopy()
+	// Kubernetes UID/resource versions cannot revert to a bound version after
+	// mutation. Recheck after resolution, while the actual transport is frozen,
+	// so discovery cannot send credentials through a newly resolved binding.
+	executor.SetRemoteMCPPreparationFence(func(ctx context.Context, tool *corev1alpha1.Tool) error {
+		return state.validate(ctx, reader, tool)
+	})
 	for name, tool := range state.tools {
 		if err := bindNativeRemoteDependencies(ctx, reader, tool, task.Spec.Transaction.Context["secret"], nil); err != nil {
 			return ctx, err

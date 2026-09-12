@@ -279,6 +279,9 @@ spec:
               rule: '!has(self.mcp) || !has(self.mcp.remote) || !has(self.http) ||
                 !has(self.http.headers) || self.http.headers.all(k, !k.lowerAscii().startsWith(''mcp-'')
                 && !k.lowerAscii().startsWith(''proxy-''))'
+            - message: remote MCP credentials must use authSecretRef, not custom headers
+              rule: '!has(self.mcp) || !has(self.mcp.remote) || !has(self.http) ||
+                !has(self.http.headers) || self.http.headers.all(k, !k.lowerAscii().matches(''token|secret|password|credential|authorization|api[-_]?key''))'
           status:
             description: ToolStatus defines the observed state of Tool
             properties:

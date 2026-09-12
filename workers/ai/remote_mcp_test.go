@@ -56,6 +56,7 @@ func (r nativeRemoteResolver) Resolve(
 
 type nativeRemoteFixture struct {
 	client                 client.Client
+	gatewayURL             string
 	executor               *worker.ToolExecutor
 	tool                   *corev1alpha1.Tool
 	task                   *corev1alpha1.Task
@@ -102,6 +103,7 @@ func newNativeRemoteFixture(t *testing.T) *nativeRemoteFixture {
 		}
 	}))
 	t.Cleanup(server.Close)
+	f.gatewayURL = server.URL
 	f.tool = &corev1alpha1.Tool{
 		ObjectMeta: metav1.ObjectMeta{Name: "health", Namespace: "team", UID: "tool-uid", Generation: 1},
 		Spec: corev1alpha1.ToolSpec{

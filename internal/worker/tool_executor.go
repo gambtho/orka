@@ -109,8 +109,9 @@ type ToolExecutor struct {
 	transactionExchange         *TransactionExchangeConfig
 	authSecretValues            map[string]string
 
-	remoteMu       sync.Mutex
-	remoteBindings map[string][32]byte
+	remoteMu               sync.Mutex
+	remoteBindings         map[string][32]byte
+	remotePreparationFence func(context.Context, *corev1alpha1.Tool) error
 
 	ttsMu        sync.Mutex
 	ttsClient    *contexttoken.TTSClient

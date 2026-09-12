@@ -182,7 +182,10 @@ func TestRemoteMCPHeadersAllowMixedCaseWithoutAuthorityOverrides(t *testing.T) {
 		name  string
 		valid bool
 	}{
-		{"X-Request-ID", true}, {"x-request-id", true}, {"X-ReQuEsT-ID", true},
+		{"X-Request-ID", true}, {"x-request-id", true}, {"X-ReQuEsT-ID", true}, {"X-Tenant", true}, {"x-TeNaNt", true},
+		{"X-Api-Key", false}, {"api_key", false}, {"API-KEY", false}, {"ApiKey", false}, {"X_API_KEY", false},
+		{"X-Auth-Token", false}, {"X-Access-Token", false}, {"X_AUTH_TOKEN", false},
+		{"X-Client-Secret", false}, {"X-Password", false}, {"X-Credential", false}, {"X-Authorization", false},
 		{" X-Request-ID", false}, {"X-Request-ID ", false},
 		{"AuThOrIzAtIoN", false}, {"TxN-ToKeN", false}, {"McP-Session-ID", false}, {"PrOxY-Authorization", false},
 	} {

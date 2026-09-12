@@ -54,7 +54,7 @@ spec:
 
 This is an illustrative descriptor, not a deployable MCP service. Replace the endpoint and reviewed schema with those of your service and configure its fixed route on your gateway. Provision credential values separately in the named Secret; never put them in Tool headers, URLs, arguments, Agent prompts, or Task environment variables.
 
-A Tool selects exactly one remote/workspace/actor MCP backend. Remote MCP forbids `mcp.path`, `http.url`, non-POST method overrides, body authentication, endpoint interpolation, and transport/protocol/credential header overrides. A reviewed object input schema with resolvable local references is required. Parameter-schema checks run at controller and execution boundaries; the existing schemaless Kubernetes field is preserved for legacy Tools.
+A Tool selects exactly one remote/workspace/actor MCP backend. Remote MCP forbids `mcp.path`, `http.url`, non-POST method overrides, body authentication, endpoint interpolation, and transport/protocol/credential header overrides. Admission and consumers reject common credential-bearing header names such as `X-Api-Key`, `api_key`, `X-Auth-Token`, and `X-Access-Token`, case-insensitively. Ordinary metadata headers such as `X-Tenant` remain allowed. These conservative name checks do not detect secrets hidden in arbitrary metadata or descriptions; operators must still keep all credential values in named Secrets. A reviewed object input schema with resolvable local references is required. Parameter-schema checks run at controller and execution boundaries; the existing schemaless Kubernetes field is preserved for legacy Tools.
 
 Multiple Tools may share a credential and outbound policy. A separate connection inventory or discovery controller is not required.
 
@@ -73,7 +73,7 @@ Remote execution requires a referenced native Agent that enables that alias. A T
 
 If both initial Tool lookups fail, the worker cannot determine the alias's backend. To preserve legacy/built-in best-effort startup, that unresolved alias is omitted from model definitions and the invocation allowlist; it cannot execute as a remote Tool. Once a definition is known to be remote, any failed reread or binding is fatal. Startup success alone is not proof that every requested alias was available.
 
-The worker verifies its controller-issued Task UID and freezes the Task/Agent/Tool identity, advertised definition, and credential/policy dependency versions. Deletion, recreation, selection changes, or changed bindings fail closed rather than redirecting an already advertised call. Even a conservative dependency-version change can require starting a new Task.
+The worker verifies its controller-issued Task UID and freezes the Task/Agent/Tool identity, advertised definition, and credential/policy dependency versions. After resolving credentials and the gateway transport, it revalidates those bindings **before the first MCP request**, during both startup discovery and invocation. The prepared endpoint, headers, and TLS material are not resolved again after that fence. Deletion, recreation, selection changes, or changed bindings fail closed rather than redirecting an already advertised call. Even a conservative dependency-version change can require starting a new Task.
 
 ## Authentication and outbound governance
 

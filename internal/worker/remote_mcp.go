@@ -31,6 +31,13 @@ const (
 	remoteMCPTextContent    = "text"
 )
 
+// SetRemoteMCPPreparationFence installs the native Task's frozen-dependency
+// validation before use. It runs after credentials and transport are resolved,
+// but before the first MCP request, for both discovery and invocation.
+func (e *ToolExecutor) SetRemoteMCPPreparationFence(fence func(context.Context, *corev1alpha1.Tool) error) {
+	e.remotePreparationFence = fence
+}
+
 // VerifyRemoteMCPTool verifies the operator-reviewed descriptor under the same
 // Task authority and gateway transport used for calls. It exposes no server
 // instructions or metadata and retains no protocol session between operations.
@@ -113,6 +120,13 @@ func (e *ToolExecutor) prepareRemoteMCPRequest(ctx context.Context, tool *corev1
 	}
 	if !prepared.gateway || prepared.direct || strings.TrimSpace(prepared.transactionToken) == "" || strings.TrimSpace(req.Header.Get(transactiontoken.HeaderName)) == "" {
 		return preparedToolRequest{}, errors.New("remote MCP requires a gateway with Task transaction authority")
+	}
+	// Validate only after the final resolution. The request and TLS material below
+	// stay frozen: resolving again after this fence would reopen the startup race.
+	if e.remotePreparationFence != nil {
+		if err := e.remotePreparationFence(ctx, tool); err != nil {
+			return preparedToolRequest{}, err
+		}
 	}
 	if err := e.bindRemoteMCPTransport(prepared, false); err != nil {
 		return preparedToolRequest{}, err

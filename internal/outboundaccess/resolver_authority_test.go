@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/tokenexchange"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -24,6 +25,31 @@ func (r *credentialReadRecorder) Get(
 		r.reads++
 	}
 	return r.Reader.Get(ctx, key, object, options...)
+}
+
+func TestNamedAuthSecretRejectsDirectBeforeExchange(t *testing.T) {
+	policy := readyPolicy("direct", corev1alpha1.OutboundAccessPolicySpec{Direct: &corev1alpha1.DirectOutboundAccess{
+		Grant:         corev1alpha1.OutboundGrantTokenExchange,
+		TokenEndpoint: corev1alpha1.OutboundTokenEndpoint{URL: "https://issuer.example.test/token"},
+		Subject:       corev1alpha1.OutboundTokenSource{Source: corev1alpha1.OutboundTokenSourceTransactionToken},
+		Scopes:        []string{"read"}, ExpectedIssuedTokenType: tokenexchange.TokenTypeAccessToken,
+	}})
+	exchanger := &captureExchanger{result: tokenexchange.Result{AccessToken: "fixture-resource", TokenType: "Bearer"}}
+	resolver := &KubernetesResolver{
+		Reader:    fake.NewClientBuilder().WithScheme(resolverScheme(t)).WithObjects(policy).Build(),
+		Exchanger: exchanger,
+	}
+	_, err := resolver.Resolve(t.Context(), ResolveRequest{
+		Namespace: "tenant", PolicyName: policy.Name, TargetScheme: "https", HasAuthSecretRef: true,
+		TransactionToken: "fixture-task", ParentTransactionScopes: []string{"read"},
+		CredentialAuthorityEnforced: true, CredentialScopeAllowed: true,
+	})
+	if err == nil || !strings.Contains(err.Error(), "cannot coexist with authSecretRef") {
+		t.Fatal("named remote credential did not reject Direct preparation")
+	}
+	if exchanger.request.Endpoint != "" || exchanger.request.SubjectToken != "" {
+		t.Fatal("Direct preparation attempted an exchange before rejecting the named credential")
+	}
 }
 
 func TestDirectTLSCredentialAuthorityPrecedesReferenceSecretReads(t *testing.T) {

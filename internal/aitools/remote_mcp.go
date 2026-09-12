@@ -78,14 +78,23 @@ func validateRemoteMCPEndpoint(raw string) error {
 		return errors.New("remote MCP URL query is invalid")
 	}
 	for key := range query {
-		key = strings.ToLower(key)
-		for _, sensitive := range []string{"token", "secret", "password", "credential", "authorization", "api_key", "api-key", "apikey"} {
-			if strings.Contains(key, sensitive) {
-				return errors.New("remote MCP URL must not contain credential query parameters")
-			}
+		if remoteMCPCredentialName(key) {
+			return errors.New("remote MCP URL must not contain credential query parameters")
 		}
 	}
 	return nil
+}
+
+// remoteMCPCredentialName conservatively rejects common credential names, not
+// arbitrary secret values. Keep the remote-only header admission rules in sync.
+func remoteMCPCredentialName(name string) bool {
+	name = strings.ToLower(name)
+	for _, sensitive := range []string{"token", "secret", "password", "credential", "authorization", "api_key", "api-key", "apikey"} {
+		if strings.Contains(name, sensitive) {
+			return true
+		}
+	}
+	return false
 }
 
 // ResolveRemoteMCPParameters compiles the reviewed schema without loading any
@@ -203,6 +212,9 @@ func validateRemoteMCPHTTP(h *corev1alpha1.HTTPExecution) error {
 		return errors.New("remote MCP timeout must be positive")
 	}
 	for key := range h.Headers {
+		if remoteMCPCredentialName(key) {
+			return errors.New("remote MCP credentials must use authSecretRef, not custom headers")
+		}
 		normalized := strings.ToLower(strings.TrimSpace(key))
 		if normalized != strings.ToLower(key) || strings.HasPrefix(normalized, "mcp-") || strings.HasPrefix(normalized, "proxy-") {
 			return errors.New("remote MCP forbids protocol and authority header overrides")

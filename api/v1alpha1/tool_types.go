@@ -19,6 +19,7 @@ import (
 // +kubebuilder:validation:XValidation:rule="!has(self.mcp) || !has(self.mcp.remote) || !has(self.http) || !has(self.http.headers) || self.http.headers.all(k, !(k.lowerAscii() in ['host','authorization','cookie','txn-token','accept','content-type']))",message="remote MCP forbids authority and credential header overrides"
 // +kubebuilder:validation:XValidation:rule="!has(self.mcp) || !has(self.mcp.remote) || !has(self.http) || !has(self.http.headers) || self.http.headers.all(k, !(k.lowerAscii() in ['content-length','connection','transfer-encoding','upgrade','idempotency-key','last-event-id']))",message="remote MCP forbids protocol header overrides"
 // +kubebuilder:validation:XValidation:rule="!has(self.mcp) || !has(self.mcp.remote) || !has(self.http) || !has(self.http.headers) || self.http.headers.all(k, !k.lowerAscii().startsWith('mcp-') && !k.lowerAscii().startsWith('proxy-'))",message="remote MCP forbids MCP session and proxy header overrides"
+// +kubebuilder:validation:XValidation:rule="!has(self.mcp) || !has(self.mcp.remote) || !has(self.http) || !has(self.http.headers) || self.http.headers.all(k, !k.lowerAscii().matches('token|secret|password|credential|authorization|api[-_]?key'))",message="remote MCP credentials must use authSecretRef, not custom headers"
 type ToolSpec struct {
 	// Description is the tool description shown to the LLM
 	// +kubebuilder:validation:Required
