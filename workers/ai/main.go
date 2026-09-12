@@ -282,12 +282,9 @@ func run(transcriptPath string) (err error) {
 		if err != nil {
 			return err
 		}
-		resolvedContext := strings.TrimSpace(formatResolvedApprovalsContext(resolvedApprovals))
+		approvalPromptContext = strings.TrimSpace(formatResolvedApprovalsContext(resolvedApprovals))
 		if planContext != "" {
 			planPromptContext = "## Previous Plan State\n\n" + planContext
-		}
-		if resolvedContext != "" {
-			approvalPromptContext = resolvedContext
 		}
 		promptSections := make([]string, 0, 2)
 		if planPromptContext != "" {
