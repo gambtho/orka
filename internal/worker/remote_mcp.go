@@ -343,6 +343,9 @@ func verifyRemoteMCPDescriptor(ctx context.Context, httpClient *http.Client, p p
 			if err := decodeRemoteMCPJSON(descriptor.InputSchema, &observed); err != nil {
 				return err
 			}
+			if err := aitools.ValidateRemoteMCPNumericBudget(observed); err != nil {
+				return err
+			}
 			var selectedDescriptor struct {
 				Name         string          `json:"name"`
 				Description  string          `json:"description,omitempty"`

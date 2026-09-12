@@ -21,20 +21,32 @@ func IsRemoteMCP(tool *corev1alpha1.Tool) bool {
 
 var remoteMCPName = regexp.MustCompile(`^[A-Za-z0-9_.-]{1,128}$`)
 
+// ValidateRemoteMCPAgentReference checks the remote-only Task support boundary
+// before consumers read the Agent. It is independent of namespace isolation:
+// the initial backend does not grant workers cross-namespace Agent access.
+func ValidateRemoteMCPAgentReference(task *corev1alpha1.Task) error {
+	if task == nil || task.Spec.Type != corev1alpha1.TaskTypeAI || task.Spec.AgentRef == nil {
+		return errors.New("remote MCP requires a referenced native Agent")
+	}
+	if namespace := task.Spec.AgentRef.Namespace; namespace != "" && namespace != task.Namespace {
+		return errors.New("remote MCP requires the Agent and Task to share a namespace")
+	}
+	return nil
+}
+
 // ValidateRemoteMCPSelection enforces the native Agent's remote-only ceiling.
 // Resolve deliberately retains its historical additive behavior for other Tools.
 func ValidateRemoteMCPSelection(task *corev1alpha1.Task, agent *corev1alpha1.Agent, tool *corev1alpha1.Tool) error {
 	if !IsRemoteMCP(tool) {
 		return nil
 	}
-	if task == nil || task.Spec.Type != corev1alpha1.TaskTypeAI || task.Spec.AgentRef == nil || agent == nil || agent.Spec.Runtime != nil {
+	if err := ValidateRemoteMCPAgentReference(task); err != nil {
+		return err
+	}
+	if agent == nil || agent.Spec.Runtime != nil {
 		return errors.New("remote MCP requires a referenced native Agent")
 	}
-	namespace := task.Spec.AgentRef.Namespace
-	if namespace == "" {
-		namespace = task.Namespace
-	}
-	if agent.Name != task.Spec.AgentRef.Name || agent.Namespace != namespace || tool.Namespace != task.Namespace || !agent.DeletionTimestamp.IsZero() {
+	if agent.Name != task.Spec.AgentRef.Name || agent.Namespace != task.Namespace || tool.Namespace != task.Namespace || !agent.DeletionTimestamp.IsZero() {
 		return errors.New("remote MCP Agent or Tool identity does not match the Task")
 	}
 	for _, ref := range agent.Spec.Tools {
@@ -78,11 +90,25 @@ func validateRemoteMCPEndpoint(raw string) error {
 		return errors.New("remote MCP URL query is invalid")
 	}
 	for key := range query {
-		if remoteMCPCredentialName(key) {
+		if remoteMCPURLCredentialName(key) {
 			return errors.New("remote MCP URL must not contain credential query parameters")
 		}
 	}
 	return nil
+}
+
+// remoteMCPURLCredentialName retains the stricter remote token checks and the
+// controller's sensitiveURLParameter exact signed-query denylist. Signed-query
+// names stay URL-specific so this does not change custom-header admission.
+func remoteMCPURLCredentialName(name string) bool {
+	normalized := strings.ReplaceAll(strings.ToLower(strings.TrimSpace(name)), "_", "-")
+	switch normalized {
+	case "awsaccesskeyid", "googleaccessid", "key-pair-id", "sig", "signature",
+		"x-amz-credential", "x-amz-security-token", "x-amz-signature",
+		"x-goog-credential", "x-goog-signature", "x-ms-signature":
+		return true
+	}
+	return remoteMCPCredentialName(name)
 }
 
 // remoteMCPCredentialName conservatively rejects common credential names, not

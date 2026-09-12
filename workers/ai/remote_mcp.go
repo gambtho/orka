@@ -83,12 +83,11 @@ func prepareNativeRemoteTools(
 	if err != nil {
 		return ctx, err
 	}
-	agentNamespace := task.Spec.AgentRef.Namespace
-	if agentNamespace == "" {
-		agentNamespace = namespace
+	if err := aitools.ValidateRemoteMCPAgentReference(task); err != nil {
+		return ctx, err
 	}
 	agent := &corev1alpha1.Agent{}
-	agentKey := client.ObjectKey{Namespace: agentNamespace, Name: task.Spec.AgentRef.Name}
+	agentKey := client.ObjectKey{Namespace: task.Namespace, Name: task.Spec.AgentRef.Name}
 	if err := reader.Get(ctx, agentKey, agent); err != nil {
 		return ctx, errors.New("remote MCP Agent is unavailable")
 	}

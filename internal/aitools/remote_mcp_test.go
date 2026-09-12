@@ -53,6 +53,38 @@ func TestRemoteMCPSelectionCeiling(t *testing.T) {
 	}
 }
 
+func TestRemoteMCPSelectionAgentNamespace(t *testing.T) {
+	for _, namespace := range []string{"", "team", "other"} {
+		t.Run(namespace, func(t *testing.T) {
+			task := &corev1alpha1.Task{
+				ObjectMeta: metav1.ObjectMeta{Namespace: "team"},
+				Spec: corev1alpha1.TaskSpec{
+					Type: corev1alpha1.TaskTypeAI, AgentRef: &corev1alpha1.AgentReference{Name: "operator", Namespace: namespace},
+				},
+			}
+			agent := &corev1alpha1.Agent{
+				ObjectMeta: metav1.ObjectMeta{Name: "operator", Namespace: "team"},
+				Spec:       corev1alpha1.AgentSpec{Tools: []corev1alpha1.ToolReference{{Name: "remote"}}},
+			}
+			if namespace != "" {
+				agent.Namespace = namespace
+			}
+			tool := &corev1alpha1.Tool{
+				ObjectMeta: metav1.ObjectMeta{Name: "remote", Namespace: "team"},
+				Spec:       corev1alpha1.ToolSpec{MCP: &corev1alpha1.MCPToolServer{Remote: &corev1alpha1.RemoteMCPServer{}}},
+			}
+			err := ValidateRemoteMCPSelection(task, agent, tool)
+			if namespace == "other" {
+				if err == nil || err.Error() != "remote MCP requires the Agent and Task to share a namespace" {
+					t.Fatal("foreign Agent did not fail with the remote namespace support boundary")
+				}
+			} else if err != nil {
+				t.Fatalf("same-namespace Agent selection failed: %v", err)
+			}
+		})
+	}
+}
+
 func TestRemoteMCPParametersNumericBudget(t *testing.T) {
 	for _, tc := range []struct {
 		name, constraints string
@@ -177,12 +209,49 @@ func TestRemoteMCPParametersRetainLocalReferenceDialects(t *testing.T) {
 	}
 }
 
+func TestRemoteMCPURLCredentialQueries(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		valid bool
+	}{
+		{"awsaccesskeyid", false}, {"googleaccessid", false}, {"key-pair-id", false},
+		{"sig", false}, {"signature", false}, {"x-amz-credential", false},
+		{"x-amz-security-token", false}, {"x-amz-signature", false},
+		{"x-goog-credential", false}, {"x-goog-signature", false}, {"x-ms-signature", false},
+		{"next_token", false}, {"customTokenHint", false}, {"api_key", false},
+		{"route", true}, {"tenant", true}, {"signature-version", true},
+	} {
+		for _, name := range []string{tc.name, strings.ToUpper(tc.name), " " + strings.ReplaceAll(strings.ToUpper(tc.name), "-", "_") + " "} {
+			t.Run(name, func(t *testing.T) {
+				tool := &corev1alpha1.Tool{Spec: corev1alpha1.ToolSpec{
+					Parameters: &apiextensionsv1.JSON{Raw: []byte(`{"type":"object"}`)},
+					MCP: &corev1alpha1.MCPToolServer{Remote: &corev1alpha1.RemoteMCPServer{
+						URL: "https://example.com/mcp?route=health&" + url.QueryEscape(name) + "=fixture-value", ToolName: "read",
+					}},
+					HTTP: &corev1alpha1.HTTPExecution{
+						AuthSecretRef:           &corev1alpha1.SecretKeySelector{Name: "auth", Key: "token"},
+						OutboundAccessPolicyRef: &corev1alpha1.LocalObjectReference{Name: "egress"},
+					},
+				}}
+				err := ValidateRemoteMCPConfiguration(tool)
+				if (err == nil) != tc.valid {
+					t.Fatalf("query acceptance = %t; want %t", err == nil, tc.valid)
+				}
+				if err != nil && err.Error() != "remote MCP URL must not contain credential query parameters" {
+					t.Fatal("query rejection lost its safe category")
+				}
+			})
+		}
+	}
+}
+
 func TestRemoteMCPHeadersAllowMixedCaseWithoutAuthorityOverrides(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
 		valid bool
 	}{
 		{"X-Request-ID", true}, {"x-request-id", true}, {"X-ReQuEsT-ID", true}, {"X-Tenant", true}, {"x-TeNaNt", true},
+		{"Signature-Version", true}, {"Sig", true}, {"X-Amz-Signature", true}, {"Key-Pair-Id", true},
 		{"X-Api-Key", false}, {"api_key", false}, {"API-KEY", false}, {"ApiKey", false}, {"X_API_KEY", false},
 		{"X-Auth-Token", false}, {"X-Access-Token", false}, {"X_AUTH_TOKEN", false},
 		{"X-Client-Secret", false}, {"X-Password", false}, {"X-Credential", false}, {"X-Authorization", false},

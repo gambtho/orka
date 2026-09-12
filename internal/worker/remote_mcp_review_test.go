@@ -12,6 +12,55 @@ import (
 	"github.com/orka-agents/orka/internal/contexttoken"
 )
 
+func TestRemoteMCPDiscoveredSchemaNumericBudget(t *testing.T) {
+	for _, tc := range []struct {
+		name, reviewed, observed string
+		valid                    bool
+	}{
+		{"unchanged", `"maximum":1`, `"maximum":1`, true},
+		{"equivalent exact number", `"maximum":9007199254740993`, `"maximum":9007199254740993.0`, true},
+		{"equivalent exponent boundary", `"maximum":1e-65535`, `"maximum":1E-065535`, true},
+		{"equivalent aggregate boundary", `"minimum":1e-32767,"maximum":1e-32767`, `"maximum":1E-032767,"minimum":1E-032767`, true},
+		{"oversized exponent", `"maximum":1`, `"maximum":1e` + strings.Repeat("9", 8192), false},
+		{"equivalent beyond exponent budget", `"maximum":1e-65535`, `"maximum":10e-65536`, false},
+		{"equivalent beyond aggregate budget", `"minimum":1e-32767,"maximum":1e-32767`, `"minimum":10e-32768,"maximum":1e-32767`, false},
+	} {
+		for _, phase := range []string{"startup", "invocation"} {
+			t.Run(tc.name+"/"+phase, func(t *testing.T) {
+				f := &remoteProtocolFixture{list: func(_ int, _ json.RawMessage) string {
+					return `{"tools":[{"name":"service_health","inputSchema":{"type":"object","properties":{"value":{` + tc.observed + `}}}}]}`
+				}}
+				e := remoteTestExecutor(t, f.serve(t))
+				tool := remoteTestTool(t)
+				tool.Spec.Parameters.Raw = []byte(`{"type":"object","properties":{"value":{` + tc.reviewed + `}}}`)
+				var err error
+				if phase == "startup" {
+					err = e.VerifyRemoteMCPTool(t.Context(), tool)
+				} else {
+					_, err = e.Execute(t.Context(), tool, json.RawMessage(`{}`))
+				}
+				if tc.valid {
+					if err != nil {
+						t.Fatal("valid-equivalent discovered schema was rejected")
+					}
+				} else if err == nil || err.Error() != "remote MCP session: remote MCP numeric expansion exceeds limit" {
+					t.Errorf("overbudget discovered schema did not return the generic numeric budget error: %v", err)
+				}
+				wantCalls := int32(0)
+				if tc.valid && phase == "invocation" {
+					wantCalls = 1
+				}
+				if f.calls.Load() != wantCalls {
+					t.Errorf("tools/call count = %d; want %d", f.calls.Load(), wantCalls)
+				}
+				if f.lists.Load() != 1 || f.cleanup.Load() != 1 {
+					t.Error("discovery did not inspect and clean up its bounded session")
+				}
+			})
+		}
+	}
+}
+
 func TestRemoteMCPSSEOptionalFieldSpace(t *testing.T) {
 	for _, tc := range []struct {
 		name, event string
