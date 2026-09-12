@@ -34,6 +34,31 @@ const (
 	cliTaskTypeCont  = "container"
 )
 
+// completeTaskType suggests the canonical task types for flag completion,
+// filtered by the typed prefix. The suggestions are static, so completion
+// never contacts an Orka server.
+func completeTaskType(_ *cobra.Command, _ []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+	return completeWithPrefix(toComplete,
+		string(corev1alpha1.TaskTypeAI),
+		string(corev1alpha1.TaskTypeContainer),
+		string(corev1alpha1.TaskTypeAgent),
+	), cobra.ShellCompDirectiveNoFileComp
+}
+
+// completeTaskStatus suggests the canonical task phases for flag completion,
+// filtered by the typed prefix.
+func completeTaskStatus(_ *cobra.Command, _ []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+	return completeWithPrefix(toComplete,
+		string(corev1alpha1.TaskPhasePending),
+		string(corev1alpha1.TaskPhaseRunning),
+		string(corev1alpha1.TaskPhaseFinalizing),
+		string(corev1alpha1.TaskPhaseSucceeded),
+		string(corev1alpha1.TaskPhaseFailed),
+		string(corev1alpha1.TaskPhaseScheduled),
+		string(corev1alpha1.TaskPhaseCancelled),
+	), cobra.ShellCompDirectiveNoFileComp
+}
+
 func newTaskCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "task",
@@ -256,6 +281,7 @@ func newTaskCreateCmd() *cobra.Command {
 		cliTaskTypeAI,
 		"Task type: "+cliTaskTypeAI+", "+cliTaskTypeCont+", "+cliTaskTypeAgent,
 	)
+	_ = cmd.RegisterFlagCompletionFunc("type", completeTaskType)
 	cmd.Flags().StringVar(&image, "image", "", "Container image")
 	cmd.Flags().StringArrayVar(&commandVals, "command", nil, "Command entry to run (repeat for multiple entries)")
 	cmd.Flags().StringArrayVar(&argVals, "arg", nil, "Command argument (repeat for multiple arguments)")
@@ -346,6 +372,7 @@ func newTaskListCmd() *cobra.Command {
 	}
 
 	cmd.Flags().StringVar(&status, "status", "", "Filter by status (client-side scan; may page through many tasks)")
+	_ = cmd.RegisterFlagCompletionFunc("status", completeTaskStatus)
 	cmd.Flags().StringVar(&transactionID, "transaction", "", "Filter by transaction ID (client-side scan)")
 	cmd.Flags().IntVar(&limit, "limit", 20, "Maximum number of results")
 	cmd.Flags().StringVar(&continueToken, "continue", "", "Continue token for the next page")

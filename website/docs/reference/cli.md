@@ -358,6 +358,16 @@ orka completion fish > ~/.config/fish/completions/orka.fish
 
 Regenerate completions after upgrading `orka` if commands or flags change.
 
+Several flags offer value completion, so Tab suggests the valid choices without consulting the server:
+
+```bash
+orka task list --output <TAB>   # table, json, yaml
+orka task create --type <TAB>   # ai, container, agent
+orka task list --status <TAB>   # Pending, Running, Finalizing, ...
+```
+
+`task download --output` is left out on purpose: there the flag names a destination file, so completion keeps suggesting files.
+
 ## Other utility commands
 
 | Command | Purpose |
