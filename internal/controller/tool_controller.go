@@ -119,6 +119,13 @@ func (r *ToolReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 		return r.finalizeSubstrateMCPTool(ctx, tool)
 	}
 
+	// Accepted is remote-only, including while a new actor backend is still being provisioned.
+	if !aitools.IsRemoteMCP(tool) && meta.RemoveStatusCondition(&tool.Status.Conditions, "Accepted") {
+		if err := r.Status().Update(ctx, tool); err != nil {
+			return ctrl.Result{}, err
+		}
+	}
+
 	// Validate the tool configuration
 	if err := r.validateTool(ctx, tool); err != nil {
 		logger.Error(err, "Tool validation failed")

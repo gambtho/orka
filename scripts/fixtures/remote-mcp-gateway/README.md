@@ -21,15 +21,17 @@ The fixture's authentication unit test proves missing, expired, tampered and inc
 
 ## Recorded native Task proof
 
+Recorded against `461e21f3`, with argument validation and metadata-only gateway logging in place. Later preparation-fence, namespace, query-validation and status changes have automated regression coverage; this live cluster run was not repeated for those changes.
+
 Executed in a disposable kind Kubernetes v1.32.2 cluster with:
 
-- Changed Orka controller and AI-worker binaries built from this candidate.
+- Changed Orka controller and AI-worker binaries built from that revision.
 - Independently Helm-installed **kagent-tools 0.2.1**, Kubernetes provider in read-only mode, namespace-scoped to `team-mcp`, with no Secret reads.
 - Actual **qwen2.5:3b** through local **Ollama 0.11.8**; no mock model or external model API charge.
 - `Tool/remote-read` selecting `k8s_get_resources`, the exact reviewed `tools/list.inputSchema`, `operations-mcp/token`, and `OutboundAccessPolicy/remote-mcp-egress` pointing to this gateway.
 - A native `Agent/remote-reader` explicitly enabling the alias and a `type: ai` Task. The test provisioner used the trusted controller Kubernetes identity to create safe Task transaction metadata and an owner-referenced token Secret. This is not a demonstration that an ordinary unauthenticated Task submission creates transaction authority.
 
-After the review fixes, successful Task `remote-proof-feedback-final` performed this gateway sequence:
+Successful Task `remote-proof-feedback-final` performed this gateway sequence:
 
 ```text
 initialize → notifications/initialized → tools/list → DELETE
