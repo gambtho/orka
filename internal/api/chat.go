@@ -110,9 +110,9 @@ type ChatResponse struct {
 
 // ToolCallInfo describes a tool invocation and its result.
 type ToolCallInfo struct {
-	Name   string `json:"name"`
-	Args   any    `json:"args"`
-	Result any    `json:"result"`
+	Name   string          `json:"name"`
+	Args   json.RawMessage `json:"args"`
+	Result json.RawMessage `json:"result"`
 }
 
 // ChatUsage holds usage statistics for a chat turn.
@@ -1184,14 +1184,12 @@ func (ch *ChatHandler) executeToolCalls(
 			Content:    result,
 		})
 
-		var argsAny any
-		_ = json.Unmarshal(tc.Arguments, &argsAny)
-		var resultAny any
-		_ = json.Unmarshal([]byte(result), &resultAny)
+		// Preserve numeric precision and valid JSON numbers outside float64's
+		// range when returning the same tool data that the transcript stores.
 		toolCalls = append(toolCalls, ToolCallInfo{
 			Name:   tc.Name,
-			Args:   argsAny,
-			Result: resultAny,
+			Args:   tc.Arguments,
+			Result: json.RawMessage(result),
 		})
 	}
 
