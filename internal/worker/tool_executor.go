@@ -109,6 +109,9 @@ type ToolExecutor struct {
 	transactionExchange         *TransactionExchangeConfig
 	authSecretValues            map[string]string
 
+	remoteMu       sync.Mutex
+	remoteBindings map[string][32]byte
+
 	ttsMu        sync.Mutex
 	ttsClient    *contexttoken.TTSClient
 	ttsClientKey string
@@ -249,6 +252,11 @@ func NewToolExecutorForNamespace(namespace string, k8sClient kubernetes.Interfac
 
 // Execute executes a Tool CRD by making an HTTP request.
 func (e *ToolExecutor) Execute(ctx context.Context, tool *corev1alpha1.Tool, args json.RawMessage) (result string, err error) {
+	if tool != nil && tool.Spec.MCP != nil && tool.Spec.MCP.Remote != nil {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, remoteMCPTimeout(tool))
+		defer cancel()
+	}
 	if tool != nil && tool.Spec.HTTP != nil && tool.Spec.HTTP.Timeout != nil && tool.Spec.HTTP.Timeout.Duration > 0 {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, tool.Spec.HTTP.Timeout.Duration)
@@ -376,6 +384,9 @@ func (e *ToolExecutor) executePreparedToolRequest(ctx context.Context, prepared 
 		}
 	}
 
+	if prepared.remote != nil {
+		return e.executeRemoteMCPSession(ctx, httpClient, prepared, false)
+	}
 	if prepared.mcp {
 		result, err := e.executeMCPToolCall(ctx, httpClient, prepared)
 		if err != nil && prepared.gateway {
@@ -702,6 +713,7 @@ func toolIdempotencyKeyFromContext(ctx context.Context) string {
 }
 
 type preparedToolRequest struct {
+	remote            *corev1alpha1.Tool
 	httpConfig        corev1alpha1.HTTPExecution
 	request           *http.Request
 	authToken         string
@@ -739,6 +751,9 @@ func decodeToolArguments(args json.RawMessage) (map[string]any, error) {
 
 //nolint:gocyclo // Request preparation centralizes auth, protocol, transaction, and outbound policy invariants.
 func (e *ToolExecutor) prepareRequest(ctx context.Context, tool *corev1alpha1.Tool, args json.RawMessage) (preparedToolRequest, error) {
+	if tool != nil && tool.Spec.MCP != nil && tool.Spec.MCP.Remote != nil {
+		return e.prepareRemoteMCPRequest(ctx, tool, args)
+	}
 	params, err := decodeToolArguments(args)
 	if err != nil {
 		return preparedToolRequest{}, fmt.Errorf("failed to parse tool arguments: %w", err)
@@ -946,7 +961,7 @@ func (e *ToolExecutor) applyGatewayOutboundAccess(
 		return errors.New("gateway outbound access could not resolve request authorities")
 	}
 	if !e.skipDirectPublicValidation {
-		trustedActorRoute := prepared.mcp && strings.TrimSpace(prepared.request.Host) != ""
+		trustedActorRoute := prepared.trustedActorRoute
 		if err := validateGatewayOriginalTarget(
 			ctx,
 			prepared.request.URL,
