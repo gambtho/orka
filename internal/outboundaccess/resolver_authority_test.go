@@ -2,6 +2,7 @@ package outboundaccess
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
@@ -23,6 +24,41 @@ func (r *credentialReadRecorder) Get(
 		r.reads++
 	}
 	return r.Reader.Get(ctx, key, object, options...)
+}
+
+func TestDirectTLSCredentialAuthorityPrecedesReferenceSecretReads(t *testing.T) {
+	for _, scopeAllowed := range []bool{false, true} {
+		name, wantError := "denied scope", "not authorized"
+		if scopeAllowed {
+			name, wantError = "different Secret", "does not match"
+		}
+		t.Run(name, func(t *testing.T) {
+			policy := readyPolicy("direct", corev1alpha1.OutboundAccessPolicySpec{Direct: &corev1alpha1.DirectOutboundAccess{
+				Grant: corev1alpha1.OutboundGrantTokenExchange,
+				TokenEndpoint: corev1alpha1.OutboundTokenEndpoint{
+					URL: "https://issuer.example.test/token",
+					TLS: &corev1alpha1.OutboundTLSConfig{CASecretRef: secretRef("issuer-ca", "ca.crt")},
+				},
+				Subject: corev1alpha1.OutboundTokenSource{Source: corev1alpha1.OutboundTokenSourceTransactionToken},
+				Scopes:  []string{"read"}, ExpectedIssuedTokenType: "urn:ietf:params:oauth:token-type:access_token",
+			}})
+			if issue := ValidateSpec(policy); issue != nil {
+				t.Fatal(issue)
+			}
+			reader := &credentialReadRecorder{Reader: fake.NewClientBuilder().WithScheme(resolverScheme(t)).WithObjects(policy).Build()}
+			resolver := &KubernetesResolver{Reader: reader}
+			_, err := resolver.Resolve(t.Context(), ResolveRequest{
+				Namespace: "tenant", PolicyName: policy.Name, TargetScheme: "https",
+				CredentialAuthorityEnforced: true, CredentialScopeAllowed: scopeAllowed, CredentialSecret: "different-secret",
+			})
+			if err == nil || !strings.Contains(err.Error(), wantError) {
+				t.Fatal("direct TLS selector did not enforce Task credential authority")
+			}
+			if reader.reads != 0 {
+				t.Fatal("direct reference resolution read a Secret before authorization")
+			}
+		})
+	}
 }
 
 func TestGatewayCredentialAuthorityPrecedesReferenceSecretReads(t *testing.T) {

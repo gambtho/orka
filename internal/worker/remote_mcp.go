@@ -40,7 +40,7 @@ func (e *ToolExecutor) VerifyRemoteMCPTool(ctx context.Context, tool *corev1alph
 	}
 	ctx, cancel := context.WithTimeout(ctx, remoteMCPTimeout(tool))
 	defer cancel()
-	prepared, err := e.prepareRemoteMCPRequest(ctx, tool, json.RawMessage(`{}`))
+	prepared, err := e.prepareRemoteMCPRequest(ctx, tool, json.RawMessage(`{}`), true)
 	if err != nil {
 		return err
 	}
@@ -54,7 +54,7 @@ func (e *ToolExecutor) VerifyRemoteMCPTool(ctx context.Context, tool *corev1alph
 	return e.bindRemoteMCPTransport(prepared, true)
 }
 
-func (e *ToolExecutor) prepareRemoteMCPRequest(ctx context.Context, tool *corev1alpha1.Tool, args json.RawMessage) (preparedToolRequest, error) {
+func (e *ToolExecutor) prepareRemoteMCPRequest(ctx context.Context, tool *corev1alpha1.Tool, args json.RawMessage, verifyOnly bool) (preparedToolRequest, error) {
 	if err := aitools.ValidateRemoteMCPConfiguration(tool); err != nil {
 		return preparedToolRequest{}, err
 	}
@@ -67,14 +67,28 @@ func (e *ToolExecutor) prepareRemoteMCPRequest(ctx context.Context, tool *corev1
 	if !e.credentialAuthorityEnforced {
 		return preparedToolRequest{}, errors.New("remote MCP requires Task credential authorization")
 	}
+	params, err := decodeToolArguments(args)
+	if err != nil || params == nil {
+		return preparedToolRequest{}, errors.New("remote MCP arguments must be a JSON object")
+	}
+	// Discovery has no call arguments. Validate real calls before any credential
+	// reads or exchanges, and never expose validator errors containing input data.
+	if !verifyOnly {
+		if err := aitools.ValidateRemoteMCPNumericBudget(params); err != nil {
+			return preparedToolRequest{}, err
+		}
+		schema, err := aitools.ResolveRemoteMCPParameters(tool.Spec.Parameters)
+		if err != nil {
+			return preparedToolRequest{}, err
+		}
+		if err := schema.Validate(params); err != nil {
+			return preparedToolRequest{}, errors.New("remote MCP arguments do not match reviewed parameters")
+		}
+	}
 	h := *tool.Spec.HTTP
 	token, err := e.remoteMCPSecret(ctx, *h.AuthSecretRef)
 	if err != nil {
 		return preparedToolRequest{}, err
-	}
-	params, err := decodeToolArguments(args)
-	if err != nil || params == nil {
-		return preparedToolRequest{}, errors.New("remote MCP arguments must be a JSON object")
 	}
 	body, err := json.Marshal(mcpToolCallRequest{JSONRPC: mcpJSONRPCVersion, ID: mcpToolCallRequestID, Method: mcpToolsCallMethod, Params: mcpToolCallParameters{Name: tool.Spec.MCP.Remote.ToolName, Arguments: params}})
 	if err != nil {
@@ -93,7 +107,7 @@ func (e *ToolExecutor) prepareRemoteMCPRequest(ctx context.Context, tool *corev1
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json, text/event-stream")
 	req.Header.Set(mcpProtocolVersionHeader, mcpProtocolVersion)
-	prepared := preparedToolRequest{httpConfig: h, request: req, authToken: token, redactionSecrets: []string{token}, mcp: true, remote: tool}
+	prepared := preparedToolRequest{httpConfig: h, request: req, authToken: token, redactionSecrets: []string{token, e.transactionToken}, mcp: true, remote: tool}
 	if err := e.applyOutboundAccessPolicy(ctx, tool, &prepared); err != nil {
 		return preparedToolRequest{}, gatewayMCPError{Err: err}
 	}
@@ -348,8 +362,9 @@ func verifyRemoteMCPDescriptor(ctx context.Context, httpClient *http.Client, p p
 }
 
 // remoteMCPExchange keeps the existing prepared raw-JSON/gateway request path,
-// but rejects interactions, metadata and ambiguous envelopes instead of silently
-// skipping them as the legacy managed-server stream reader does.
+// but rejects interactions, metadata and ambiguous envelopes before accepting
+// the terminal response. It does not drain an SSE stream after that response:
+// Streamable HTTP servers SHOULD close then, but are not required to do so.
 func remoteMCPExchange(httpClient *http.Client, req *http.Request, id string) (json.RawMessage, http.Header, error) {
 	req.GetBody = nil
 	resp, err := httpClient.Do(req)
@@ -402,7 +417,8 @@ func remoteMCPExchange(httpClient *http.Client, req *http.Request, id string) (j
 	if err := decodeRemoteMCPObject(body, &envelope); err != nil {
 		return nil, header, err
 	}
-	if envelope.JSONRPC != mcpJSONRPCVersion || string(envelope.ID) != `"`+id+`"` {
+	var responseID string
+	if envelope.JSONRPC != mcpJSONRPCVersion || json.Unmarshal(envelope.ID, &responseID) != nil || responseID != id {
 		return nil, header, errors.New("invalid remote MCP response identity")
 	}
 	if len(envelope.Error) > 0 {
@@ -430,7 +446,7 @@ func readRemoteMCPEvent(body io.Reader) ([]byte, error) {
 		}
 		if value, ok := strings.CutPrefix(line, "data:"); ok {
 			data = append(data, strings.TrimPrefix(value, " "))
-		} else if line != "" && !strings.HasPrefix(line, ":") && line != "event: message" {
+		} else if line != "" && !strings.HasPrefix(line, ":") && line != "event: message" && line != "event:message" {
 			return nil, errors.New("unsupported remote MCP stream event")
 		}
 	}

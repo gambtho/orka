@@ -147,6 +147,7 @@ func (r *ToolReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 
 func (r *ToolReconciler) updateRemoteMCPStatus(ctx context.Context, tool *corev1alpha1.Tool, validationErr error) (ctrl.Result, error) {
 	// A controller-wide HEAD request cannot establish Task-authorized MCP readiness.
+	previous := tool.Status.DeepCopy()
 	tool.Status.Available = false
 	tool.Status.LastCheck = nil
 	tool.Status.Error = ""
@@ -168,6 +169,9 @@ func (r *ToolReconciler) updateRemoteMCPStatus(ctx context.Context, tool *corev1
 	}
 	meta.SetStatusCondition(&tool.Status.Conditions, accepted)
 	meta.SetStatusCondition(&tool.Status.Conditions, available)
+	if reflect.DeepEqual(*previous, tool.Status) {
+		return ctrl.Result{RequeueAfter: toolHealthCheckInterval}, nil
+	}
 	return ctrl.Result{RequeueAfter: toolHealthCheckInterval}, r.Status().Update(ctx, tool)
 }
 

@@ -23,6 +23,7 @@ type remoteProtocolFixture struct {
 	initialize                      string
 	list                            func(int, json.RawMessage) string
 	result                          string
+	call                            func(json.RawMessage)
 	intercept                       func(http.ResponseWriter, *http.Request, string) bool
 }
 
@@ -69,6 +70,9 @@ func (f *remoteProtocolFixture) serve(t *testing.T) *httptest.Server {
 				result = `{"tools":[{"name":"service_health","inputSchema":{"type":"object","properties":{"nested":{"type":"object"}}}}]}`
 			}
 		case "tools/call":
+			if f.call != nil {
+				f.call(req.Params)
+			}
 			result = f.result
 			if result == "" {
 				result = `{"content":[{"type":"text","text":"ok"}]}`

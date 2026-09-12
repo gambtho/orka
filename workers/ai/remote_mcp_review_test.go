@@ -58,6 +58,28 @@ func TestNativeRemoteMCPPreservesLegacyStartupOnLookupFailure(t *testing.T) {
 	}
 }
 
+func TestNativeRemoteMCPUnresolvedAliasIsNeitherAdvertisedNorCallable(t *testing.T) {
+	f := newNativeRemoteFixture(t)
+	reader := unavailableToolReader{Client: f.client, err: errors.New("temporarily unavailable")}
+	enabled := []string{f.tool.Name}
+	loaded := loadCustomTools(t.Context(), reader, "team", enabled)
+	ctx, err := prepareNativeRemoteTools(t.Context(), reader, "team", "task", enabled, loaded, f.executor)
+	if err != nil {
+		t.Fatal("unknown backend lookup changed legacy best-effort startup")
+	}
+	advertised := buildLLMTools(enabled, loaded)
+	if len(advertised) != 0 || len(advertisedToolNames(advertised)) != 0 {
+		t.Fatal("unresolved alias was advertised or entered the invocation allowlist")
+	}
+	toolContext := &tools.ToolContext{Client: reader, Namespace: "team", TaskID: "task", TaskUID: "task-uid"}
+	if _, err := executeNativeRemoteTool(ctx, toolContext, f.tool, json.RawMessage(`{}`)); err == nil {
+		t.Fatal("unverified remote alias was callable")
+	}
+	if f.requests.Load() != 0 {
+		t.Fatal("unresolved alias issued remote traffic")
+	}
+}
+
 func TestNativeRemoteMCPKnownRemoteLookupFailureRemainsFatal(t *testing.T) {
 	f := newNativeRemoteFixture(t)
 	reader := unavailableToolReader{Client: f.client, err: errors.New("temporarily unavailable")}

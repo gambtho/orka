@@ -91,7 +91,7 @@ func (g *gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		return
 	}
-	authority, err := g.verify(r.Header.Get("Txn-Token"))
+	_, err := g.verify(r.Header.Get("Txn-Token"))
 	if err != nil || len(r.Header.Values("Txn-Token")) != 1 || len(r.Header.Values("Authorization")) != 1 ||
 		subtle.ConstantTimeCompare([]byte(r.Header.Get("Authorization")), append([]byte("Bearer "), g.credential...)) != 1 ||
 		r.Host != "example.com" || r.URL.RequestURI() != "/mcp" ||
@@ -147,23 +147,11 @@ func (g *gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "upstream response too large", http.StatusBadGateway)
 		return
 	}
-	// Proof data only: retain the wire JSON but never record credentials or session
-	// headers. Body replacement also protects against an upstream echo of either.
-	safe := func(b []byte) json.RawMessage {
-		if len(b) == 0 {
-			return nil
-		}
-		b = bytes.ReplaceAll(b, g.credential, []byte("[REDACTED]"))
-		b = bytes.ReplaceAll(b, []byte(r.Header.Get("Txn-Token")), []byte("[REDACTED]"))
-		if !json.Valid(b) {
-			return json.RawMessage(`"non-JSON response"`)
-		}
-		return b
-	}
+	// Only bounded protocol categories and outcomes belong in proof logs. Neither
+	// application bodies nor arbitrary caller claims are safe, even in a fixture.
 	g.mu.Lock()
 	_ = json.NewEncoder(g.output).Encode(map[string]any{
-		"event": "exchange", "task": authority.Context["task"], "method": r.Method,
-		"rpc": request.Method, "request": safe(body), "response": safe(result),
+		"event": "exchange", "method": r.Method, "rpc": request.Method,
 		"status": resp.StatusCode, "authenticated": true,
 		"route": "example.com -> team-mcp/kagent-tools", "transactionStripped": true,
 	})

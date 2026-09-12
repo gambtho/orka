@@ -752,7 +752,7 @@ func decodeToolArguments(args json.RawMessage) (map[string]any, error) {
 //nolint:gocyclo // Request preparation centralizes auth, protocol, transaction, and outbound policy invariants.
 func (e *ToolExecutor) prepareRequest(ctx context.Context, tool *corev1alpha1.Tool, args json.RawMessage) (preparedToolRequest, error) {
 	if tool != nil && tool.Spec.MCP != nil && tool.Spec.MCP.Remote != nil {
-		return e.prepareRemoteMCPRequest(ctx, tool, args)
+		return e.prepareRemoteMCPRequest(ctx, tool, args, false)
 	}
 	params, err := decodeToolArguments(args)
 	if err != nil {

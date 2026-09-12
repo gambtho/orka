@@ -1,14 +1,16 @@
 package aitools
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"net/url"
 	"regexp"
 	"strings"
 
-	"github.com/google/jsonschema-go/jsonschema"
+	googlejsonschema "github.com/google/jsonschema-go/jsonschema"
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/santhosh-tekuri/jsonschema/v6"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 )
 
@@ -59,7 +61,7 @@ func ValidateRemoteMCPConfiguration(tool *corev1alpha1.Tool) error {
 	if err := validateRemoteMCPEndpoint(mcp.Remote.URL); err != nil {
 		return err
 	}
-	if err := validateRemoteMCPParameters(tool.Spec.Parameters); err != nil {
+	if _, err := ResolveRemoteMCPParameters(tool.Spec.Parameters); err != nil {
 		return err
 	}
 	return validateRemoteMCPHTTP(tool.Spec.HTTP)
@@ -86,26 +88,108 @@ func validateRemoteMCPEndpoint(raw string) error {
 	return nil
 }
 
-func validateRemoteMCPParameters(parameters *apiextensionsv1.JSON) error {
+// ResolveRemoteMCPParameters compiles the reviewed schema without loading any
+// external resources. Both schema constraints and instances retain exact JSON
+// numbers; a binary64 schema representation would round the reviewed bounds.
+func ResolveRemoteMCPParameters(parameters *apiextensionsv1.JSON) (*jsonschema.Schema, error) {
 	if parameters == nil {
-		return errors.New("remote MCP requires reviewed parameters")
+		return nil, errors.New("remote MCP requires reviewed parameters")
 	}
 	if len(parameters.Raw) > 1<<20 {
-		return errors.New("remote MCP parameters exceed size limit")
+		return nil, errors.New("remote MCP parameters exceed size limit")
 	}
-	var schema map[string]json.RawMessage
-	if err := json.Unmarshal(parameters.Raw, &schema); err != nil || string(schema["type"]) != `"object"` {
-		return errors.New("remote MCP parameters must be an object JSON schema")
+	document, err := jsonschema.UnmarshalJSON(bytes.NewReader(parameters.Raw))
+	if err != nil {
+		return nil, errors.New("remote MCP parameters must be an object JSON schema")
 	}
-	var compiled jsonschema.Schema
-	if json.Unmarshal(parameters.Raw, &compiled) != nil {
-		return errors.New("remote MCP parameters are not a valid bounded JSON schema")
+	schema, ok := document.(map[string]any)
+	if !ok || schema["type"] != "object" {
+		return nil, errors.New("remote MCP parameters must be an object JSON schema")
 	}
-	// No loader: schema references must resolve locally, never through ambient HTTP.
-	if _, err := compiled.Resolve(nil); err != nil {
-		return errors.New("remote MCP parameters contain invalid or unresolved schema references")
+	if err := ValidateRemoteMCPNumericBudget(document); err != nil {
+		return nil, err
+	}
+	// Retain the original bounded representation and local-reference checks.
+	// References into untyped Extra data must not bypass cardinality bounds.
+	// Never use this representation's binary64 values for instance validation.
+	var representation googlejsonschema.Schema
+	if json.Unmarshal(parameters.Raw, &representation) != nil {
+		return nil, errors.New("remote MCP parameters are not a valid bounded JSON schema")
+	}
+	if _, err := representation.Resolve(nil); err != nil {
+		return nil, errors.New("remote MCP parameters contain invalid or unresolved schema references")
+	}
+	compiler := jsonschema.NewCompiler()
+	compiler.DefaultDraft(jsonschema.Draft2020)
+	compiler.UseLoader(remoteMCPSchemaLoader{})
+	const location = "https://orka.invalid/remote-mcp-parameters"
+	if err := compiler.AddResource(location, document); err != nil {
+		return nil, errors.New("remote MCP parameters cannot be compiled")
+	}
+	compiled, err := compiler.Compile(location)
+	if err != nil {
+		return nil, errors.New("remote MCP parameters contain invalid or unresolved schema references")
+	}
+	return compiled, nil
+}
+
+// ValidateRemoteMCPNumericBudget bounds rational expansion before schema or
+// argument validation. Values must come from JSON decoding with UseNumber.
+// This is a resource guard, not a schema evaluator: it never changes values.
+func ValidateRemoteMCPNumericBudget(value any) error {
+	remaining := 65_536
+	if !remoteMCPNumbersWithinBudget(value, &remaining) {
+		return errors.New("remote MCP numeric expansion exceeds limit")
 	}
 	return nil
+}
+
+func remoteMCPNumbersWithinBudget(value any, remaining *int) bool {
+	switch value := value.(type) {
+	case json.Number:
+		coefficient, exponent := string(value), ""
+		if index := strings.IndexAny(coefficient, "eE"); index >= 0 {
+			coefficient, exponent = coefficient[:index], coefficient[index+1:]
+		}
+		for _, digit := range coefficient {
+			if digit >= '0' && digit <= '9' {
+				*remaining--
+				if *remaining < 0 {
+					return false
+				}
+			}
+		}
+		// JSON syntax has already been checked. Parse only the magnitude, stopping
+		// at the remaining budget before multiplication could overflow an int.
+		exponent = strings.TrimLeft(exponent, "+-")
+		magnitude := 0
+		for _, digit := range exponent {
+			magnitude = magnitude*10 + int(digit-'0')
+			if magnitude > *remaining {
+				return false
+			}
+		}
+		*remaining -= magnitude
+	case []any:
+		for _, item := range value {
+			if !remoteMCPNumbersWithinBudget(item, remaining) {
+				return false
+			}
+		}
+	case map[string]any:
+		for _, item := range value {
+			if !remoteMCPNumbersWithinBudget(item, remaining) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+type remoteMCPSchemaLoader struct{}
+
+func (remoteMCPSchemaLoader) Load(string) (any, error) {
+	return nil, errors.New("external remote MCP schema resources are forbidden")
 }
 
 func validateRemoteMCPHTTP(h *corev1alpha1.HTTPExecution) error {

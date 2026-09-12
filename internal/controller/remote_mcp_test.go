@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -15,6 +16,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 )
 
 func TestRemoteMCPControllerDoesNotHostOrProbe(t *testing.T) {
@@ -36,7 +38,15 @@ func TestRemoteMCPControllerDoesNotHostOrProbe(t *testing.T) {
 	for _, typ := range []string{corev1alpha1.OutboundAccessPolicyConditionAccepted, corev1alpha1.OutboundAccessPolicyConditionResolvedRefs} {
 		meta.SetStatusCondition(&policy.Status.Conditions, metav1.Condition{Type: typ, Status: metav1.ConditionTrue, Reason: "Accepted", ObservedGeneration: 1})
 	}
-	c := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&tool).WithObjects(&tool, policy, &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "auth", Namespace: "default"}, Data: map[string][]byte{"token": []byte("test-credential")}}).Build()
+	statusWrites := 0
+	c := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&tool).WithObjects(&tool, policy, &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "auth", Namespace: "default"}, Data: map[string][]byte{"token": []byte("test-credential")}}).WithInterceptorFuncs(interceptor.Funcs{
+		SubResourceUpdate: func(ctx context.Context, c client.Client, subresource string, obj client.Object, opts ...client.SubResourceUpdateOption) error {
+			if subresource == "status" {
+				statusWrites++
+			}
+			return c.SubResource(subresource).Update(ctx, obj, opts...)
+		},
+	}).Build()
 	r := &ToolReconciler{Client: c, Scheme: scheme, SkipSSRFValidation: true, HTTPClient: server.Client()}
 	if _, err := r.Reconcile(t.Context(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(&tool)}); err != nil {
 		t.Fatal(err)
@@ -58,6 +68,20 @@ func TestRemoteMCPControllerDoesNotHostOrProbe(t *testing.T) {
 	if tool.Status.Actor != nil || tool.Status.Workspace != nil || len(tool.Finalizers) > 0 {
 		t.Fatalf("remote gained hosting state: %+v", tool)
 	}
+	assertStableStatus := func() {
+		t.Helper()
+		before := statusWrites
+		for range 2 {
+			result, err := r.Reconcile(t.Context(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(&tool)})
+			if err != nil || result.RequeueAfter != toolHealthCheckInterval {
+				t.Fatalf("stable reconciliation lost periodic recheck: %v", err)
+			}
+		}
+		if statusWrites != before {
+			t.Error("unchanged remote status caused additional writes")
+		}
+	}
+	assertStableStatus()
 	// Schemaless admission stays compatible; controller rejection must revoke acceptance.
 	tool.Spec.Parameters = nil
 	if err := c.Update(t.Context(), &tool); err != nil {
@@ -76,6 +100,22 @@ func TestRemoteMCPControllerDoesNotHostOrProbe(t *testing.T) {
 	if calls.Load() != 0 {
 		t.Fatal("invalid remote configuration probed endpoint")
 	}
+	if statusWrites < 2 {
+		t.Fatal("changed remote status was not persisted")
+	}
+	assertStableStatus()
+	before := statusWrites
+	tool.Generation++
+	if err := c.Update(t.Context(), &tool); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.Reconcile(t.Context(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(&tool)}); err != nil {
+		t.Fatal(err)
+	}
+	if statusWrites != before+1 {
+		t.Fatal("generation change did not update observed conditions")
+	}
+	assertStableStatus()
 }
 
 func TestRemoteMCPExcludedFromACP(t *testing.T) {

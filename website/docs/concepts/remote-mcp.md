@@ -71,6 +71,8 @@ spec:
 
 Remote execution requires a referenced native Agent that enables that alias. A Task cannot add a remote Tool outside that Agent's enabled list, and an alias cannot replace a built-in tool. Checks occur before model exposure and again before invocation. The historical additive/default behavior of Agent and Task selections remains unchanged for other backends.
 
+If both initial Tool lookups fail, the worker cannot determine the alias's backend. To preserve legacy/built-in best-effort startup, that unresolved alias is omitted from model definitions and the invocation allowlist; it cannot execute as a remote Tool. Once a definition is known to be remote, any failed reread or binding is fatal. Startup success alone is not proof that every requested alias was available.
+
 The worker verifies its controller-issued Task UID and freezes the Task/Agent/Tool identity, advertised definition, and credential/policy dependency versions. Deletion, recreation, selection changes, or changed bindings fail closed rather than redirecting an already advertised call. Even a conservative dependency-version change can require starting a new Task.
 
 ## Authentication and outbound governance
@@ -89,8 +91,10 @@ Original-URL public-host SSRF checks still apply. A private MCP service needs an
 
 1. An operator obtains the selected function's `tools/list` descriptor and reviews its input schema into `Tool.spec.parameters`. Keep the server release and reviewed snapshot with deployment configuration.
 2. Before model exposure, Orka initializes a session and lists tools under the actual Task's credential and gateway authority. It verifies the selected name and compares its input schema to the reviewed snapshot.
-3. Before each call, a new bounded session repeats discovery and verification. Missing/duplicate names, unsupported schemas or observed schema drift prevent `tools/call`.
+3. Before each call, the Tool executor validates the actual arguments against the reviewed schema **before resolving call credentials, exchanging tokens, or sending MCP requests**. Native Task/Tool dependency revalidation may already have read credential metadata or Secret data. Argument validation does not coerce values or apply defaults. A new bounded session then repeats discovery and verification. Invalid arguments, missing/duplicate names, unsupported schemas or observed schema drift prevent `tools/call`.
 4. Update a Tool only after reviewing the new schema and authorization implications; start a new Task to use the changed definition. Discovery never grants more tools or hot-swaps a running Task's definitions.
+
+Schema compilation and argument validation retain exact JSON numbers, including numeric bounds, `multipleOf`, `enum`, and `const`. The existing bounded schema-representation and local-reference checks are retained, including cardinality-field limits and rejection of references outside recognized schema locations; rounded values from these compatibility checks are never used to validate arguments. Schemas without `$schema` use Draft 2020-12; local references are supported, but external schema resources are never fetched from the network or filesystem. Validation errors report a local failure category, not argument values.
 
 Object member order and mathematically equivalent JSON numeric spellings do not cause drift. Server instructions, descriptions and annotations are not imported into Agent/model instructions; the operator's description remains authoritative. Schema comparison detects observed interface changes, not semantic changes behind the same schema, nor an atomic guarantee that the server cannot change between discovery and execution.
 
@@ -100,8 +104,12 @@ Remote Tool reconciliation reports configuration acceptance, not an authenticate
 
 Successful calls return a JSON envelope retaining text `content` and optional object `structuredContent`. Numeric payloads remain raw/exact rather than passing through binary64, including nested integers beyond 2^53 and high-precision decimals. The actual OpenAI Responses/Chat Completions and Anthropic Messages schema serialization also preserves complete reviewed schemas and numeric constraints.
 
-Only unannotated text and structured JSON results are supported. Nontext content, result/content metadata or audience annotations, unsupported interactions and protocol errors fail closed. Server error text is not echoed into errors; local diagnostics identify safe failure categories. Resource credentials are redacted from strings. The model itself is not an exact-arithmetic engine: exact transport does not guarantee an exact model answer.
+Only unannotated text and structured JSON results are supported. Nontext content, result/content metadata or audience annotations, unsupported interactions and protocol errors fail closed. Server error text is not echoed into errors; local diagnostics identify safe failure categories. Resource credentials and bound/exchanged Task transaction tokens are redacted from strings. The model itself is not an exact-arithmetic engine: exact transport does not guarantee an exact model answer.
+
+Each reviewed schema and each argument object has a separate **65,536-digit aggregate numeric-expansion budget** before exact validation. For every JSON number, Orka conservatively counts coefficient digits (including fractional digits) plus the absolute decimal exponent. Excessive/overflowing exponents or an exceeded aggregate budget fail closed; values are never rounded or clamped to fit. Numeric-looking strings and successful result payloads are not changed by this validation guard.
 
 Operations default to 30 seconds, with a positive configured timeout capped at two minutes. Responses/results are limited to 1 MiB; discovery to 2 MiB aggregate, eight pages and 1,024 names. Cancellation is preserved. Sessions are per operation, and cleanup is best-effort with a separate bounded timeout; cleanup failure never replays a tool call.
+
+For an SSE response to a POST, Orka accepts one matching JSON-RPC response as terminal and closes that response body immediately. Any interaction or notification received before it fails closed. It does not drain or validate later events: MCP servers should close after their response, but are not required to, so waiting for EOF could turn a completed call into a timeout. Events after the terminal response are not processed and cannot trigger another operation.
 
 Standalone SSE, stream resumption, shared long-lived sessions, sampling, elicitation, resource/prompt APIs, automatic schema refresh and direct OAuth remote qualification are outside this initial backend.
