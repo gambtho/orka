@@ -68,20 +68,7 @@ func TestRemoteMCPControllerDoesNotHostOrProbe(t *testing.T) {
 	if tool.Status.Actor != nil || tool.Status.Workspace != nil || len(tool.Finalizers) > 0 {
 		t.Fatalf("remote gained hosting state: %+v", tool)
 	}
-	assertStableStatus := func() {
-		t.Helper()
-		before := statusWrites
-		for range 2 {
-			result, err := r.Reconcile(t.Context(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(&tool)})
-			if err != nil || result.RequeueAfter != toolHealthCheckInterval {
-				t.Fatalf("stable reconciliation lost periodic recheck: %v", err)
-			}
-		}
-		if statusWrites != before {
-			t.Error("unchanged remote status caused additional writes")
-		}
-	}
-	assertStableStatus()
+	assertRemoteMCPStatusStable(t, r, &tool, &statusWrites)
 	// Schemaless admission stays compatible; controller rejection must revoke acceptance.
 	tool.Spec.Parameters = nil
 	if err := c.Update(t.Context(), &tool); err != nil {
@@ -103,7 +90,7 @@ func TestRemoteMCPControllerDoesNotHostOrProbe(t *testing.T) {
 	if statusWrites < 2 {
 		t.Fatal("changed remote status was not persisted")
 	}
-	assertStableStatus()
+	assertRemoteMCPStatusStable(t, r, &tool, &statusWrites)
 	before := statusWrites
 	tool.Generation++
 	if err := c.Update(t.Context(), &tool); err != nil {
@@ -115,7 +102,21 @@ func TestRemoteMCPControllerDoesNotHostOrProbe(t *testing.T) {
 	if statusWrites != before+1 {
 		t.Fatal("generation change did not update observed conditions")
 	}
-	assertStableStatus()
+	assertRemoteMCPStatusStable(t, r, &tool, &statusWrites)
+}
+
+func assertRemoteMCPStatusStable(t *testing.T, r *ToolReconciler, tool *corev1alpha1.Tool, statusWrites *int) {
+	t.Helper()
+	before := *statusWrites
+	for range 2 {
+		result, err := r.Reconcile(t.Context(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(tool)})
+		if err != nil || result.RequeueAfter != toolHealthCheckInterval {
+			t.Fatalf("stable reconciliation lost periodic recheck: %v", err)
+		}
+	}
+	if *statusWrites != before {
+		t.Error("unchanged remote status caused additional writes")
+	}
 }
 
 func TestRemoteMCPExcludedFromACP(t *testing.T) {
