@@ -255,7 +255,7 @@ func NewToolExecutorForNamespace(namespace string, k8sClient kubernetes.Interfac
 func (e *ToolExecutor) Execute(ctx context.Context, tool *corev1alpha1.Tool, args json.RawMessage) (result string, err error) {
 	if tool != nil && tool.Spec.MCP != nil && tool.Spec.MCP.Remote != nil {
 		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, remoteMCPTimeout(tool))
+		ctx, cancel = context.WithTimeout(ctx, RemoteMCPTimeout(tool))
 		defer cancel()
 	}
 	if tool != nil && tool.Spec.HTTP != nil && tool.Spec.HTTP.Timeout != nil && tool.Spec.HTTP.Timeout.Duration > 0 {

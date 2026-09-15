@@ -393,6 +393,42 @@ func TestRemoteMCPRejectsMissingReviewedParametersBeforeNetwork(t *testing.T) {
 	}
 }
 
+func TestRemoteMCPSSEEventIDs(t *testing.T) {
+	for _, field := range []string{"id: event-1", "id:event-1", "id:", "id"} {
+		t.Run(field, func(t *testing.T) {
+			f := &remoteProtocolFixture{intercept: func(w http.ResponseWriter, _ *http.Request, method string) bool {
+				var response string
+				switch method {
+				case "tools/list":
+					response = `{"jsonrpc":"2.0","id":"list-0","result":{"tools":[{"name":"service_health","inputSchema":{"type":"object","properties":{"nested":{"type":"object"}}}}]}}`
+				case "tools/call":
+					response = `{"jsonrpc":"2.0","id":"1","result":{"content":[{"type":"text","text":"ok"}]}}`
+				default:
+					return false
+				}
+				w.Header().Set("Content-Type", "text/event-stream")
+				_, _ = fmt.Fprintf(w, "%s\nevent: message\ndata: %s\n\n", field, response)
+				return true
+			}}
+			e := remoteTestExecutor(t, f.serve(t))
+			tool := remoteTestTool(t)
+			if err := e.VerifyRemoteMCPTool(t.Context(), tool); err != nil {
+				t.Fatalf("discovery rejected an SSE event ID: %v", err)
+			}
+			result, err := e.Execute(t.Context(), tool, json.RawMessage(`{}`))
+			var reply struct {
+				Content []struct{ Text string }
+			}
+			if err != nil || json.Unmarshal([]byte(result), &reply) != nil || len(reply.Content) != 1 || reply.Content[0].Text != "ok" {
+				t.Fatalf("call with an SSE event ID returned %q, %v", result, err)
+			}
+			if f.calls.Load() != 1 || f.cleanup.Load() != 2 {
+				t.Fatal("event IDs changed the call count or session cleanup")
+			}
+		})
+	}
+}
+
 func TestRemoteMCPSSERejectsInteractions(t *testing.T) {
 	for _, interaction := range []bool{false, true} {
 		t.Run(fmt.Sprint(interaction), func(t *testing.T) {

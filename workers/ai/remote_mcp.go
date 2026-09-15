@@ -283,6 +283,8 @@ func executeNativeCustomTool(
 func executeNativeRemoteTool(
 	ctx context.Context, toolContext *tools.ToolContext, tool *corev1alpha1.Tool, args json.RawMessage,
 ) (string, error) {
+	ctx, cancel := context.WithTimeout(ctx, worker.RemoteMCPTimeout(tool))
+	defer cancel()
 	state, err := validateNativeRemoteTool(ctx, toolContext, tool)
 	if err != nil {
 		return "", err
@@ -293,6 +295,9 @@ func executeNativeRemoteTool(
 func validateNativeRemoteTool(
 	ctx context.Context, toolContext *tools.ToolContext, tool *corev1alpha1.Tool,
 ) (*nativeRemoteTools, error) {
+	// Approval refresh also calls this directly, without an execution deadline.
+	ctx, cancel := context.WithTimeout(ctx, worker.RemoteMCPTimeout(tool))
+	defer cancel()
 	state, _ := ctx.Value(nativeRemoteToolsKey{}).(*nativeRemoteTools)
 	if state == nil || toolContext == nil ||
 		toolContext.Namespace != state.task.Namespace || toolContext.TaskID != state.task.Name ||
@@ -300,6 +305,9 @@ func validateNativeRemoteTool(
 		return nil, errors.New("remote MCP Tool was not verified for this native Task")
 	}
 	if err := state.validate(ctx, toolContext.Client, tool); err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, ctxErr
+		}
 		return nil, err
 	}
 	return state, nil

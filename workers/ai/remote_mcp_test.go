@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -12,6 +13,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/llm"
@@ -273,6 +275,102 @@ func TestNativeRemoteMCPLoopUsesVerifiedExecutorAndLiveFence(t *testing.T) {
 				}
 			} else if f.calls.Load() != 1 || !strings.Contains(result, "healthy") {
 				t.Fatalf("model loop did not use verified remote executor: %s", result)
+			}
+		})
+	}
+}
+
+func TestNativeRemoteMCPApprovalIgnoresUnusedMountedCredential(t *testing.T) {
+	f := newNativeRemoteFixture(t)
+	ctx, loaded, err := f.prepare(t)
+	if err != nil {
+		t.Fatal(err)
+	}
+	toolContext := prepareApprovalToolContext(&tools.ToolContext{
+		Client: f.client, Namespace: "team", TaskID: "task", TaskUID: "task-uid",
+	}, nil)
+	gate := &approvalGate{
+		namespace: "team", taskName: "task", taskUID: "task-uid",
+		required: map[string]struct{}{"health": {}}, refreshTarget: toolContext.ApprovalTargetRefresh,
+	}
+	oldRoots, oldToolRoot := approvalMountRoots, approvalToolMountRoot
+	mountedDir := t.TempDir()
+	approvalMountRoots, approvalToolMountRoot = []string{mountedDir}, ""
+	t.Cleanup(func() {
+		approvalMountRoots, approvalToolMountRoot = oldRoots, oldToolRoot
+	})
+	if _, err := gate.targetForCall(ctx, "health", json.RawMessage(`{}`), loaded["health"]); err != nil {
+		t.Fatalf("baseline remote approval failed: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(mountedDir, "token"), []byte("unused-mount"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := gate.targetForCall(ctx, "health", json.RawMessage(`{}`), loaded["health"]); err != nil {
+		t.Fatalf("remote approval rejected an unused mounted file: %v", err)
+	}
+	if _, err := executeNativeRemoteTool(ctx, toolContext, loaded["health"], json.RawMessage(`{}`)); err != nil {
+		t.Fatalf("remote execution used an unrelated mount: %v", err)
+	}
+
+	secret := &corev1.Secret{}
+	if err := f.client.Get(t.Context(), client.ObjectKey{Namespace: "team", Name: "auth"}, secret); err != nil {
+		t.Fatal(err)
+	}
+	secret.Data["token"] = []byte("rotated")
+	if err := f.client.Update(t.Context(), secret); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := gate.targetForCall(ctx, "health", json.RawMessage(`{}`), loaded["health"]); err == nil {
+		t.Fatal("remote approval accepted a changed named Secret")
+	}
+	if f.calls.Load() != 1 {
+		t.Fatal("approval refresh executed a remote call")
+	}
+}
+
+type nativeRemoteBlockingClient struct {
+	client.Client
+}
+
+func (c nativeRemoteBlockingClient) Get(
+	ctx context.Context, _ client.ObjectKey, _ client.Object, _ ...client.GetOption,
+) error {
+	<-ctx.Done()
+	return ctx.Err()
+}
+
+func TestNativeRemoteMCPDeadlineIncludesRevalidation(t *testing.T) {
+	for _, phase := range []string{"execution", "approval refresh"} {
+		t.Run(phase, func(t *testing.T) {
+			f := newNativeRemoteFixture(t)
+			f.tool.Spec.HTTP.Timeout = &metav1.Duration{Duration: 100 * time.Millisecond}
+			if err := f.client.Update(t.Context(), f.tool); err != nil {
+				t.Fatal(err)
+			}
+			ctx, loaded, err := f.prepare(t)
+			if err != nil {
+				t.Fatal(err)
+			}
+			outer, cancel := context.WithTimeout(ctx, 2*time.Second)
+			defer cancel()
+			toolContext := prepareApprovalToolContext(&tools.ToolContext{
+				Client:    nativeRemoteBlockingClient{Client: f.client},
+				Namespace: "team", TaskID: "task", TaskUID: "task-uid",
+			}, nil)
+			before := f.requests.Load()
+			if phase == "execution" {
+				_, err = executeNativeRemoteTool(outer, toolContext, loaded["health"], json.RawMessage(`{}`))
+			} else {
+				err = toolContext.ApprovalTargetRefresh(outer, "health", loaded["health"])
+			}
+			if !errors.Is(err, context.DeadlineExceeded) {
+				t.Fatalf("native validation did not preserve its deadline: %v", err)
+			}
+			if outer.Err() != nil {
+				t.Fatal("native validation waited for the outer deadline instead of the Tool timeout")
+			}
+			if f.requests.Load() != before || f.calls.Load() != 0 {
+				t.Fatal("timed-out native validation reached the remote server")
 			}
 		})
 	}

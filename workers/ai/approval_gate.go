@@ -604,8 +604,9 @@ func validateApprovalCustomToolCompatibility(customTool *corev1alpha1.Tool) erro
 			)
 		}
 	}
-	if customTool.Spec.HTTP.AuthSecretRef != nil {
-		if approvalMountedCredentialExists(customTool.Spec.HTTP.AuthSecretRef.Name, customTool.Spec.HTTP.AuthSecretRef.Key) {
+	if authRef := customTool.Spec.HTTP.AuthSecretRef; authRef != nil {
+		// Remote credentials use the exact API Secret selector and never mounted files.
+		if !aitools.IsRemoteMCP(customTool) && approvalMountedCredentialExists(authRef.Name, authRef.Key) {
 			return fmt.Errorf(
 				"approval-gated tool %q mounted credential source cannot be approval-bound",
 				customTool.Name,

@@ -45,7 +45,7 @@ func (e *ToolExecutor) VerifyRemoteMCPTool(ctx context.Context, tool *corev1alph
 	if err := aitools.ValidateRemoteMCPConfiguration(tool); err != nil {
 		return err
 	}
-	ctx, cancel := context.WithTimeout(ctx, remoteMCPTimeout(tool))
+	ctx, cancel := context.WithTimeout(ctx, RemoteMCPTimeout(tool))
 	defer cancel()
 	prepared, err := e.prepareRemoteMCPRequest(ctx, tool, json.RawMessage(`{}`), true)
 	if err != nil {
@@ -186,16 +186,18 @@ func (e *ToolExecutor) bindRemoteMCPTransport(p preparedToolRequest, record bool
 	return nil
 }
 
-func remoteMCPTimeout(tool *corev1alpha1.Tool) time.Duration {
+// RemoteMCPTimeout returns the shared budget for native validation and remote
+// execution, defaulting to 30 seconds and capped at two minutes.
+func RemoteMCPTimeout(tool *corev1alpha1.Tool) time.Duration {
 	timeout := 30 * time.Second
-	if tool.Spec.HTTP != nil && tool.Spec.HTTP.Timeout != nil {
+	if tool != nil && tool.Spec.HTTP != nil && tool.Spec.HTTP.Timeout != nil {
 		timeout = tool.Spec.HTTP.Timeout.Duration
 	}
 	return min(timeout, 2*time.Minute)
 }
 
 func (e *ToolExecutor) executeRemoteMCPSession(ctx context.Context, httpClient *http.Client, p preparedToolRequest, verifyOnly bool) (result string, err error) {
-	ctx, cancel := context.WithTimeout(ctx, remoteMCPTimeout(p.remote))
+	ctx, cancel := context.WithTimeout(ctx, RemoteMCPTimeout(p.remote))
 	defer cancel()
 	// Exchange/parser errors below contain only local diagnostics, never server
 	// error bodies or credential-bearing transport errors. Preserve that context.
@@ -463,6 +465,9 @@ func readRemoteMCPEvent(body io.Reader) ([]byte, error) {
 		}
 		if value, ok := strings.CutPrefix(line, "data:"); ok {
 			data = append(data, strings.TrimPrefix(value, " "))
+		} else if line == "id" || strings.HasPrefix(line, "id:") {
+			// Event IDs are optional metadata; this client does not resume streams.
+			continue
 		} else if line != "" && !strings.HasPrefix(line, ":") && line != "event: message" && line != "event:message" {
 			return nil, errors.New("unsupported remote MCP stream event")
 		}
