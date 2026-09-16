@@ -68,7 +68,7 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-for cmd in curl docker git jq kind kubectl make openssl; do
+for cmd in base64 curl docker git jq kind kubectl make openssl; do
   require_cmd "$cmd"
 done
 
@@ -162,6 +162,21 @@ echo "Controller image: $controller_image"
 . "$repo_root/scripts/lib/kind-local-registry.sh"
 # shellcheck source=scripts/lib/e2e-admission-tls.sh
 . "$repo_root/scripts/lib/e2e-admission-tls.sh"
+
+# The test CA and serving certificate last seven days. Their renewal must not
+# silently remove shared admission webhooks or bypass other controllers' trust.
+admission_tls="$("${kube_cmd[@]}" -n "$namespace" get secret orka-admission-tls --ignore-not-found -o json)"
+if [[ -n "$admission_tls" ]] && ! {
+  openssl verify -x509_strict -purpose sslserver -verify_hostname "orka-admission.$namespace.svc" \
+    -CAfile <(jq -er '.data["ca.crt"]' <<<"$admission_tls" | base64 -d) \
+    -untrusted <(jq -er '.data["tls.crt"]' <<<"$admission_tls" | base64 -d) \
+    <(jq -er '.data["tls.crt"]' <<<"$admission_tls" | base64 -d)
+} >/dev/null 2>&1; then
+  echo "$namespace/orka-admission-tls has an expired, missing, or invalid certificate chain." >&2
+  echo "Use a fresh kindctl cluster, or coordinate TLS renewal using config/orka-admission-webhooks/README.md before retrying." >&2
+  exit 1
+fi
+unset admission_tls
 
 ai_worker_image="${AI_WORKER_IMG:-ghcr.io/orka-agents/orka/ai-worker:kind}"
 general_worker_image="${GENERAL_WORKER_IMG:-ghcr.io/orka-agents/orka/general-worker:kind}"
