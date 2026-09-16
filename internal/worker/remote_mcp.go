@@ -465,8 +465,8 @@ func readRemoteMCPEvent(body io.Reader) ([]byte, error) {
 		}
 		if value, ok := strings.CutPrefix(line, "data:"); ok {
 			data = append(data, strings.TrimPrefix(value, " "))
-		} else if line == "id" || strings.HasPrefix(line, "id:") {
-			// Event IDs are optional metadata; this client does not resume streams.
+		} else if line == "id" || strings.HasPrefix(line, "id:") || line == "retry" || strings.HasPrefix(line, "retry:") {
+			// IDs and retry delays are metadata; this client neither resumes nor reconnects.
 			continue
 		} else if line != "" && !strings.HasPrefix(line, ":") && line != "event: message" && line != "event:message" {
 			return nil, errors.New("unsupported remote MCP stream event")

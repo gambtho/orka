@@ -393,8 +393,11 @@ func TestRemoteMCPRejectsMissingReviewedParametersBeforeNetwork(t *testing.T) {
 	}
 }
 
-func TestRemoteMCPSSEEventIDs(t *testing.T) {
-	for _, field := range []string{"id: event-1", "id:event-1", "id:", "id"} {
+func TestRemoteMCPSSEMetadata(t *testing.T) {
+	for _, field := range []string{
+		"id: event-1", "id:event-1", "id:", "id",
+		"retry: 1000", "retry:1000", "retry:", "retry", "retry: invalid",
+	} {
 		t.Run(field, func(t *testing.T) {
 			f := &remoteProtocolFixture{intercept: func(w http.ResponseWriter, _ *http.Request, method string) bool {
 				var response string
@@ -413,17 +416,17 @@ func TestRemoteMCPSSEEventIDs(t *testing.T) {
 			e := remoteTestExecutor(t, f.serve(t))
 			tool := remoteTestTool(t)
 			if err := e.VerifyRemoteMCPTool(t.Context(), tool); err != nil {
-				t.Fatalf("discovery rejected an SSE event ID: %v", err)
+				t.Fatalf("discovery rejected SSE metadata: %v", err)
 			}
 			result, err := e.Execute(t.Context(), tool, json.RawMessage(`{}`))
 			var reply struct {
 				Content []struct{ Text string }
 			}
 			if err != nil || json.Unmarshal([]byte(result), &reply) != nil || len(reply.Content) != 1 || reply.Content[0].Text != "ok" {
-				t.Fatalf("call with an SSE event ID returned %q, %v", result, err)
+				t.Fatalf("call with SSE metadata returned %q, %v", result, err)
 			}
 			if f.calls.Load() != 1 || f.cleanup.Load() != 2 {
-				t.Fatal("event IDs changed the call count or session cleanup")
+				t.Fatal("SSE metadata changed the call count or session cleanup")
 			}
 		})
 	}

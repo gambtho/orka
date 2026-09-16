@@ -221,7 +221,8 @@ func TestRemoteMCPURLCredentialQueries(t *testing.T) {
 		{"x-amz-security-token", false}, {"x-amz-signature", false},
 		{"x-goog-credential", false}, {"x-goog-signature", false}, {"x-ms-signature", false},
 		{"next_token", false}, {"customTokenHint", false}, {"api_key", false},
-		{"route", true}, {"tenant", true}, {"signature-version", true},
+		{"subscription-key", false}, {"subscriptionkey", false},
+		{"route", true}, {"tenant", true}, {"signature-version", true}, {"subscription-id", true},
 	} {
 		for _, name := range []string{tc.name, strings.ToUpper(tc.name), " " + strings.ReplaceAll(strings.ToUpper(tc.name), "-", "_") + " "} {
 			t.Run(name, func(t *testing.T) {
@@ -255,6 +256,8 @@ func TestRemoteMCPHeadersAllowMixedCaseWithoutAuthorityOverrides(t *testing.T) {
 		{"X-Request-ID", true}, {"x-request-id", true}, {"X-ReQuEsT-ID", true}, {"X-Tenant", true}, {"x-TeNaNt", true},
 		{"Signature-Version", true}, {"Sig", true}, {"X-Amz-Signature", true}, {"Key-Pair-Id", true},
 		{"X-Api-Key", false}, {"api_key", false}, {"API-KEY", false}, {"ApiKey", false}, {"X_API_KEY", false},
+		{"Ocp-Apim-Subscription-Key", false}, {"ocp_apim_subscription_key", false}, {"OCP-APIM-SUBSCRIPTION-KEY", false},
+		{"Subscription-Key", false}, {"subscription_key", false}, {"SubscriptionKey", false}, {"X-Subscription-ID", true},
 		{"X-Auth-Token", false}, {"X-Access-Token", false}, {"X_AUTH_TOKEN", false},
 		{"X-Client-Secret", false}, {"X-Password", false}, {"X-Credential", false}, {"X-Authorization", false},
 		{" X-Request-ID", false}, {"X-Request-ID ", false},
@@ -266,7 +269,14 @@ func TestRemoteMCPHeadersAllowMixedCaseWithoutAuthorityOverrides(t *testing.T) {
 				OutboundAccessPolicyRef: &corev1alpha1.LocalObjectReference{Name: "egress"},
 				Headers:                 map[string]string{tc.name: "fixture-value"},
 			}
-			if err := validateRemoteMCPHTTP(h); (err == nil) != tc.valid {
+			tool := &corev1alpha1.Tool{Spec: corev1alpha1.ToolSpec{
+				Parameters: &apiextensionsv1.JSON{Raw: []byte(`{"type":"object"}`)},
+				MCP: &corev1alpha1.MCPToolServer{Remote: &corev1alpha1.RemoteMCPServer{
+					URL: "https://example.com/mcp", ToolName: "read",
+				}},
+				HTTP: h,
+			}}
+			if err := ValidateRemoteMCPConfiguration(tool); (err == nil) != tc.valid {
 				t.Fatalf("header acceptance = %t; want %t", err == nil, tc.valid)
 			}
 		})

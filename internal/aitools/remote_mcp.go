@@ -116,7 +116,10 @@ func remoteMCPURLCredentialName(name string) bool {
 // arbitrary secret values. Keep the remote-only header admission rules in sync.
 func remoteMCPCredentialName(name string) bool {
 	name = strings.ToLower(name)
-	for _, sensitive := range []string{"token", "secret", "password", "credential", "authorization", "api_key", "api-key", "apikey"} {
+	for _, sensitive := range []string{
+		"token", "secret", "password", "credential", "authorization",
+		"api_key", "api-key", "apikey", "subscription_key", "subscription-key", "subscriptionkey",
+	} {
 		if strings.Contains(name, sensitive) {
 			return true
 		}

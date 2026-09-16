@@ -96,6 +96,8 @@ func TestRemoteMCPAdmission(t *testing.T) {
 	}{
 		{"X-Tenant", false}, {"x-TeNaNt", false}, {"X-ReQuEsT-ID", false},
 		{"X-Api-Key", true}, {"api_key", true}, {"API-KEY", true}, {"ApiKey", true}, {"X_API_KEY", true},
+		{"Ocp-Apim-Subscription-Key", true}, {"ocp_apim_subscription_key", true}, {"OCP-APIM-SUBSCRIPTION-KEY", true},
+		{"Subscription-Key", true}, {"subscription_key", true}, {"SubscriptionKey", true}, {"X-Subscription-ID", false},
 		{"X-Auth-Token", true}, {"X-Access-Token", true}, {"X_AUTH_TOKEN", true},
 		{"X-Client-Secret", true}, {"X-Password", true}, {"X-Credential", true}, {"X-Authorization", true},
 	}
