@@ -32,6 +32,26 @@ context_cluster_for() {
     | awk -F'\t' -v context="$context" '$1 == context { print $2; exit }'
 }
 
+validate_admission_tls() {
+  local secret="$1" cert private_key ca cert_public_key key_public_key san_extension
+  jq -e '
+    .type == "kubernetes.io/tls" and
+    (.data["tls.crt"] | type == "string" and length > 0) and
+    (.data["tls.key"] | type == "string" and length > 0) and
+    (.data["ca.crt"] | type == "string" and length > 0)
+  ' <<<"$secret" >/dev/null || return 1
+  cert="$(jq -er '.data["tls.crt"]' <<<"$secret" | base64 -d)" || return 1
+  private_key="$(jq -er '.data["tls.key"]' <<<"$secret" | base64 -d)" || return 1
+  ca="$(jq -er '.data["ca.crt"]' <<<"$secret" | base64 -d)" || return 1
+  cert_public_key="$(openssl x509 -in <(printf '%s\n' "$cert") -pubkey -noout)" || return 1
+  key_public_key="$(openssl pkey -in <(printf '%s\n' "$private_key") -passin pass: -pubout)" || return 1
+  [[ "$cert_public_key" == "$key_public_key" ]] || return 1
+  san_extension="$(openssl x509 -in <(printf '%s\n' "$cert") -noout -ext subjectAltName)" || return 1
+  [[ "$san_extension" == *"X509v3 Subject Alternative Name"* ]] || return 1
+  openssl verify -x509_strict -purpose sslserver -verify_hostname "orka-admission.$namespace.svc" \
+    -CAfile <(printf '%s\n' "$ca") -untrusted <(printf '%s\n' "$cert") <(printf '%s\n' "$cert")
+}
+
 repo_root=""
 cluster_name=""
 context_name=""
@@ -166,13 +186,8 @@ echo "Controller image: $controller_image"
 # The test CA and serving certificate last seven days. Their renewal must not
 # silently remove shared admission webhooks or bypass other controllers' trust.
 admission_tls="$("${kube_cmd[@]}" -n "$namespace" get secret orka-admission-tls --ignore-not-found -o json)"
-if [[ -n "$admission_tls" ]] && ! {
-  openssl verify -x509_strict -purpose sslserver -verify_hostname "orka-admission.$namespace.svc" \
-    -CAfile <(jq -er '.data["ca.crt"]' <<<"$admission_tls" | base64 -d) \
-    -untrusted <(jq -er '.data["tls.crt"]' <<<"$admission_tls" | base64 -d) \
-    <(jq -er '.data["tls.crt"]' <<<"$admission_tls" | base64 -d)
-} >/dev/null 2>&1; then
-  echo "$namespace/orka-admission-tls has an expired, missing, or invalid certificate chain." >&2
+if [[ -n "$admission_tls" ]] && ! validate_admission_tls "$admission_tls" >/dev/null 2>&1; then
+  echo "$namespace/orka-admission-tls has expired, missing, or invalid TLS data." >&2
   echo "Use a fresh kindctl cluster, or coordinate TLS renewal using config/orka-admission-webhooks/README.md before retrying." >&2
   exit 1
 fi
