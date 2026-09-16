@@ -225,7 +225,9 @@ func TestCheckDeliveryFixtureOutputPrivacy(t *testing.T) {
 }
 
 func TestCheckDeliveryFixtureMasksOverlappingOutputFields(t *testing.T) {
-	for _, mode := range []string{"fixture overlap", "token overlap", "probe token overlap"} {
+	for _, mode := range []string{
+		"fixture overlap", "token overlap", "probe token overlap", "truncated probe error", "truncated delivery error",
+	} {
 		t.Run(mode, func(t *testing.T) {
 			fixture := testDeliveryFixture()
 			fixture.AccountID = "account42"
@@ -242,8 +244,17 @@ func TestCheckDeliveryFixtureMasksOverlappingOutputFields(t *testing.T) {
 			defer server.Close()
 			transport := server.Client().Transport
 			client := &http.Client{Transport: fixtureRoundTripper(func(r *http.Request) (*http.Response, error) {
-				if r.Method == http.MethodPost || mode == "probe token overlap" {
-					return nil, errors.New("failed route " + fixture.ContextID)
+				fail := r.Method == http.MethodPost || mode == "probe token overlap" || mode == "truncated probe error"
+				if mode == "truncated delivery error" {
+					fail = r.Method == http.MethodPost && r.Header.Get("Authorization") == "Bearer test-auth" &&
+						r.ContentLength < protocol.MaxTextBytes
+				}
+				if fail {
+					message := "failed route " + fixture.ContextID
+					if strings.HasPrefix(mode, "truncated") {
+						message = strings.Repeat("x", conformanceMessageLimit-90) + message
+					}
+					return nil, errors.New(message)
 				}
 				return transport.RoundTrip(r)
 			})}
@@ -253,7 +264,7 @@ func TestCheckDeliveryFixtureMasksOverlappingOutputFields(t *testing.T) {
 			if result.Passed || result.Message != "[REDACTED]" {
 				t.Error("fixture-bearing error was not masked as a whole field")
 			}
-			if mode == "probe token overlap" {
+			if mode == "probe token overlap" || mode == "truncated probe error" {
 				return
 			}
 			if result.Capabilities == nil {

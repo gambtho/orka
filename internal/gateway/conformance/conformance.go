@@ -67,7 +67,7 @@ func Probe(ctx context.Context, target Target) (result ProbeResult) {
 	}
 	healthBody, status, err := request(ctx, client, http.MethodGet, baseURL+"/v1/health", target.AuthorizationValue, nil)
 	if err != nil {
-		return ProbeResult{Message: safeError("health probe failed", err)}
+		return ProbeResult{Message: target.safeError("health probe failed", err)}
 	}
 	if status != http.StatusOK {
 		return ProbeResult{Message: fmt.Sprintf("health probe returned HTTP %d", status)}
@@ -79,7 +79,7 @@ func Probe(ctx context.Context, target Target) (result ProbeResult) {
 
 	capsBody, status, err := request(ctx, client, http.MethodGet, baseURL+"/v1/capabilities", target.AuthorizationValue, nil)
 	if err != nil {
-		return ProbeResult{Message: safeError("capability probe failed", err)}
+		return ProbeResult{Message: target.safeError("capability probe failed", err)}
 	}
 	if status != http.StatusOK {
 		return ProbeResult{Message: fmt.Sprintf("capability probe returned HTTP %d", status)}
@@ -155,7 +155,7 @@ func Check(ctx context.Context, target Target) (result CheckResult) {
 	body, _ := json.Marshal(unauthorizedRequest)
 	unauthorizedBody, status, err := request(ctx, client, http.MethodPost, baseURL+"/v1/deliveries", "", body)
 	if err != nil {
-		return CheckResult{Message: safeError("unauthenticated delivery probe failed", err), Capabilities: probe.Capabilities}
+		return CheckResult{Message: target.safeError("unauthenticated delivery probe failed", err), Capabilities: probe.Capabilities}
 	}
 	if containsCredential(unauthorizedBody, target.AuthorizationValue) {
 		return CheckResult{Message: "unauthenticated delivery response contained sensitive data", Capabilities: probe.Capabilities}
@@ -167,7 +167,7 @@ func Check(ctx context.Context, target Target) (result CheckResult) {
 		ctx, client, http.MethodPost, baseURL+"/v1/deliveries", target.AuthorizationValue+"-invalid", body,
 	)
 	if err != nil {
-		return CheckResult{Message: safeError("bad-auth delivery probe failed", err), Capabilities: probe.Capabilities}
+		return CheckResult{Message: target.safeError("bad-auth delivery probe failed", err), Capabilities: probe.Capabilities}
 	}
 	if containsCredential(badAuthBody, target.AuthorizationValue) {
 		return CheckResult{Message: "bad-auth delivery response contained sensitive data", Capabilities: probe.Capabilities}
@@ -185,7 +185,7 @@ func Check(ctx context.Context, target Target) (result CheckResult) {
 	body, _ = json.Marshal(delivery)
 	firstBody, status, err := request(ctx, client, http.MethodPost, baseURL+"/v1/deliveries", target.AuthorizationValue, body)
 	if err != nil || status != http.StatusOK {
-		return CheckResult{Message: deliveryFailureMessage("delivery probe", status, err), Capabilities: probe.Capabilities}
+		return CheckResult{Message: target.deliveryFailureMessage("delivery probe", status, err), Capabilities: probe.Capabilities}
 	}
 	if containsCredential(firstBody, target.AuthorizationValue) {
 		return CheckResult{Message: "delivery response contained sensitive data", Capabilities: probe.Capabilities}
@@ -196,7 +196,7 @@ func Check(ctx context.Context, target Target) (result CheckResult) {
 	}
 	secondBody, status, err := request(ctx, client, http.MethodPost, baseURL+"/v1/deliveries", target.AuthorizationValue, body)
 	if err != nil || status != http.StatusOK {
-		return CheckResult{Message: deliveryFailureMessage("duplicate delivery probe", status, err), Capabilities: probe.Capabilities}
+		return CheckResult{Message: target.deliveryFailureMessage("duplicate delivery probe", status, err), Capabilities: probe.Capabilities}
 	}
 	if containsCredential(secondBody, target.AuthorizationValue) {
 		return CheckResult{Message: "duplicate delivery response contained sensitive data", Capabilities: probe.Capabilities}
@@ -220,7 +220,7 @@ func Check(ctx context.Context, target Target) (result CheckResult) {
 			)
 			if fixtureErr != nil || fixtureStatus != http.StatusOK {
 				return CheckResult{
-					Message:      deliveryFailureMessage(fixture+" classification probe", fixtureStatus, fixtureErr),
+					Message:      target.deliveryFailureMessage(fixture+" classification probe", fixtureStatus, fixtureErr),
 					Capabilities: probe.Capabilities,
 				}
 			}
@@ -434,16 +434,22 @@ func sanitizeOutputText(value, authorizationValue string, limit int) string {
 	return protocol.SanitizeMessage(value, limit)
 }
 
-func safeError(prefix string, err error) string {
+func (target Target) safeError(prefix string, err error) string {
 	if err == nil {
 		return prefix
 	}
-	return protocol.SanitizeMessage(prefix+": "+err.Error(), conformanceMessageLimit)
+	message := prefix + ": " + err.Error()
+	if target.DeliveryFixture != nil {
+		// Mask the original diagnostic before truncation can leave an unmatched identity prefix.
+		message, _ = target.DeliveryFixture.maskResultFields(message, nil)
+		return sanitizeOutputText(message, target.AuthorizationValue, conformanceMessageLimit)
+	}
+	return protocol.SanitizeMessage(message, conformanceMessageLimit)
 }
 
-func deliveryFailureMessage(prefix string, status int, err error) string {
+func (target Target) deliveryFailureMessage(prefix string, status int, err error) string {
 	if err != nil {
-		return safeError(prefix+" failed", err)
+		return target.safeError(prefix+" failed", err)
 	}
 	return fmt.Sprintf("%s returned HTTP %d", prefix, status)
 }
