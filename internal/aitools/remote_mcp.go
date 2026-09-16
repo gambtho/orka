@@ -97,13 +97,14 @@ func validateRemoteMCPEndpoint(raw string) error {
 	return nil
 }
 
-// remoteMCPURLCredentialName retains the stricter remote token checks and the
-// controller's sensitiveURLParameter exact signed-query denylist. Signed-query
-// names stay URL-specific so this does not change custom-header admission.
+// remoteMCPURLCredentialName extends the controller's signed-query denylist with
+// access-ID separator variants and the stricter remote token checks. These names
+// stay URL-specific so this does not change custom-header admission.
 func remoteMCPURLCredentialName(name string) bool {
 	normalized := strings.ReplaceAll(strings.ToLower(strings.TrimSpace(name)), "_", "-")
 	switch normalized {
-	case "awsaccesskeyid", "googleaccessid", "key-pair-id", "sig", "signature",
+	case "awsaccesskeyid", "aws-access-key-id", "googleaccessid", "google-access-id",
+		"key-pair-id", "sig", "signature",
 		"x-amz-credential", "x-amz-security-token", "x-amz-signature",
 		"x-goog-credential", "x-goog-signature", "x-ms-signature":
 		return true

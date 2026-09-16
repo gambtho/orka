@@ -215,6 +215,8 @@ func TestRemoteMCPURLCredentialQueries(t *testing.T) {
 		valid bool
 	}{
 		{"awsaccesskeyid", false}, {"googleaccessid", false}, {"key-pair-id", false},
+		{"aws-access-key-id", false}, {"aws_access_key_id", false},
+		{"google-access-id", false}, {"google_access_id", false},
 		{"sig", false}, {"signature", false}, {"x-amz-credential", false},
 		{"x-amz-security-token", false}, {"x-amz-signature", false},
 		{"x-goog-credential", false}, {"x-goog-signature", false}, {"x-ms-signature", false},
