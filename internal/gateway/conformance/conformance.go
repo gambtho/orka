@@ -35,6 +35,7 @@ type Target struct {
 	Timeout            time.Duration
 	DisableProxy       bool
 	ReferenceFixtures  bool
+	DeliveryFixture    *DeliveryFixture
 }
 
 // ProbeResult is the non-mutating health and capability result used by reconciliation.
@@ -54,6 +55,9 @@ type CheckResult struct {
 // Probe performs authenticated health and capability checks without sending a delivery.
 func Probe(ctx context.Context, target Target) (result ProbeResult) {
 	defer func() {
+		if target.DeliveryFixture != nil {
+			result.Message, result.Capabilities = target.DeliveryFixture.maskResultFields(result.Message, result.Capabilities)
+		}
 		result = sanitizeProbeResult(result, target.AuthorizationValue)
 	}()
 
@@ -115,8 +119,29 @@ func verifyProbeAuthentication(ctx context.Context, client *http.Client, baseURL
 // redaction safety, and idempotent delivery.
 func Check(ctx context.Context, target Target) (result CheckResult) {
 	defer func() {
+		if target.DeliveryFixture != nil {
+			result.Message, result.Capabilities = target.DeliveryFixture.maskResultFields(result.Message, result.Capabilities)
+		}
 		result = SanitizeCheckResult(result, target.AuthorizationValue)
 	}()
+
+	const defaultRoute = "conformance"
+	unauthorizedRequest := protocol.DeliveryRequest{
+		ProtocolVersion: protocol.Version,
+		DeliveryID:      "conformance-auth", IdempotencyID: "conformance-auth", OriginatingEvent: "conformance-event",
+		Kind: protocol.DeliveryKindFinal, AccountID: defaultRoute, ContextID: defaultRoute,
+		ReplyTarget: defaultRoute, Text: "conformance authentication probe",
+	}
+	if target.DeliveryFixture != nil {
+		if target.ReferenceFixtures {
+			return CheckResult{Message: "delivery fixture cannot be combined with reference fixtures"}
+		}
+		var err error
+		unauthorizedRequest, err = target.DeliveryFixture.deliveryRequest()
+		if err != nil {
+			return CheckResult{Message: err.Error()}
+		}
+	}
 
 	probe := Probe(ctx, target)
 	if !probe.Passed {
@@ -127,12 +152,6 @@ func Check(ctx context.Context, target Target) (result CheckResult) {
 		return CheckResult{Message: err.Error()}
 	}
 
-	unauthorizedRequest := protocol.DeliveryRequest{
-		ProtocolVersion: protocol.Version,
-		DeliveryID:      "conformance-auth", IdempotencyID: "conformance-auth", OriginatingEvent: "conformance-event",
-		Kind: protocol.DeliveryKindFinal, AccountID: "conformance", ContextID: "conformance",
-		ReplyTarget: "conformance", Text: "conformance authentication probe",
-	}
 	body, _ := json.Marshal(unauthorizedRequest)
 	unauthorizedBody, status, err := request(ctx, client, http.MethodPost, baseURL+"/v1/deliveries", "", body)
 	if err != nil {
@@ -161,7 +180,7 @@ func Check(ctx context.Context, target Target) (result CheckResult) {
 	}
 
 	delivery := unauthorizedRequest
-	delivery.DeliveryID = "conformance-idempotency"
+	delivery.DeliveryID = strings.TrimSuffix(unauthorizedRequest.DeliveryID, "-auth") + "-idempotency"
 	delivery.IdempotencyID = delivery.DeliveryID
 	body, _ = json.Marshal(delivery)
 	firstBody, status, err := request(ctx, client, http.MethodPost, baseURL+"/v1/deliveries", target.AuthorizationValue, body)
@@ -224,7 +243,7 @@ func verifyDeliverySizeBounds(
 	base protocol.DeliveryRequest,
 ) error {
 	oversizedText := base
-	oversizedText.DeliveryID = "conformance-size-text"
+	oversizedText.DeliveryID = strings.TrimSuffix(base.DeliveryID, "-auth") + "-size-text"
 	oversizedText.IdempotencyID = oversizedText.DeliveryID
 	oversizedText.Text = strings.Repeat("x", protocol.MaxTextBytes+1)
 	oversizedTextBody, err := json.Marshal(oversizedText)
@@ -236,7 +255,7 @@ func verifyDeliverySizeBounds(
 	}
 
 	oversizedBodyRequest := base
-	oversizedBodyRequest.DeliveryID = "conformance-size-body"
+	oversizedBodyRequest.DeliveryID = strings.TrimSuffix(base.DeliveryID, "-auth") + "-size-body"
 	oversizedBodyRequest.IdempotencyID = oversizedBodyRequest.DeliveryID
 	oversizedBody, err := json.Marshal(oversizedBodyRequest)
 	if err != nil {
