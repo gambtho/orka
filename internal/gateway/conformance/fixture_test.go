@@ -43,9 +43,6 @@ func TestCheckDeliveryFixtureRoutesAndFreshIDs(t *testing.T) {
 				writeTestJSON(w, http.StatusOK, protocol.DeliveryResponse{Status: protocol.DeliveryStatusDelivered, ProviderMessageID: "provider:" + delivery.DeliveryID})
 			})
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				if r.Close != fixtureMode {
-					t.Error("unexpected HTTP connection reuse policy")
-				}
 				if r.URL.Path == "/v1/deliveries" {
 					body, _ := io.ReadAll(r.Body)
 					var delivery protocol.DeliveryRequest
@@ -107,18 +104,23 @@ func TestCheckDeliveryFixtureRoutesAndFreshIDs(t *testing.T) {
 }
 
 func TestProbeDeliveryFixtureTransport(t *testing.T) {
-	for _, mode := range []string{"default", "configured", "custom", "no proxy", "configured no proxy"} {
+	for _, mode := range []string{
+		"legacy", "default", "configured", "custom", "no proxy", "configured no proxy",
+	} {
 		t.Run(mode, func(t *testing.T) {
 			handler := testAdapterHandler("test-auth", defaultCapabilities(), nil)
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				if !r.Close {
-					t.Error("fixture probe permits unsolicited idle connection diagnostics")
+				if r.Close != (mode != "legacy") {
+					t.Error("unexpected HTTP connection reuse policy")
 				}
 				handler.ServeHTTP(w, r)
 			}))
 			defer server.Close()
 			fixture := testDeliveryFixture()
 			target := Target{BaseURL: server.URL, AuthorizationValue: "test-auth", DeliveryFixture: &fixture}
+			if mode == "legacy" {
+				target.DeliveryFixture = nil
+			}
 			transport := http.DefaultTransport.(*http.Transport).Clone()
 			defer transport.CloseIdleConnections()
 			var originalTransport http.RoundTripper
