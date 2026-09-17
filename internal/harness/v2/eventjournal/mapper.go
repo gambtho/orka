@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -489,6 +490,12 @@ var logicalFieldSensitiveMarkers = []string{
 	"#",
 }
 
+// A complete pwd marker is sensitive only while it can still form an
+// assignment key (internal/redact.sensitiveAssignmentRe). A fixed delimiter
+// such as the ampersand in `pwd && ls` cannot become an assignment by joining
+// more fields. Keep open keys conservative, including quoted/whitespace tails.
+var logicalFieldPWDAssignmentRe = regexp.MustCompile(`(?i)pwd[a-z0-9_.-]*["']?\s*(?:[:=]|\z)`)
+
 func appendLogicalFieldBoundary(fields []logicalFieldBoundaries, value string) []logicalFieldBoundaries {
 	if value == "" || value == executionevents.ExecutionEventRedactedValue {
 		return fields
@@ -509,7 +516,7 @@ func logicalFieldsMayReconstructSensitiveMarker(fields []logicalFieldBoundaries)
 	for markerIndex, marker := range logicalFieldSensitiveMarkers {
 		for _, field := range fields {
 			text := strings.ToLower(field.suffix)
-			if strings.Contains(text, marker) {
+			if strings.Contains(text, marker) && (marker != "pwd" || logicalFieldPWDAssignmentRe.MatchString(text)) {
 				return true
 			}
 			for matched := 1; matched < len(marker) && matched <= len(text); matched++ {

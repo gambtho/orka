@@ -1,6 +1,7 @@
 package eventjournal
 
 import (
+	"context"
 	"encoding/json"
 	"strings"
 	"testing"
@@ -9,6 +10,7 @@ import (
 	executionevents "github.com/orka-agents/orka/internal/events"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 	"github.com/orka-agents/orka/internal/store"
+	"github.com/orka-agents/orka/internal/store/storetest"
 )
 
 const (
@@ -252,6 +254,214 @@ func TestMapTerminalToolRedactsCredentialSplitAcrossMetadataAndOutput(t *testing
 	}
 	if title != executionevents.ExecutionEventRedactedValue || mapped.ContentText != executionevents.ExecutionEventRedactedValue {
 		t.Fatalf("tool logical payload = title %q output %q", title, mapped.ContentText)
+	}
+}
+
+func TestMapToolUpdatePreservesBenignOutputAfterPWDHistory(t *testing.T) {
+	now := time.Now().UTC()
+	accepted := testUpdateEvent(1, now, harnessv2.UpdateEvent{})
+	accepted.Type = harnessv2.EventAccepted
+	accepted.Update = nil
+	accepted.Accepted = &harnessv2.AcceptedEvent{
+		AcceptedAt: now,
+		Lease: harnessv2.PromptLease{
+			Generation: 1, IssuedAt: now, ExpiresAt: now.Add(time.Minute),
+		},
+		ACPVersion: harnessv2.ACPProfileV1,
+	}
+	_, history, err := mapPromptLifecycleWithHistory(accepted, testMapContext(), nil, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstOutput := "/bin/bash: line 1: cd: /tmp/workspace: No such file or directory"
+	first := testUpdateEvent(6, now.Add(time.Second), harnessv2.UpdateEvent{
+		Kind: harnessv2.UpdateToolCallUpdate,
+		ToolCall: &harnessv2.ToolCallUpdate{
+			ToolCallID: "call-pwd", Title: "cd /tmp/workspace && pwd && ls -la",
+			Kind: mapperTestToolKindShell, Status: harnessv2.ToolCallStatusFailed,
+		},
+	})
+	mapped, fields, err := mapToolUpdateWithHistory(first, testMapContext(), &firstOutput, false, false, "", history, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mapped.ContentText != firstOutput || mapped.Summary != first.Update.ToolCall.Title {
+		t.Fatal("initial harmless command/output was not preserved")
+	}
+	history = append(history, fields...)
+	if len(history) != 4 {
+		t.Fatalf("model and first tool published %d historical fields, want 4", len(history))
+	}
+
+	output := "README.md\ncmd\ninternal\n"
+	next := testUpdateEvent(9, now.Add(2*time.Second), harnessv2.UpdateEvent{
+		Kind: harnessv2.UpdateToolCallUpdate,
+		ToolCall: &harnessv2.ToolCallUpdate{
+			ToolCallID: "call-list", Title: "List repository files",
+			Kind: mapperTestToolKindShell, Status: harnessv2.ToolCallStatusCompleted,
+		},
+	})
+	mapped, _, err = mapToolUpdateWithHistory(next, testMapContext(), &output, false, false, "", history, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var content struct {
+		Title    string `json:"title"`
+		ToolKind string `json:"toolKind"`
+	}
+	if err := json.Unmarshal(mapped.Content, &content); err != nil {
+		t.Fatal(err)
+	}
+	if content.Title != next.Update.ToolCall.Title || content.ToolKind != mapperTestToolKindShell ||
+		mapped.Summary != next.Update.ToolCall.Title || mapped.ToolName != mapperTestToolKindShell || mapped.ContentText != output {
+		t.Fatalf("harmless tool after pwd history was not preserved: title=%q kind=%q summary=%q toolName=%q output=%q",
+			content.Title, content.ToolKind, mapped.Summary, mapped.ToolName, mapped.ContentText)
+	}
+}
+
+func TestMapperJournalPreservesBenignToolSequenceAfterPWDCommand(t *testing.T) {
+	ctx := context.Background()
+	eventStore := storetest.NewFakeExecutionEventStore()
+	state, err := (Journal{EventStore: eventStore, MapContext: testMapContext()}).Open(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	accepted := testUpdateEvent(1, now, harnessv2.UpdateEvent{})
+	accepted.Type = harnessv2.EventAccepted
+	accepted.Update = nil
+	accepted.Accepted = &harnessv2.AcceptedEvent{
+		AcceptedAt: now,
+		Lease: harnessv2.PromptLease{
+			Generation: 1, IssuedAt: now, ExpiresAt: now.Add(time.Minute),
+		},
+		ACPVersion: harnessv2.ACPProfileV1,
+	}
+	if _, isNew, err := state.AppendPromptLifecycleIfNew(ctx, accepted); err != nil || !isNew {
+		t.Fatalf("append accepted lifecycle: new=%t err=%v", isNew, err)
+	}
+	first := harnessv2.ToolCallUpdate{
+		ToolCallID: "call-pwd", Title: "cd /tmp/workspace && pwd && ls -la",
+		Kind: mapperTestToolKindShell, Status: harnessv2.ToolCallStatusInProgress,
+	}
+	firstDone := first
+	firstDone.Status = harnessv2.ToolCallStatusFailed
+	firstDone.Content = []harnessv2.ContentBlock{{
+		Type: harnessv2.ContentBlockText,
+		Text: "/bin/bash: line 1: cd: /tmp/workspace: No such file or directory",
+	}}
+	next := harnessv2.ToolCallUpdate{
+		ToolCallID: "call-list", Title: "List repository files",
+		Kind: mapperTestToolKindShell, Status: harnessv2.ToolCallStatusCompleted,
+		Content: []harnessv2.ContentBlock{{Type: harnessv2.ContentBlockText, Text: "README.md\ncmd\ninternal\n"}},
+	}
+	outputFree := harnessv2.ToolCallUpdate{
+		ToolCallID: "call-check", Title: "Check working tree",
+		Kind: mapperTestToolKindShell, Status: harnessv2.ToolCallStatusCompleted,
+	}
+	for index, tool := range []harnessv2.ToolCallUpdate{first, firstDone, next, outputFree} {
+		kind := harnessv2.UpdateToolCallUpdate
+		if index == 0 {
+			kind = harnessv2.UpdateToolCall
+		}
+		event := testUpdateEvent(uint64(index+2), now.Add(time.Duration(index+1)*time.Second), harnessv2.UpdateEvent{
+			Kind: kind, ToolCall: &tool,
+		})
+		if _, isNew, err := state.AppendUpdateIfNew(ctx, event); err != nil || !isNew {
+			t.Fatalf("append tool event %d: new=%t err=%v", index, isNew, err)
+		}
+	}
+	listed := listJournalEvents(t, ctx, eventStore)
+	if len(listed) != 5 {
+		t.Fatalf("public event count = %d, want 5", len(listed))
+	}
+	for index, want := range []harnessv2.ToolCallUpdate{firstDone, next, outputFree} {
+		mapped := listed[index+2]
+		var content struct {
+			Title    string `json:"title"`
+			ToolKind string `json:"toolKind"`
+		}
+		if err := json.Unmarshal(mapped.Content, &content); err != nil {
+			t.Fatal(err)
+		}
+		wantOutput := ""
+		if len(want.Content) > 0 {
+			wantOutput = want.Content[0].Text
+		}
+		if mapped.Summary != want.Title || mapped.ToolName != want.Kind || content.Title != want.Title ||
+			content.ToolKind != want.Kind || mapped.ContentText != wantOutput {
+			t.Fatalf("public tool event %d lost harmless metadata or output", index)
+		}
+	}
+}
+
+func TestLogicalFieldsPWDMarkerKeepsAssignmentContinuations(t *testing.T) {
+	for _, parts := range [][]string{
+		{"pwd"},
+		{"DB_PWD_suffix"},
+		{"pwd\" \t"},
+		{"pwd\u0027\n"},
+		{"pwd="},
+		{"pwd :"},
+		{"pwd && ls; db_PWD_name\t"},
+		{"p", "w", "d"},
+		{"pw", "d="},
+		{"p", "wd && ls"},
+	} {
+		var fields []logicalFieldBoundaries
+		for _, part := range parts {
+			fields = appendLogicalFieldBoundary(fields, part)
+		}
+		if !logicalFieldsMayReconstructSensitiveMarker(fields) {
+			t.Fatalf("fallback discarded a potentially sensitive pwd marker in %q", parts)
+		}
+	}
+}
+
+func TestProjectToolUpdateRedactsPWDCredentialsAcrossHistoryCaps(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		history []string
+		title   string
+		kind    string
+	}{
+		{name: "open key", history: []string{"pwd"}, title: "=", kind: "shell"},
+		{name: "split marker", history: []string{"p", "w"}, title: "d", kind: "="},
+		{name: "extended key", history: []string{"db_PWD_suf"}, title: "fix", kind: "="},
+		{name: "unicode case folded key", history: []string{"pwdſ"}, title: "=", kind: "shell"},
+		{name: "quoted key", history: []string{"db_PWD\" \t"}, title: "=", kind: "shell"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			for _, capacity := range []struct {
+				name string
+				size int
+			}{
+				{name: "candidate cap", size: 4},
+				{name: "field cap", size: maxLogicalFieldPermutationFields},
+			} {
+				t.Run(capacity.name, func(t *testing.T) {
+					var history []logicalFieldBoundaries
+					for _, value := range []string{"gpt-test", "pwd && ls", "shell"} {
+						history = appendLogicalFieldBoundary(history, value)
+					}
+					for _, value := range test.history {
+						history = appendLogicalFieldBoundary(history, value)
+					}
+					for len(history) < capacity.size {
+						history = appendLogicalFieldBoundary(history, "padding")
+					}
+					output := "fixture-value"
+					projection, published := projectToolUpdate(harnessv2.ToolCallUpdate{
+						Title: test.title, Kind: test.kind,
+					}, history, false, &output)
+					if projection.title != executionevents.ExecutionEventRedactedValue ||
+						projection.kind != executionevents.ExecutionEventRedactedValue ||
+						projection.contentText != executionevents.ExecutionEventRedactedValue || len(published) != 0 {
+						t.Fatal("pwd assignment split across history and tool fields was not fully redacted")
+					}
+				})
+			}
+		})
 	}
 }
 
