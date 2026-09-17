@@ -8,6 +8,7 @@ package conformance
 
 import (
 	"errors"
+	"strconv"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -41,9 +42,12 @@ func (f DeliveryFixture) deliveryRequest() (protocol.DeliveryRequest, error) {
 	if err := protocol.ValidateDeliveryRequest(&delivery); err != nil {
 		return protocol.DeliveryRequest{}, errors.New("invalid delivery fixture")
 	}
-	// V1's outbound validator does not bound the optional thread identity.
-	if len(f.ThreadID) > protocol.MaxIdentityBytes || !utf8.ValidString(f.ThreadID) || strings.ContainsFunc(f.ThreadID, unicode.IsControl) {
-		return protocol.DeliveryRequest{}, errors.New("invalid delivery fixture")
+	// V1 validates trimmed required identities and does not bound the optional thread.
+	// Check the original values because those are what the fixture transmits.
+	for _, identity := range []string{f.AccountID, f.ContextID, f.ThreadID, f.ReplyTarget, f.OriginatingEventID} {
+		if len(identity) > protocol.MaxIdentityBytes || !utf8.ValidString(identity) || strings.ContainsFunc(identity, unicode.IsControl) {
+			return protocol.DeliveryRequest{}, errors.New("invalid delivery fixture")
+		}
 	}
 	return delivery, nil
 }
@@ -56,7 +60,13 @@ func (f DeliveryFixture) maskResultFields(
 	// overlapping identities and expose their remaining fragments.
 	mask := func(value string) string {
 		for _, identity := range identities {
-			if identity = strings.TrimSpace(identity); identity != "" && strings.Contains(value, identity) {
+			identity = strings.TrimSpace(identity)
+			if identity == "" {
+				continue
+			}
+			// HTTP and JSON errors can embed the identity inside a larger quoted field.
+			quoted := strconv.Quote(identity)
+			if strings.Contains(value, identity) || strings.Contains(value, quoted[1:len(quoted)-1]) {
 				return redactedValue
 			}
 		}

@@ -35,6 +35,8 @@ func TestLoadDeliveryFixture(t *testing.T) {
 		{"trailing JSON", valid + ` {"private-field":"private-content"}`, false},
 		{"trailing malformed", valid + ` private-content`, false},
 		{"malformed", `{"private-field":"private-content"`, false},
+		{"invalid UTF8", strings.Replace(valid, "fixture-account", "fixture-\xff-account", 1), false},
+		{"lone surrogate", strings.Replace(valid, "fixture-context", `room-\ud800`, 1), false},
 		{"empty", "", false},
 		{"null", "null", false},
 		{"array", "[]", false},
@@ -75,5 +77,47 @@ func TestLoadDeliveryFixtureReadFailurePrivacy(t *testing.T) {
 		} else if err.Error() != "could not read delivery fixture" {
 			t.Error("read diagnostic is not fixed and sanitized")
 		}
+	}
+}
+
+func TestLoadDeliveryFixtureUnicode(t *testing.T) {
+	cases := []struct {
+		name, encoded, want string
+		valid               bool
+	}{
+		{"raw UTF8", "fixture-\U0001f600", "fixture-\U0001f600", true},
+		{"BMP escape", `\u0066ixture-context`, "fixture-context", true},
+		{"surrogate pair", `fixture-\ud83d\ude00`, "fixture-\U0001f600", true},
+		{"boundary pairs", `fixture-\ud800\udc00\uDBFF\uDFFF`, "fixture-\U00010000\U0010ffff", true},
+		{"replacement character", `fixture-\ufffd`, "fixture-\ufffd", true},
+		{"escaped surrogate text", `fixture-\\ud800`, `fixture-\ud800`, true},
+		{"lone low surrogate", `fixture-\udc00`, "", false},
+		{"surrogate before text", `fixture-\ud800-text`, "", false},
+		{"surrogate before BMP", `fixture-\ud800\u0061`, "", false},
+		{"two high surrogates", `fixture-\ud800\ud800`, "", false},
+		{"reversed pair", `fixture-\udc00\ud800`, "", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			body := `{"accountId":"fixture-account","contextId":"` + tc.encoded +
+				`","replyTarget":"fixture-reply","originatingEventId":"fixture-event"}`
+			path := filepath.Join(t.TempDir(), "private-path.json")
+			if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+				t.Fatal("could not create test fixture")
+			}
+			fixture, err := loadDeliveryFixture(path)
+			if tc.valid {
+				if err != nil || fixture == nil {
+					t.Fatal("valid Unicode fixture rejected")
+				}
+				if fixture.ContextID != tc.want {
+					t.Error("loaded Unicode routing identity differs")
+				}
+			} else if err == nil || fixture != nil {
+				t.Error("malformed Unicode fixture accepted")
+			} else if err.Error() != "invalid delivery fixture" {
+				t.Error("fixture diagnostic is not the fixed sanitized message")
+			}
+		})
 	}
 }

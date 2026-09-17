@@ -151,6 +151,11 @@ func TestCheckDeliveryFixtureRejectsBeforeNetwork(t *testing.T) {
 		"reply missing":                   func(f *DeliveryFixture) { f.ReplyTarget = "" },
 		"event missing":                   func(f *DeliveryFixture) { f.OriginatingEventID = "" },
 		"account too long":                func(f *DeliveryFixture) { f.AccountID = strings.Repeat("a", protocol.MaxIdentityBytes+1) },
+		"account leading control":         func(f *DeliveryFixture) { f.AccountID = "\n" + f.AccountID },
+		"account whitespace padding":      func(f *DeliveryFixture) { f.AccountID = strings.Repeat(" ", protocol.MaxIdentityBytes) + f.AccountID },
+		"context trailing control":        func(f *DeliveryFixture) { f.ContextID += "\t" },
+		"reply leading control":           func(f *DeliveryFixture) { f.ReplyTarget = "\r" + f.ReplyTarget },
+		"event whitespace padding":        func(f *DeliveryFixture) { f.OriginatingEventID += strings.Repeat(" ", protocol.MaxIdentityBytes) },
 		"context control":                 func(f *DeliveryFixture) { f.ContextID = "bad\x00context" },
 		"reply invalid UTF8":              func(f *DeliveryFixture) { f.ReplyTarget = "bad\xffreply" },
 		"thread too long":                 func(f *DeliveryFixture) { f.ThreadID = strings.Repeat("t", protocol.MaxIdentityBytes+1) },
@@ -281,6 +286,54 @@ func TestCheckDeliveryFixtureMasksOverlappingOutputFields(t *testing.T) {
 				t.Error("unrelated capability fields changed")
 			}
 		})
+	}
+}
+
+func TestCheckDeliveryFixtureMasksQuotedErrors(t *testing.T) {
+	for name, identity := range map[string]string{
+		"quote":             "fixture-chat\"segment",
+		"backslash":         "fixture-chat\\segment",
+		"unicode separator": "fixture-chat\u2028segment",
+	} {
+		for _, mode := range []string{"capabilities", "transport", "truncated transport"} {
+			t.Run(name+"/"+mode, func(t *testing.T) {
+				fixture := testDeliveryFixture()
+				fixture.ContextID = identity
+				caps := defaultCapabilities()
+				caps.ProtocolVersion = identity
+				handler := testAdapterHandler("test-auth", caps, nil)
+				if mode != "capabilities" {
+					handler = http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+						conn, writer, err := w.(http.Hijacker).Hijack()
+						if err != nil {
+							t.Error("could not hijack test connection")
+							return
+						}
+						defer conn.Close() //nolint:errcheck
+						header := "invalid-header " + identity
+						if mode == "truncated transport" {
+							header = strings.Repeat("x", conformanceMessageLimit) + header
+						}
+						if _, err := writer.WriteString("HTTP/1.1 200 OK\r\n" + header + "\r\n\r\n"); err != nil {
+							t.Error("could not write malformed test response")
+							return
+						}
+						if err := writer.Flush(); err != nil {
+							t.Error("could not flush malformed test response")
+						}
+					})
+				}
+				server := httptest.NewServer(handler)
+				defer server.Close()
+				result := Check(context.Background(), Target{
+					BaseURL: server.URL, AuthorizationValue: "test-auth",
+					HTTPClient: server.Client(), DeliveryFixture: &fixture,
+				})
+				if result.Passed || result.Message != redactedValue {
+					t.Error("quoted fixture identity was not masked before output truncation")
+				}
+			})
+		}
 	}
 }
 

@@ -14,8 +14,11 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strconv"
 	"strings"
 	"time"
+	"unicode/utf16"
+	"unicode/utf8"
 
 	"github.com/orka-agents/orka/internal/gateway/conformance"
 	"github.com/orka-agents/orka/internal/gateway/protocol"
@@ -77,7 +80,7 @@ func loadDeliveryFixture(path string) (*conformance.DeliveryFixture, error) {
 	if err != nil {
 		return nil, fmt.Errorf("could not read delivery fixture")
 	}
-	if len(body) > protocol.MaxHTTPBodyBytes {
+	if len(body) > protocol.MaxHTTPBodyBytes || !validFixtureUnicode(body) {
 		return nil, fmt.Errorf("invalid delivery fixture")
 	}
 	decoder := json.NewDecoder(bytes.NewReader(body))
@@ -91,6 +94,43 @@ func loadDeliveryFixture(path string) (*conformance.DeliveryFixture, error) {
 		return nil, fmt.Errorf("invalid delivery fixture")
 	}
 	return fixture, nil
+}
+
+// encoding/json repairs invalid UTF-8 and unpaired UTF-16 surrogates.
+// Reject both before decoding can change a routing identity.
+func validFixtureUnicode(body []byte) bool {
+	if !utf8.Valid(body) {
+		return false
+	}
+	for i := 0; i < len(body); i++ {
+		if body[i] != '\\' {
+			continue
+		}
+		i++
+		if i >= len(body) || body[i] != 'u' {
+			continue
+		}
+		if i+4 >= len(body) {
+			return false
+		}
+		first, err := strconv.ParseUint(string(body[i+1:i+5]), 16, 16)
+		if err != nil {
+			return false
+		}
+		i += 4
+		if !utf16.IsSurrogate(rune(first)) {
+			continue
+		}
+		if i+6 >= len(body) || body[i+1] != '\\' || body[i+2] != 'u' {
+			return false
+		}
+		second, err := strconv.ParseUint(string(body[i+3:i+7]), 16, 16)
+		if err != nil || utf16.DecodeRune(rune(first), rune(second)) == utf8.RuneError {
+			return false
+		}
+		i += 6
+	}
+	return true
 }
 
 func writeResult(writer io.Writer, result conformance.CheckResult, token string) error {
