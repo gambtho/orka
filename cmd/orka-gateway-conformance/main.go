@@ -80,7 +80,7 @@ func loadDeliveryFixture(path string) (*conformance.DeliveryFixture, error) {
 	if err != nil {
 		return nil, fmt.Errorf("could not read delivery fixture")
 	}
-	if len(body) > protocol.MaxHTTPBodyBytes || !validFixtureUnicode(body) {
+	if len(body) > protocol.MaxHTTPBodyBytes || !validFixtureUnicode(body) || !uniqueFixtureKeys(body) {
 		return nil, fmt.Errorf("invalid delivery fixture")
 	}
 	decoder := json.NewDecoder(bytes.NewReader(body))
@@ -94,6 +94,38 @@ func loadDeliveryFixture(path string) (*conformance.DeliveryFixture, error) {
 		return nil, fmt.Errorf("invalid delivery fixture")
 	}
 	return fixture, nil
+}
+
+// encoding/json accepts repeated keys and matches these ASCII field names
+// case-insensitively. Reject aliases before a later value can replace an identity.
+func uniqueFixtureKeys(body []byte) bool {
+	decoder := json.NewDecoder(bytes.NewReader(body))
+	opening, err := decoder.Token()
+	if err != nil || opening != json.Delim('{') {
+		return false
+	}
+	seen := make(map[string]bool)
+	for decoder.More() {
+		token, err := decoder.Token()
+		if err != nil {
+			return false
+		}
+		key, ok := token.(string)
+		if !ok {
+			return false
+		}
+		key = strings.ToLower(key)
+		if seen[key] {
+			return false
+		}
+		seen[key] = true
+		var value json.RawMessage
+		if err := decoder.Decode(&value); err != nil {
+			return false
+		}
+	}
+	closing, err := decoder.Token()
+	return err == nil && closing == json.Delim('}')
 }
 
 // encoding/json repairs invalid UTF-8 and unpaired UTF-16 surrogates.

@@ -325,6 +325,13 @@ func normalizedTarget(target Target) (*http.Client, string, error) {
 		}
 		client.Transport = transport
 	}
+	if target.DeliveryFixture != nil {
+		transport := client.Transport
+		if transport == nil {
+			transport = http.DefaultTransport
+		}
+		client.Transport = fixtureTransport{transport}
+	}
 	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 	return client, strings.TrimRight(parsed.String(), "/"), nil
 }

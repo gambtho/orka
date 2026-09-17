@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -42,6 +43,9 @@ func TestCheckDeliveryFixtureRoutesAndFreshIDs(t *testing.T) {
 				writeTestJSON(w, http.StatusOK, protocol.DeliveryResponse{Status: protocol.DeliveryStatusDelivered, ProviderMessageID: "provider:" + delivery.DeliveryID})
 			})
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Close != fixtureMode {
+					t.Error("unexpected HTTP connection reuse policy")
+				}
 				if r.URL.Path == "/v1/deliveries" {
 					body, _ := io.ReadAll(r.Body)
 					var delivery protocol.DeliveryRequest
@@ -97,6 +101,41 @@ func TestCheckDeliveryFixtureRoutesAndFreshIDs(t *testing.T) {
 				} else {
 					assertLegacyRun(t, requests[start:start+6])
 				}
+			}
+		})
+	}
+}
+
+func TestProbeDeliveryFixtureTransport(t *testing.T) {
+	for _, mode := range []string{"default", "configured", "custom", "no proxy", "configured no proxy"} {
+		t.Run(mode, func(t *testing.T) {
+			handler := testAdapterHandler("test-auth", defaultCapabilities(), nil)
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if !r.Close {
+					t.Error("fixture probe permits unsolicited idle connection diagnostics")
+				}
+				handler.ServeHTTP(w, r)
+			}))
+			defer server.Close()
+			fixture := testDeliveryFixture()
+			target := Target{BaseURL: server.URL, AuthorizationValue: "test-auth", DeliveryFixture: &fixture}
+			transport := http.DefaultTransport.(*http.Transport).Clone()
+			defer transport.CloseIdleConnections()
+			var originalTransport http.RoundTripper
+			switch mode {
+			case "custom":
+				originalTransport = fixtureRoundTripper(transport.RoundTrip)
+			case "configured", "configured no proxy":
+				originalTransport = transport
+			}
+			client := &http.Client{Transport: originalTransport}
+			target.HTTPClient = client
+			target.DisableProxy = strings.Contains(mode, "no proxy")
+			if result := Probe(context.Background(), target); !result.Passed {
+				t.Fatalf("fixture probe failed: %s", result.Message)
+			}
+			if transport.DisableKeepAlives || client.Timeout != 0 || client.CheckRedirect != nil {
+				t.Error("fixture probe mutated caller HTTP configuration")
 			}
 		})
 	}
@@ -246,7 +285,11 @@ func TestCheckDeliveryFixtureMasksOverlappingOutputFields(t *testing.T) {
 			} else {
 				fixture.ContextID = "context-test-auth-suffix"
 			}
-			server := httptest.NewServer(testAdapterHandler("test-auth", caps, nil))
+			server := httptest.NewServer(testAdapterHandler("test-auth", caps, func(w http.ResponseWriter, r *http.Request) {
+				// Finish the size probes before injecting the final delivery error.
+				_, _ = io.Copy(io.Discard, r.Body)
+				w.WriteHeader(http.StatusBadRequest)
+			}))
 			defer server.Close()
 			transport := server.Client().Transport
 			client := &http.Client{Transport: fixtureRoundTripper(func(r *http.Request) (*http.Response, error) {
@@ -295,13 +338,20 @@ func TestCheckDeliveryFixtureMasksQuotedErrors(t *testing.T) {
 		"quote":             "fixture-chat\"segment",
 		"backslash":         "fixture-chat\\segment",
 		"unicode separator": "fixture-chat\u2028segment",
+		"nested quote":      "fixture-chat\\\"segment/é%41\u2028",
+		"deep quote":        "fixture-chat\\\"segment/é%41\u2028",
 	} {
+		encoded := identity
+		depth := map[string]int{"nested quote": 1, "deep quote": 9}[name]
+		for range depth {
+			encoded = strconv.Quote(encoded)
+		}
 		for _, mode := range []string{"capabilities", "transport", "truncated transport"} {
 			t.Run(name+"/"+mode, func(t *testing.T) {
 				fixture := testDeliveryFixture()
 				fixture.ContextID = identity
 				caps := defaultCapabilities()
-				caps.ProtocolVersion = identity
+				caps.ProtocolVersion = encoded
 				handler := testAdapterHandler("test-auth", caps, nil)
 				if mode != "capabilities" {
 					handler = http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -311,7 +361,7 @@ func TestCheckDeliveryFixtureMasksQuotedErrors(t *testing.T) {
 							return
 						}
 						defer conn.Close() //nolint:errcheck
-						header := "invalid-header " + identity
+						header := "invalid-header " + encoded
 						if mode == "truncated transport" {
 							header = strings.Repeat("x", conformanceMessageLimit) + header
 						}
@@ -354,6 +404,48 @@ func TestDeliveryFixtureMaskCopiesCapabilities(t *testing.T) {
 	}
 }
 
+func TestCheckDeliveryFixtureMasksQuotedEscapes(t *testing.T) {
+	fixture := testDeliveryFixture()
+	fixture.ContextID = "private&<route>/é😀\\%41"
+	encoded, err := json.Marshal(fixture.ContextID)
+	if err != nil {
+		t.Fatal("could not encode test identity")
+	}
+	for name, value := range map[string]string{
+		"JSON":           string(encoded),
+		"ASCII JSON":     `"private\u0026\u003Croute\u003e\/\u00E9\uD83D\uDE00\\%41"`,
+		"JSON in query":  url.QueryEscape(string(encoded)),
+		"JSON in quotes": strconv.Quote(string(encoded)),
+		"ASCII Go":       strconv.QuoteToASCII(fixture.ContextID),
+		"Go bytes":       `"private&<route>/\xc3\xa9\xf0\x9f\x98\x80\\%41"`,
+		"Go octal":       `"private&<route>/\303\251\360\237\230\200\\%41"`,
+	} {
+		for _, mode := range []string{"capability field", "capability error"} {
+			t.Run(name+"/"+mode, func(t *testing.T) {
+				caps := defaultCapabilities()
+				if mode == "capability error" {
+					caps.ProtocolVersion = value
+				} else {
+					caps.AdapterName = "adapter-" + value
+				}
+				server := httptest.NewServer(testAdapterHandler("test-auth", caps, nil))
+				defer server.Close()
+				result := Check(context.Background(), Target{
+					BaseURL: server.URL, AuthorizationValue: "test-auth",
+					HTTPClient: server.Client(), DeliveryFixture: &fixture,
+				})
+				if mode == "capability error" {
+					if result.Passed || result.Message != redactedValue {
+						t.Error("quoted fixture identity was not masked in the error")
+					}
+				} else if result.Capabilities == nil || result.Capabilities.AdapterName != redactedValue {
+					t.Error("quoted fixture identity was not masked in capabilities")
+				}
+			})
+		}
+	}
+}
+
 func TestCheckDeliveryFixtureMasksEscapedRoutes(t *testing.T) {
 	identity := "private account/é"
 	escaped := url.PathEscape(identity)
@@ -363,6 +455,10 @@ func TestCheckDeliveryFixtureMasksEscapedRoutes(t *testing.T) {
 		"mixed case":   strings.ReplaceAll(escaped, "%2F", "%2f"),
 		"whole path":   (&url.URL{Path: identity}).EscapedPath(),
 		"nested":       url.PathEscape(escaped),
+		"query":        url.QueryEscape(identity),
+		"nested query": url.QueryEscape(url.QueryEscape(identity)),
+		"path query":   url.PathEscape(url.QueryEscape(identity)),
+		"query path":   url.QueryEscape(escaped),
 	} {
 		for _, mode := range []string{"URL", "header", "truncated header", "capabilities"} {
 			t.Run(name+"/"+mode, func(t *testing.T) {
@@ -431,11 +527,35 @@ func TestDeliveryFixtureMaskEscapingBoundsAndSafeFields(t *testing.T) {
 		t.Error("deeply escaped fixture identity was not masked")
 	}
 	caps := defaultCapabilities()
-	caps.AdapterName = "safe%2Fadapter"
-	safe := "safe%20route is 100% ready"
+	caps.AdapterName = `safe%2Fadapter\u0026\uD83D\uDE00\U0001f680`
+	safe := "safe%20route is 100% ready, a+b"
 	message, masked := fixture.maskResultFields(safe, &caps)
 	if message != safe || *masked != caps {
 		t.Error("safe escaped fields changed")
+	}
+}
+
+func TestDeliveryFixtureMaskQueryEncodingPreservesLiteralPlus(t *testing.T) {
+	for _, identity := range []string{"private account", "private+account /é", "private+account"} {
+		for name, encode := range map[string]func(string) string{
+			"path":  url.PathEscape,
+			"query": url.QueryEscape,
+			"path query": func(value string) string {
+				return url.PathEscape(url.QueryEscape(value))
+			},
+			"query path": func(value string) string {
+				return url.QueryEscape(url.PathEscape(value))
+			},
+		} {
+			t.Run(identity+"/"+name, func(t *testing.T) {
+				fixture := testDeliveryFixture()
+				fixture.AccountID = identity
+				message, _ := fixture.maskResultFields("failed route "+encode(identity), nil)
+				if message != redactedValue {
+					t.Error("query or path escaped identity was not masked")
+				}
+			})
+		}
 	}
 }
 

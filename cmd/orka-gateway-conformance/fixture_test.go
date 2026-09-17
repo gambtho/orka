@@ -7,9 +7,17 @@ MIT License - see LICENSE file for details.
 package main
 
 import (
+	"encoding/json"
+	"flag"
+	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/orka-agents/orka/internal/gateway/protocol"
@@ -23,6 +31,8 @@ func TestLoadDeliveryFixture(t *testing.T) {
 		valid      bool
 	}{
 		{"valid", valid, true},
+		{"single case-insensitive key", strings.Replace(valid, `"accountId"`, `"ACCOUNTID"`, 1), true},
+		{"escaped key", strings.Replace(valid, `"accountId"`, `"account\u0049d"`, 1), true},
 		{"optional thread", strings.TrimSuffix(valid, "}") + `,"threadId":"fixture-thread"}`, true},
 		{"exact body limit", valid + strings.Repeat(" ", protocol.MaxHTTPBodyBytes-len(valid)), true},
 		{"over body limit", valid + strings.Repeat(" ", protocol.MaxHTTPBodyBytes+1-len(valid)), false},
@@ -66,6 +76,169 @@ func TestLoadDeliveryFixture(t *testing.T) {
 				t.Error("fixture diagnostic is not the fixed sanitized message")
 			}
 		})
+	}
+}
+
+func TestDeliveryFixtureDuplicateRoutingKeysRejectedBeforeNetwork(t *testing.T) {
+	const valid = `{"accountId":"fixture-account","contextId":"fixture-context",` +
+		`"threadId":"fixture-thread","replyTarget":"fixture-reply","originatingEventId":"fixture-event"}`
+	type testCase struct{ name, body string }
+	var cases []testCase
+	for _, field := range []string{"accountId", "contextId", "threadId", "replyTarget", "originatingEventId"} {
+		key := `"` + field + `":`
+		for _, alias := range []string{field, strings.ToUpper(field)} {
+			cases = append(cases, testCase{
+				name: field + " after " + alias,
+				body: strings.Replace(valid, key, `"`+alias+`":"private\nroute",`+key, 1),
+			})
+		}
+	}
+	cases = append(cases,
+		testCase{
+			name: "case-insensitive overwrite",
+			body: strings.Replace(valid, `"contextId":`, `"contextId":"private\nroute","ContextID":`, 1),
+		},
+		testCase{
+			name: "escaped key overwrite",
+			body: strings.Replace(valid, `"contextId":`, `"context\u0049d":"private\nroute","contextId":`, 1),
+		},
+		testCase{
+			name: "identical duplicate values",
+			body: strings.Replace(valid, `"contextId":`, `"contextId":"fixture-context","contextId":`, 1),
+		},
+	)
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests.Add(1)
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer server.Close()
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "private-fixture.json")
+			if err := os.WriteFile(path, []byte(tc.body), 0o600); err != nil {
+				t.Fatal("could not create test fixture")
+			}
+			before := requests.Load()
+			command := exec.Command(os.Args[0], "-test.run=^TestDeliveryFixtureCLIHelper$")
+			command.Env = append(os.Environ(),
+				"ORKA_GATEWAY_FIXTURE_TEST_HELPER=1",
+				"ORKA_GATEWAY_FIXTURE_TEST_ENDPOINT="+server.URL,
+				"ORKA_GATEWAY_FIXTURE_TEST_PATH="+path,
+				"ORKA_GATEWAY_BEARER_TOKEN=fixture-test-token",
+			)
+			output, err := command.CombinedOutput()
+			if exit, ok := err.(*exec.ExitError); !ok || exit.ExitCode() != 2 {
+				t.Error("duplicate routing keys did not fail CLI preflight with exit code 2")
+			}
+			if string(output) != "invalid delivery fixture\n" {
+				t.Error("duplicate routing key diagnostic is not fixed and sanitized")
+			}
+			if requests.Load() != before {
+				t.Error("duplicate routing keys reached the network")
+			}
+		})
+	}
+}
+
+func TestDeliveryFixtureCLIHelper(_ *testing.T) {
+	if os.Getenv("ORKA_GATEWAY_FIXTURE_TEST_HELPER") != "1" {
+		return
+	}
+	flag.CommandLine = flag.NewFlagSet("orka-gateway-conformance", flag.ExitOnError)
+	os.Args = []string{"orka-gateway-conformance",
+		"--endpoint", os.Getenv("ORKA_GATEWAY_FIXTURE_TEST_ENDPOINT"),
+		"--delivery-fixture", os.Getenv("ORKA_GATEWAY_FIXTURE_TEST_PATH"),
+	}
+	main()
+	os.Exit(0)
+}
+
+func TestDeliveryFixtureDoesNotLogUnsolicitedResponse(t *testing.T) {
+	const route = "fixture-private-unsolicited-route"
+	fixture := `{"accountId":"fixture-account","contextId":"` + route +
+		`","replyTarget":"fixture-reply","originatingEventId":"fixture-event"}`
+	path := filepath.Join(t.TempDir(), "private-fixture.json")
+	if err := os.WriteFile(path, []byte(fixture), 0o600); err != nil {
+		t.Fatal("could not create test fixture")
+	}
+	var injected atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/deliveries" {
+			body, err := io.ReadAll(r.Body)
+			var delivery protocol.DeliveryRequest
+			if err != nil || json.Unmarshal(body, &delivery) != nil || delivery.ContextID != route {
+				t.Error("delivery lost fixture routing")
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			if r.Header.Get("Authorization") == "" {
+				connection, buffer, err := w.(http.Hijacker).Hijack()
+				if err != nil {
+					t.Error("could not hijack test connection")
+					return
+				}
+				defer connection.Close() //nolint:errcheck
+				// Echo routing outside the declared response body, bypassing result masking.
+				_, err = fmt.Fprintf(buffer,
+					"HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\n\r\nprovider diagnostic %s\r\n", delivery.ContextID)
+				if err != nil || buffer.Flush() != nil {
+					t.Error("could not inject test diagnostic")
+					return
+				}
+				injected.Add(1)
+				return
+			}
+			if r.Header.Get("Authorization") != "Bearer fixture-test-token" {
+				w.WriteHeader(http.StatusUnauthorized)
+				return
+			}
+			if len(body) > protocol.MaxHTTPBodyBytes || len(delivery.Text) > protocol.MaxTextBytes {
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			_ = json.NewEncoder(w).Encode(protocol.DeliveryResponse{
+				Status: protocol.DeliveryStatusDelivered, ProviderMessageID: "fixture-result",
+			})
+			return
+		}
+		if r.Header.Get("Authorization") != "Bearer fixture-test-token" {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		switch r.URL.Path {
+		case "/v1/health":
+			_ = json.NewEncoder(w).Encode(protocol.HealthResponse{Status: "ok"})
+		case "/v1/capabilities":
+			_ = json.NewEncoder(w).Encode(protocol.CapabilitiesResponse{
+				ProtocolVersion: protocol.Version, AdapterName: "fixture-adapter",
+				Capabilities: protocol.Capabilities{IdempotentDelivery: true},
+			})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+	command := exec.Command(os.Args[0], "-test.run=^TestDeliveryFixtureCLIHelper$")
+	command.Env = append(os.Environ(),
+		"ORKA_GATEWAY_FIXTURE_TEST_HELPER=1",
+		"ORKA_GATEWAY_FIXTURE_TEST_ENDPOINT="+server.URL,
+		"ORKA_GATEWAY_FIXTURE_TEST_PATH="+path,
+		"ORKA_GATEWAY_BEARER_TOKEN=fixture-test-token",
+	)
+	output, err := command.CombinedOutput()
+	if err != nil {
+		t.Fatal("fixture CLI did not pass")
+	}
+	if injected.Load() != 1 {
+		t.Error("expected one injected provider diagnostic")
+	}
+	if strings.Contains(string(output), route) || strings.Contains(string(output), "Unsolicited response") {
+		t.Error("fixture CLI leaked unsolicited transport diagnostics")
+	}
+	var result struct{ Passed bool }
+	if err := json.Unmarshal(output, &result); err != nil || !result.Passed {
+		t.Error("fixture CLI output is not a single passing JSON result")
 	}
 }
 
