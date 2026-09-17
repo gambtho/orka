@@ -14,6 +14,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 
@@ -350,6 +351,91 @@ func TestDeliveryFixtureMaskCopiesCapabilities(t *testing.T) {
 	}
 	if caps != original || masked == &caps {
 		t.Error("masking did not preserve caller-owned capabilities")
+	}
+}
+
+func TestCheckDeliveryFixtureMasksEscapedRoutes(t *testing.T) {
+	identity := "private account/é"
+	escaped := url.PathEscape(identity)
+	for name, encoded := range map[string]string{
+		"path segment": escaped,
+		"lowercase":    strings.ToLower(escaped),
+		"mixed case":   strings.ReplaceAll(escaped, "%2F", "%2f"),
+		"whole path":   (&url.URL{Path: identity}).EscapedPath(),
+		"nested":       url.PathEscape(escaped),
+	} {
+		for _, mode := range []string{"URL", "header", "truncated header", "capabilities"} {
+			t.Run(name+"/"+mode, func(t *testing.T) {
+				fixture := testDeliveryFixture()
+				fixture.AccountID = identity
+				caps := defaultCapabilities()
+				caps.AdapterName = encoded
+				handler := testAdapterHandler("test-auth", caps, nil)
+				if mode != "capabilities" {
+					handler = http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+						conn, writer, err := w.(http.Hijacker).Hijack()
+						if err != nil {
+							t.Error("could not hijack test connection")
+							return
+						}
+						defer conn.Close() //nolint:errcheck
+						if mode == "URL" {
+							return
+						}
+						header := "invalid-header 100% complete %ZZ " + encoded
+						if mode == "truncated header" {
+							header = strings.Repeat("x", conformanceMessageLimit) + header
+						}
+						if _, err := writer.WriteString("HTTP/1.1 200 OK\r\n" + header + "\r\n\r\n"); err != nil {
+							t.Error("could not write malformed response")
+							return
+						}
+						if err := writer.Flush(); err != nil {
+							t.Error("could not flush malformed response")
+						}
+					})
+				}
+				server := httptest.NewServer(handler)
+				defer server.Close()
+				endpoint := server.URL
+				if mode == "URL" {
+					endpoint += "/accounts/" + encoded + "/adapter"
+				}
+				result := Check(context.Background(), Target{
+					BaseURL: endpoint, AuthorizationValue: "test-auth",
+					HTTPClient: server.Client(), DeliveryFixture: &fixture,
+				})
+				if mode == "capabilities" {
+					if result.Capabilities == nil || result.Capabilities.AdapterName != redactedValue {
+						t.Error("escaped fixture identity was not masked in capabilities")
+					}
+					return
+				}
+				if result.Passed || result.Message != redactedValue {
+					t.Error("escaped fixture identity was not masked before output truncation")
+				}
+			})
+		}
+	}
+}
+
+func TestDeliveryFixtureMaskEscapingBoundsAndSafeFields(t *testing.T) {
+	fixture := testDeliveryFixture()
+	fixture.ContextID = "private account/é"
+	encoded := fixture.ContextID
+	for range 20 {
+		encoded = url.PathEscape(encoded)
+	}
+	message, _ := fixture.maskResultFields("failed route "+encoded, nil)
+	if message != redactedValue {
+		t.Error("deeply escaped fixture identity was not masked")
+	}
+	caps := defaultCapabilities()
+	caps.AdapterName = "safe%2Fadapter"
+	safe := "safe%20route is 100% ready"
+	message, masked := fixture.maskResultFields(safe, &caps)
+	if message != safe || *masked != caps {
+		t.Error("safe escaped fields changed")
 	}
 }
 

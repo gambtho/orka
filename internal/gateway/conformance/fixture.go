@@ -8,6 +8,8 @@ package conformance
 
 import (
 	"errors"
+	"net/url"
+	"regexp"
 	"strconv"
 	"strings"
 	"unicode"
@@ -17,6 +19,8 @@ import (
 
 	"github.com/orka-agents/orka/internal/gateway/protocol"
 )
+
+var fixturePercentEscape = regexp.MustCompile(`%[0-9a-fA-F]{2}`)
 
 // DeliveryFixture supplies only the routing identities for a conformance delivery.
 type DeliveryFixture struct {
@@ -59,18 +63,33 @@ func (f DeliveryFixture) maskResultFields(
 	// Mask whole fields before bearer sanitization: partial replacements can hide
 	// overlapping identities and expose their remaining fragments.
 	mask := func(value string) string {
-		for _, identity := range identities {
-			identity = strings.TrimSpace(identity)
-			if identity == "" {
-				continue
+		decoded := value
+		for range 8 {
+			for _, identity := range identities {
+				identity = strings.TrimSpace(identity)
+				if identity == "" {
+					continue
+				}
+				// HTTP and JSON errors can embed the identity inside a larger quoted field.
+				quoted := strconv.Quote(identity)
+				if strings.Contains(decoded, identity) || strings.Contains(decoded, quoted[1:len(quoted)-1]) {
+					return redactedValue
+				}
 			}
-			// HTTP and JSON errors can embed the identity inside a larger quoted field.
-			quoted := strconv.Quote(identity)
-			if strings.Contains(value, identity) || strings.Contains(value, quoted[1:len(quoted)-1]) {
-				return redactedValue
+			// Decode a copy for matching URL paths, including nested escapes. Decode
+			// valid escapes individually so unrelated literal percent signs cannot
+			// prevent masking. Keep safe output and transmitted routing unchanged.
+			next := fixturePercentEscape.ReplaceAllStringFunc(decoded, func(escape string) string {
+				unescaped, _ := url.PathUnescape(escape)
+				return unescaped
+			})
+			if next == decoded {
+				return value
 			}
+			decoded = next
 		}
-		return value
+		// Bound work on deeply nested input without exposing an unchecked field.
+		return redactedValue
 	}
 	message = mask(message)
 	if capabilities == nil {
