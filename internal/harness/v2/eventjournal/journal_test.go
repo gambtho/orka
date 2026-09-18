@@ -620,8 +620,8 @@ func TestJournalPreservesBenignPlanUpdatesAfterFieldHistoryCap(t *testing.T) {
 	entries := make([]harnessv2.PlanEntry, maxLogicalFieldPermutationFields/2)
 	for index := range entries {
 		entries[index] = harnessv2.PlanEntry{
-			Content:  fmt.Sprintf("step %03d", index),
-			Priority: fmt.Sprintf("priority %03d", index),
+			Content:  fmt.Sprintf("step\t%03d\n", index),
+			Priority: fmt.Sprintf(" priority %03d ", index),
 			Status:   harnessv2.PlanEntryPending,
 		}
 	}

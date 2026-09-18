@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	executionevents "github.com/orka-agents/orka/internal/events"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
@@ -410,6 +411,12 @@ func redactLogicalFieldsWithHistory(
 			}
 			continue
 		}
+		if normalized := compactWhitespace(redacted[index]); normalized != redacted[index] &&
+			executionevents.RedactExecutionEventText(normalized) != normalized {
+			// A public summary can expose an assignment that the original
+			// whitespace kept the text redactor from recognizing.
+			redacted[index] = executionevents.ExecutionEventRedactedValue
+		}
 		current = appendLogicalFieldBoundary(current, redacted[index])
 	}
 	if historySaturated {
@@ -436,7 +443,11 @@ const (
 	maxLogicalFieldPermutationBitWords = maxLogicalFieldPermutationFields / 64
 )
 
-type logicalFieldBoundaries struct {
+// Payloads retain original text while summaries normalize whitespace. Both
+// representations share one logical field's history slot and permutation bit.
+type logicalFieldBoundaries []logicalFieldBoundary
+
+type logicalFieldBoundary struct {
 	prefix string
 	suffix string
 	whole  bool
@@ -470,6 +481,7 @@ var logicalFieldSensitiveMarkers = []string{
 	"credential",
 	"private-key",
 	"private_key",
+	"privatekey",
 	"private key",
 	"sk-",
 	"ghp_",
@@ -488,6 +500,12 @@ var logicalFieldSensitiveMarkers = []string{
 	"//",
 	"?",
 	"#",
+	// Signed query parameters can occur without a preceding question mark.
+	"&sig=",
+	"&signature=",
+	"&sas=",
+	"&x-amz-signature=",
+	"&x-goog-signature=",
 }
 
 // A complete pwd marker is sensitive only while it can still form an
@@ -500,14 +518,22 @@ func appendLogicalFieldBoundary(fields []logicalFieldBoundaries, value string) [
 	if value == "" || value == executionevents.ExecutionEventRedactedValue {
 		return fields
 	}
+	boundaries := logicalFieldBoundaries{boundLogicalFieldText(value)}
+	if normalized := compactWhitespace(value); normalized != "" && normalized != value {
+		boundaries = append(boundaries, boundLogicalFieldText(normalized))
+	}
+	return append(fields, boundaries)
+}
+
+func boundLogicalFieldText(value string) logicalFieldBoundary {
 	runes := []rune(value)
 	if len(runes) <= maxLogicalFieldBoundaryRunes {
-		return append(fields, logicalFieldBoundaries{prefix: value, suffix: value, whole: true})
+		return logicalFieldBoundary{prefix: value, suffix: value, whole: true}
 	}
-	return append(fields, logicalFieldBoundaries{
+	return logicalFieldBoundary{
 		prefix: string(runes[:maxLogicalFieldBoundaryRunes]),
 		suffix: string(runes[len(runes)-maxLogicalFieldBoundaryRunes:]),
-	})
+	}
 }
 
 func logicalFieldsMayReconstructSensitiveMarker(fields []logicalFieldBoundaries) bool {
@@ -515,20 +541,22 @@ func logicalFieldsMayReconstructSensitiveMarker(fields []logicalFieldBoundaries)
 	seen := make(map[logicalFieldSensitiveMarkerState]struct{})
 	for markerIndex, marker := range logicalFieldSensitiveMarkers {
 		for _, field := range fields {
-			text := strings.ToLower(field.suffix)
-			if strings.Contains(text, marker) && (marker != "pwd" || logicalFieldPWDAssignmentRe.MatchString(text)) {
-				return true
-			}
-			for matched := 1; matched < len(marker) && matched <= len(text); matched++ {
-				if !strings.HasSuffix(text, marker[:matched]) {
-					continue
+			for _, boundary := range field {
+				text := foldLogicalFieldMarkerText(boundary.suffix)
+				if strings.Contains(text, marker) && (marker != "pwd" || logicalFieldPWDAssignmentRe.MatchString(text)) {
+					return true
 				}
-				state := logicalFieldSensitiveMarkerState{marker: markerIndex, matched: matched}
-				if _, exists := seen[state]; exists {
-					continue
+				for matched := 1; matched < len(marker) && matched <= len(text); matched++ {
+					if !strings.HasSuffix(text, marker[:matched]) {
+						continue
+					}
+					state := logicalFieldSensitiveMarkerState{marker: markerIndex, matched: matched}
+					if _, exists := seen[state]; exists {
+						continue
+					}
+					seen[state] = struct{}{}
+					states = append(states, state)
 				}
-				seen[state] = struct{}{}
-				states = append(states, state)
 			}
 		}
 	}
@@ -537,22 +565,38 @@ func logicalFieldsMayReconstructSensitiveMarker(fields []logicalFieldBoundaries)
 		marker := logicalFieldSensitiveMarkers[state.marker]
 		remaining := marker[state.matched:]
 		for _, field := range fields {
-			text := strings.ToLower(field.prefix)
-			if strings.HasPrefix(text, remaining) {
-				return true
+			for _, boundary := range field {
+				text := foldLogicalFieldMarkerText(boundary.prefix)
+				if strings.HasPrefix(text, remaining) {
+					return true
+				}
+				if !boundary.whole || !strings.HasPrefix(remaining, text) {
+					continue
+				}
+				next := logicalFieldSensitiveMarkerState{marker: state.marker, matched: state.matched + len(text)}
+				if _, exists := seen[next]; exists {
+					continue
+				}
+				seen[next] = struct{}{}
+				states = append(states, next)
 			}
-			if !field.whole || !strings.HasPrefix(remaining, text) {
-				continue
-			}
-			next := logicalFieldSensitiveMarkerState{marker: state.marker, matched: state.matched + len(text)}
-			if _, exists := seen[next]; exists {
-				continue
-			}
-			seen[next] = struct{}{}
-			states = append(states, next)
 		}
 	}
 	return false
+}
+
+func foldLogicalFieldMarkerText(value string) string {
+	// Match the redactor's case-insensitive regular expressions, including
+	// Unicode folds such as long s. Lowercasing alone misses those aliases.
+	return strings.Map(func(r rune) rune {
+		lowest := r
+		for folded := unicode.SimpleFold(r); folded != r; folded = unicode.SimpleFold(folded) {
+			if folded < lowest {
+				lowest = folded
+			}
+		}
+		return unicode.ToLower(lowest)
+	}, value)
 }
 
 func permutedLogicalFieldSubsetsSensitive(fields []logicalFieldBoundaries) bool {
@@ -566,13 +610,15 @@ func permutedLogicalFieldSubsetsSensitive(fields []logicalFieldBoundaries) bool 
 	candidates := make([]logicalFieldPermutationCandidate, 0, min(len(fields), maxLogicalFieldSubsetCandidates))
 	seen := make(map[logicalFieldPermutationCandidate]struct{}, min(len(fields), maxLogicalFieldSubsetCandidates))
 	for index, field := range fields {
-		candidate := logicalFieldPermutationCandidate{suffix: field.suffix}
-		candidate.used[index/64] = uint64(1) << uint(index%64)
-		if _, exists := seen[candidate]; exists {
-			continue
+		for _, boundary := range field {
+			candidate := logicalFieldPermutationCandidate{suffix: boundary.suffix}
+			candidate.used[index/64] = uint64(1) << uint(index%64)
+			if _, exists := seen[candidate]; exists {
+				continue
+			}
+			seen[candidate] = struct{}{}
+			candidates = append(candidates, candidate)
 		}
-		seen[candidate] = struct{}{}
-		candidates = append(candidates, candidate)
 	}
 	for cursor := 0; cursor < len(candidates); cursor++ {
 		candidate := candidates[cursor]
@@ -582,25 +628,27 @@ func permutedLogicalFieldSubsetsSensitive(fields []logicalFieldBoundaries) bool 
 			if candidate.used[word]&bit != 0 {
 				continue
 			}
-			joined := candidate.suffix + field.prefix
-			if executionevents.RedactExecutionEventText(joined) != joined {
-				return true
+			for _, boundary := range field {
+				joined := candidate.suffix + boundary.prefix
+				if executionevents.RedactExecutionEventText(joined) != joined {
+					return true
+				}
+				next := candidate
+				next.used[word] |= bit
+				if boundary.whole {
+					next.suffix = logicalFieldSuffix(joined)
+				} else {
+					next.suffix = boundary.suffix
+				}
+				if _, exists := seen[next]; exists {
+					continue
+				}
+				if len(seen) >= maxLogicalFieldSubsetCandidates {
+					return logicalFieldsMayReconstructSensitiveMarker(fields)
+				}
+				seen[next] = struct{}{}
+				candidates = append(candidates, next)
 			}
-			next := candidate
-			next.used[word] |= bit
-			if field.whole {
-				next.suffix = logicalFieldSuffix(joined)
-			} else {
-				next.suffix = field.suffix
-			}
-			if _, exists := seen[next]; exists {
-				continue
-			}
-			if len(seen) >= maxLogicalFieldSubsetCandidates {
-				return logicalFieldsMayReconstructSensitiveMarker(fields)
-			}
-			seen[next] = struct{}{}
-			candidates = append(candidates, next)
 		}
 	}
 	return false
@@ -1344,7 +1392,11 @@ func toolCallSummary(tool harnessv2.ToolCallUpdate) string {
 }
 
 func compactSummary(value string) string {
-	value = strings.Join(strings.Fields(value), " ")
+	value = compactWhitespace(value)
 	value, _, _ = executionevents.RedactAndTruncateExecutionEventText(value, executionevents.MaxExecutionEventSummaryChars)
 	return value
+}
+
+func compactWhitespace(value string) string {
+	return strings.Join(strings.Fields(value), " ")
 }

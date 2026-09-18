@@ -3,6 +3,7 @@ package eventjournal
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -395,6 +396,239 @@ func TestMapperJournalPreservesBenignToolSequenceAfterPWDCommand(t *testing.T) {
 	}
 }
 
+func TestMapperJournalRedactsAssignmentsAcrossPublicRepresentations(t *testing.T) {
+	for _, test := range []struct {
+		name        string
+		title       string
+		kind        string
+		output      string
+		benign      bool
+		wantSummary string
+	}{
+		{name: "title assignment", title: "pwd\u00a0=", kind: "shell", output: "fixture-value"},
+		{name: "quoted assignment", title: "pwd'\v=", kind: "shell", output: "fixture-value"},
+		{name: "open title key", title: "pwd\u00a0", kind: "shell", output: "=fixture-value"},
+		{name: "open kind key", title: "Inspect", kind: "pwd\v", output: "=fixture-value"},
+		{name: "split marker", title: "pw\u00a0", kind: "d=", output: "fixture-value"},
+		{name: "long whitespace", title: "pwd" + strings.Repeat("\u00a0", maxLogicalFieldBoundaryRunes+16) + "=", kind: "shell", output: "fixture-value"},
+		{name: "complete single field", output: "pwd\u00a0=fixture-value"},
+		{name: "raw spaced phrase", title: "token ", kind: "is ", output: "fixture-value"},
+		{name: "benign command", title: "pwd\u00a0&& ls", kind: "shell", output: "README.md\ncmd\ninternal\n", benign: true, wantSummary: "pwd && ls"},
+		{name: "benign signature command", title: "pwd&&signature", kind: "shell", output: "signature.txt\n", benign: true, wantSummary: "pwd&&signature"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			for _, history := range []struct {
+				name    string
+				entries int
+			}{
+				{name: "exact search"},
+				{name: "candidate cap", entries: 2},
+				{name: "field cap", entries: maxLogicalFieldPermutationFields / 2},
+			} {
+				t.Run(history.name, func(t *testing.T) {
+					ctx := context.Background()
+					eventStore := storetest.NewFakeExecutionEventStore()
+					state, err := (Journal{EventStore: eventStore, MapContext: testMapContext()}).Open(ctx)
+					if err != nil {
+						t.Fatal(err)
+					}
+					now := time.Now().UTC()
+					if history.entries > 0 {
+						entries := make([]harnessv2.PlanEntry, history.entries)
+						for index := range entries {
+							entries[index] = harnessv2.PlanEntry{
+								Content: fmt.Sprintf("step %d", index), Priority: fmt.Sprintf("priority %d", index),
+								Status: harnessv2.PlanEntryPending,
+							}
+						}
+						plan := testUpdateEvent(1, now, harnessv2.UpdateEvent{
+							Kind: harnessv2.UpdatePlan, Plan: &harnessv2.PlanUpdate{Entries: entries},
+						})
+						if _, isNew, err := state.AppendUpdateIfNew(ctx, plan); err != nil || !isNew {
+							t.Fatalf("append history: new=%t err=%v", isNew, err)
+						}
+					}
+					event := testUpdateEvent(2, now.Add(time.Second), harnessv2.UpdateEvent{
+						Kind: harnessv2.UpdateToolCallUpdate,
+						ToolCall: &harnessv2.ToolCallUpdate{
+							ToolCallID: "call-output", Title: test.title, Kind: test.kind, Status: harnessv2.ToolCallStatusCompleted,
+							Content: []harnessv2.ContentBlock{{Type: harnessv2.ContentBlockText, Text: test.output}},
+						},
+					})
+					if _, isNew, err := state.AppendUpdateIfNew(ctx, event); err != nil || !isNew {
+						t.Fatalf("append tool: new=%t err=%v", isNew, err)
+					}
+					listed := listJournalEvents(t, ctx, eventStore)
+					mapped := listed[len(listed)-1]
+					var content struct {
+						Title    string `json:"title"`
+						ToolKind string `json:"toolKind"`
+					}
+					if err := json.Unmarshal(mapped.Content, &content); err != nil {
+						t.Fatal(err)
+					}
+					wantTitle, wantKind, wantOutput, wantSummary := test.title, test.kind, test.output, test.wantSummary
+					if !test.benign {
+						if wantTitle != "" {
+							wantTitle = executionevents.ExecutionEventRedactedValue
+						}
+						if wantKind != "" {
+							wantKind = executionevents.ExecutionEventRedactedValue
+						}
+						wantOutput, wantSummary = executionevents.ExecutionEventRedactedValue, executionevents.ExecutionEventRedactedValue
+					}
+					if content.Title != wantTitle || content.ToolKind != wantKind || mapped.ToolName != wantKind ||
+						mapped.ContentText != wantOutput || mapped.Summary != wantSummary {
+						t.Fatal("public tool representations did not preserve benign text or redact the assignment")
+					}
+				})
+			}
+		})
+	}
+}
+
+func TestMapperJournalRedactsPWDCompletedFromNormalizedHistory(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		update harnessv2.UpdateEvent
+	}{
+		{name: "tool title", update: harnessv2.UpdateEvent{
+			Kind: harnessv2.UpdateToolCallUpdate,
+			ToolCall: &harnessv2.ToolCallUpdate{
+				ToolCallID: "call-key", Title: "pwd\u00a0", Kind: "shell", Status: harnessv2.ToolCallStatusCompleted,
+			},
+		}},
+		{name: "tool kind", update: harnessv2.UpdateEvent{
+			Kind: harnessv2.UpdateToolCallUpdate,
+			ToolCall: &harnessv2.ToolCallUpdate{
+				ToolCallID: "call-key", Title: "Inspect", Kind: "pwd\v", Status: harnessv2.ToolCallStatusCompleted,
+			},
+		}},
+		{name: "tool output summary", update: harnessv2.UpdateEvent{
+			Kind: harnessv2.UpdateToolCallUpdate,
+			ToolCall: &harnessv2.ToolCallUpdate{
+				ToolCallID: "call-key", Kind: "shell", Status: harnessv2.ToolCallStatusCompleted,
+				Content: []harnessv2.ContentBlock{{Type: harnessv2.ContentBlockText, Text: "pwd\u00a0\n"}},
+			},
+		}},
+		{name: "plan summary", update: harnessv2.UpdateEvent{
+			Kind: harnessv2.UpdatePlan,
+			Plan: &harnessv2.PlanUpdate{Entries: []harnessv2.PlanEntry{{Content: "pwd\u00a0", Status: harnessv2.PlanEntryInProgress}}},
+		}},
+		{name: "diagnostic summary", update: harnessv2.UpdateEvent{
+			Kind: harnessv2.UpdateDiagnostic, Diagnostic: &harnessv2.DiagnosticUpdate{Code: "step", Message: "pwd\u00a0"},
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			ctx := context.Background()
+			eventStore := storetest.NewFakeExecutionEventStore()
+			state, err := (Journal{EventStore: eventStore, MapContext: testMapContext()}).Open(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			completion := harnessv2.UpdateEvent{
+				Kind: harnessv2.UpdateToolCallUpdate,
+				ToolCall: &harnessv2.ToolCallUpdate{
+					ToolCallID: "call-value", Title: "=", Kind: "shell", Status: harnessv2.ToolCallStatusCompleted,
+					Content: []harnessv2.ContentBlock{{Type: harnessv2.ContentBlockText, Text: "fixture-value"}},
+				},
+			}
+			now := time.Now().UTC()
+			for index, update := range []harnessv2.UpdateEvent{test.update, completion} {
+				event := testUpdateEvent(uint64(index+1), now.Add(time.Duration(index)*time.Second), update)
+				if _, isNew, err := state.AppendUpdateIfNew(ctx, event); err != nil || !isNew {
+					t.Fatalf("append event %d: new=%t err=%v", index, isNew, err)
+				}
+			}
+			listed := listJournalEvents(t, ctx, eventStore)
+			if len(listed) != 2 {
+				t.Fatalf("public event count = %d, want 2", len(listed))
+			}
+			first := listed[0].Summary + listed[0].ToolName + listed[0].ContentText
+			if !strings.Contains(first, "pwd") || strings.Contains(first, executionevents.ExecutionEventRedactedValue) {
+				t.Fatal("initial open key was not published")
+			}
+			if listed[1].Summary != executionevents.ExecutionEventRedactedValue ||
+				listed[1].ToolName != executionevents.ExecutionEventRedactedValue ||
+				listed[1].ContentText != executionevents.ExecutionEventRedactedValue {
+				t.Fatal("later tool event completed an assignment from a normalized public field")
+			}
+		})
+	}
+}
+
+func TestMapperJournalRedactsCredentialsAfterSearchCap(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		fields []string
+	}{
+		{name: "split long s", fields: []string{"pa", "ſſ", "word", "=", "fixture-value"}},
+		{name: "split Kelvin sign", fields: []string{"to", "K", "en", "=", "fixture-value"}},
+		{name: "complete long s key", fields: []string{"paſſword", "=", "fixture-value"}},
+		{name: "private key", fields: []string{"pri", "vate", "key", "=", "fixture-value"}},
+		{name: "hyphenated private key", fields: []string{"pri", "vate-", "key", "=", "fixture-value"}},
+		{name: "underscored private key", fields: []string{"pri", "vate_", "key", "=", "fixture-value"}},
+		{name: "query sig", fields: []string{"&", "si", "g", "=", "fixture-value"}},
+		{name: "query signature", fields: []string{"&", "sign", "ature", "=", "fixture-value"}},
+		{name: "query sas", fields: []string{"&", "s", "as", "=", "fixture-value"}},
+		{name: "query AWS signature", fields: []string{"&x-", "amz-", "signature", "=", "fixture-value"}},
+		{name: "query GCS signature", fields: []string{"&x-", "goog-", "signature", "=", "fixture-value"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			for _, history := range []struct {
+				name    string
+				entries int
+			}{
+				{name: "candidate cap", entries: 1},
+				{name: "field cap", entries: maxLogicalFieldPermutationFields / 2},
+			} {
+				t.Run(history.name, func(t *testing.T) {
+					ctx := context.Background()
+					eventStore := storetest.NewFakeExecutionEventStore()
+					state, err := (Journal{EventStore: eventStore, MapContext: testMapContext()}).Open(ctx)
+					if err != nil {
+						t.Fatal(err)
+					}
+					padding := make([]harnessv2.PlanEntry, history.entries)
+					for index := range padding {
+						padding[index] = harnessv2.PlanEntry{
+							Content: fmt.Sprintf(" benign\t%d ", index*2), Priority: fmt.Sprintf(" benign\t%d ", index*2+1),
+							Status: harnessv2.PlanEntryPending,
+						}
+					}
+					entries := make([]harnessv2.PlanEntry, (len(test.fields)+1)/2)
+					for index, value := range test.fields {
+						if index%2 == 0 {
+							entries[index/2].Content = value
+							entries[index/2].Status = harnessv2.PlanEntryPending
+						} else {
+							entries[index/2].Priority = value
+						}
+					}
+					now := time.Now().UTC()
+					for index, plan := range [][]harnessv2.PlanEntry{padding, entries} {
+						event := testUpdateEvent(uint64(index+1), now.Add(time.Duration(index)*time.Second), harnessv2.UpdateEvent{
+							Kind: harnessv2.UpdatePlan, Plan: &harnessv2.PlanUpdate{Entries: plan},
+						})
+						if _, isNew, err := state.AppendUpdateIfNew(ctx, event); err != nil || !isNew {
+							t.Fatalf("append plan: new=%t err=%v", isNew, err)
+						}
+					}
+					listed := listJournalEvents(t, ctx, eventStore)
+					if len(listed) != 2 {
+						t.Fatalf("public event count = %d, want 2", len(listed))
+					}
+					mapped := listed[1]
+					if strings.Contains(mapped.ContentText+string(mapped.Content)+mapped.Summary, "fixture-value") ||
+						!strings.Contains(mapped.ContentText, executionevents.ExecutionEventRedactedValue) {
+						t.Fatal("credential survived bounded search")
+					}
+				})
+			}
+		})
+	}
+}
+
 func TestLogicalFieldsPWDMarkerKeepsAssignmentContinuations(t *testing.T) {
 	for _, parts := range [][]string{
 		{"pwd"},
@@ -539,10 +773,8 @@ func TestProjectPlanUpdatePreservesBenignFieldsPastPermutationWorkCap(t *testing
 }
 
 func TestLogicalFieldsMayReconstructSensitiveMarkerAcrossFragments(t *testing.T) {
-	fields := []logicalFieldBoundaries{
-		{prefix: "s", suffix: "s", whole: true},
-		{prefix: "k-", suffix: "k-", whole: true},
-	}
+	fields := appendLogicalFieldBoundary(nil, "s")
+	fields = appendLogicalFieldBoundary(fields, "k-")
 	if !logicalFieldsMayReconstructSensitiveMarker(fields) {
 		t.Fatal("split credential marker was classified as benign")
 	}
