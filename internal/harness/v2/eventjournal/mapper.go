@@ -425,7 +425,7 @@ func redactLogicalFieldsWithHistory(
 	fields := make([]logicalFieldBoundaries, 0, len(history)+len(current))
 	fields = append(fields, history...)
 	fields = append(fields, current...)
-	if len(fields) >= 2 && permutedLogicalFieldSubsetsSensitive(fields) {
+	if permutedLogicalFieldSubsetsSensitive(fields) {
 		for index, value := range redacted {
 			if value != "" {
 				redacted[index] = executionevents.ExecutionEventRedactedValue
@@ -440,11 +440,12 @@ const (
 	maxLogicalFieldBoundaryRunes       = 256
 	maxLogicalFieldSubsetCandidates    = 4096
 	maxLogicalFieldPermutationFields   = 256
-	maxLogicalFieldPermutationBitWords = maxLogicalFieldPermutationFields / 64
+	maxLogicalFieldPermutationBitWords = 2 * maxLogicalFieldPermutationFields / 64
 )
 
 // Payloads retain original text while summaries normalize whitespace. Both
-// representations share one logical field's history slot and permutation bit.
+// representations share one logical field's history slot, but each needs its
+// own permutation bit because both can be published simultaneously.
 type logicalFieldBoundaries []logicalFieldBoundary
 
 type logicalFieldBoundary struct {
@@ -601,54 +602,56 @@ func foldLogicalFieldMarkerText(value string) string {
 
 func permutedLogicalFieldSubsetsSensitive(fields []logicalFieldBoundaries) bool {
 	// Exact permutation tracking is bounded. Histories can contain one full
-	// 128-entry plan plus a later update, so exceeding the bitset width is not
+	// 128-entry plan plus a later update, so exceeding this logical-field limit is not
 	// itself evidence of sensitive content. Fall back to the conservative marker
 	// reachability check used when the candidate work cap is exhausted.
 	if len(fields) > maxLogicalFieldPermutationFields {
 		return logicalFieldsMayReconstructSensitiveMarker(fields)
 	}
-	candidates := make([]logicalFieldPermutationCandidate, 0, min(len(fields), maxLogicalFieldSubsetCandidates))
-	seen := make(map[logicalFieldPermutationCandidate]struct{}, min(len(fields), maxLogicalFieldSubsetCandidates))
-	for index, field := range fields {
-		for _, boundary := range field {
-			candidate := logicalFieldPermutationCandidate{suffix: boundary.suffix}
-			candidate.used[index/64] = uint64(1) << uint(index%64)
-			if _, exists := seen[candidate]; exists {
-				continue
-			}
-			seen[candidate] = struct{}{}
-			candidates = append(candidates, candidate)
+	// Each logical field has at most its raw and whitespace-normalized forms.
+	// Flatten only for exact search; history accounting still uses fields.
+	boundaries := make([]logicalFieldBoundary, 0, 2*len(fields))
+	for _, field := range fields {
+		boundaries = append(boundaries, field...)
+	}
+	candidates := make([]logicalFieldPermutationCandidate, 0, min(len(boundaries), maxLogicalFieldSubsetCandidates))
+	seen := make(map[logicalFieldPermutationCandidate]struct{}, min(len(boundaries), maxLogicalFieldSubsetCandidates))
+	for index, boundary := range boundaries {
+		candidate := logicalFieldPermutationCandidate{suffix: boundary.suffix}
+		candidate.used[index/64] = uint64(1) << uint(index%64)
+		if _, exists := seen[candidate]; exists {
+			continue
 		}
+		seen[candidate] = struct{}{}
+		candidates = append(candidates, candidate)
 	}
 	for cursor := 0; cursor < len(candidates); cursor++ {
 		candidate := candidates[cursor]
-		for index, field := range fields {
+		for index, boundary := range boundaries {
 			word := index / 64
 			bit := uint64(1) << uint(index%64)
 			if candidate.used[word]&bit != 0 {
 				continue
 			}
-			for _, boundary := range field {
-				joined := candidate.suffix + boundary.prefix
-				if executionevents.RedactExecutionEventText(joined) != joined {
-					return true
-				}
-				next := candidate
-				next.used[word] |= bit
-				if boundary.whole {
-					next.suffix = logicalFieldSuffix(joined)
-				} else {
-					next.suffix = boundary.suffix
-				}
-				if _, exists := seen[next]; exists {
-					continue
-				}
-				if len(seen) >= maxLogicalFieldSubsetCandidates {
-					return logicalFieldsMayReconstructSensitiveMarker(fields)
-				}
-				seen[next] = struct{}{}
-				candidates = append(candidates, next)
+			joined := candidate.suffix + boundary.prefix
+			if executionevents.RedactExecutionEventText(joined) != joined {
+				return true
 			}
+			next := candidate
+			next.used[word] |= bit
+			if boundary.whole {
+				next.suffix = logicalFieldSuffix(joined)
+			} else {
+				next.suffix = boundary.suffix
+			}
+			if _, exists := seen[next]; exists {
+				continue
+			}
+			if len(seen) >= maxLogicalFieldSubsetCandidates {
+				return logicalFieldsMayReconstructSensitiveMarker(fields)
+			}
+			seen[next] = struct{}{}
+			candidates = append(candidates, next)
 		}
 	}
 	return false

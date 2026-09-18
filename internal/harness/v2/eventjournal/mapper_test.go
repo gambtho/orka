@@ -487,6 +487,52 @@ func TestMapperJournalRedactsAssignmentsAcrossPublicRepresentations(t *testing.T
 	}
 }
 
+func TestMapperJournalRedactsCredentialAcrossRepresentationsOfSameField(t *testing.T) {
+	const title = "ken=X\tto"
+	const summary = "ken=X to"
+	for _, text := range []string{title, summary} {
+		if executionevents.RedactExecutionEventText(text) != text {
+			t.Fatal("fixture must be harmless in either representation alone")
+		}
+	}
+	if executionevents.RedactExecutionEventText(title+summary) == title+summary {
+		t.Fatal("fixture must reconstruct a credential across its public representations")
+	}
+	for _, kind := range []string{"", "shell"} {
+		t.Run("kind="+kind, func(t *testing.T) {
+			ctx := context.Background()
+			eventStore := storetest.NewFakeExecutionEventStore()
+			state, err := (Journal{EventStore: eventStore, MapContext: testMapContext()}).Open(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			event := testUpdateEvent(1, time.Now().UTC(), harnessv2.UpdateEvent{
+				Kind: harnessv2.UpdateToolCallUpdate,
+				ToolCall: &harnessv2.ToolCallUpdate{
+					ToolCallID: "call-output", Title: title, Kind: kind, Status: harnessv2.ToolCallStatusCompleted,
+				},
+			})
+			if _, isNew, err := state.AppendUpdateIfNew(ctx, event); err != nil || !isNew {
+				t.Fatalf("append tool: new=%t err=%v", isNew, err)
+			}
+			listed := listJournalEvents(t, ctx, eventStore)
+			if len(listed) != 1 {
+				t.Fatalf("public event count = %d, want 1", len(listed))
+			}
+			var content struct {
+				Title string `json:"title"`
+			}
+			if err := json.Unmarshal(listed[0].Content, &content); err != nil {
+				t.Fatal(err)
+			}
+			if content.Title != executionevents.ExecutionEventRedactedValue ||
+				listed[0].Summary != executionevents.ExecutionEventRedactedValue {
+				t.Fatal("raw title and normalized summary exposed a reconstructable credential")
+			}
+		})
+	}
+}
+
 func TestMapperJournalRedactsPWDCompletedFromNormalizedHistory(t *testing.T) {
 	for _, test := range []struct {
 		name   string
