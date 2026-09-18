@@ -19,6 +19,10 @@ var ErrNotReady = errors.New("not ready")
 // ErrDuplicateMismatch is returned when a stable external identifier is reused with a different payload.
 var ErrDuplicateMismatch = errors.New("duplicate payload mismatch")
 
+// ErrGatewayMessageReplayOnly is returned when receipt-only admission finds no
+// existing message. The caller must return its original live admission gate error.
+var ErrGatewayMessageReplayOnly = errors.New("gateway message receipt not found for replay-only admission")
+
 // ErrCapacity is returned when a bounded durable store quota is full.
 var ErrCapacity = errors.New("capacity exceeded")
 

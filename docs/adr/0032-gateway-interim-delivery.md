@@ -37,8 +37,13 @@ The controller derives all routing from the exact Task UID's admitted durable
 event. Callers supply only content and a stable internal request ID. The native
 worker endpoint uses the existing TokenReview and current Pod/Job/Task UID
 fences, with no controller-ServiceAccount or runtime impersonation exception.
-Live Task/Gateway/capability checks happen before the authorized SQLite writer;
-the writer atomically checks event eligibility, deduplicates, and enforces quota.
+Live Task/Gateway/capability checks happen before the authorized SQLite writer.
+Live identity failures remain immediate; readiness/capability denial permits only
+receipt recovery for the same authorized Running Task. The writer checks exact
+event identity and deduplicates before rejecting receipt-only misses with the
+original admission error, or checking new-admission eligibility and quota. Job
+revocation is checked inside the writer even for receipt recovery. No receipt is
+requeued or modified, and changed sanitized text still conflicts.
 This is not a transaction spanning Kubernetes and SQLite. Dispatch rechecks
 identity and capability before sending.
 

@@ -8,6 +8,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+	dto "github.com/prometheus/client_model/go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
@@ -193,6 +195,88 @@ func TestGatewayTaskMessageRejectsIneligibleLiveIdentity(t *testing.T) {
 	}
 }
 
+func TestGatewayTaskMessageReceiptRejectsChangedLiveIdentity(t *testing.T) {
+	for _, tt := range []struct {
+		name   string
+		change func(*testing.T, *Service, *corev1alpha1.Task)
+		code   int
+	}{
+		{"Task replaced", func(t *testing.T, s *Service, task *corev1alpha1.Task) {
+			task.UID = "replacement"
+			require.NoError(t, s.Client.Update(t.Context(), task))
+		}, 403},
+		{"namespace replaced", func(t *testing.T, s *Service, _ *corev1alpha1.Task) {
+			ns := &corev1.Namespace{}
+			require.NoError(t, s.Client.Get(t.Context(), client.ObjectKey{Name: "default"}, ns))
+			ns.UID = "replacement"
+			require.NoError(t, s.Client.Update(t.Context(), ns))
+		}, 409},
+		{"namespace deleting", func(t *testing.T, s *Service, _ *corev1alpha1.Task) {
+			ns := &corev1.Namespace{}
+			require.NoError(t, s.Client.Get(t.Context(), client.ObjectKey{Name: "default"}, ns))
+			ns.Finalizers = []string{"test.orka.ai/hold"}
+			require.NoError(t, s.Client.Update(t.Context(), ns))
+			require.NoError(t, s.Client.Delete(t.Context(), ns))
+		}, 409},
+		{"Gateway replaced", func(t *testing.T, s *Service, _ *corev1alpha1.Task) {
+			updateMessageGateway(t, s, func(g *gatewayv1alpha1.Gateway) { g.UID = "replacement" })
+		}, 409},
+		{"Gateway generation changed", func(t *testing.T, s *Service, _ *corev1alpha1.Task) {
+			updateMessageGateway(t, s, func(g *gatewayv1alpha1.Gateway) { g.Generation++ })
+		}, 409},
+		{"Gateway deleting", func(t *testing.T, s *Service, _ *corev1alpha1.Task) {
+			updateMessageGateway(t, s, func(g *gatewayv1alpha1.Gateway) { g.Finalizers = []string{"test.orka.ai/hold"} })
+			g := &gatewayv1alpha1.Gateway{}
+			require.NoError(t, s.Client.Get(t.Context(), client.ObjectKey{Namespace: "default", Name: "chat"}, g))
+			require.NoError(t, s.Client.Delete(t.Context(), g))
+		}, 409},
+		{"execution outcome", func(t *testing.T, s *Service, task *corev1alpha1.Task) {
+			task.Status.ExecutionOutcome = &corev1alpha1.TaskWorkloadExecutionOutcome{Phase: corev1alpha1.TaskPhaseSucceeded}
+			require.NoError(t, s.Client.Status().Update(t.Context(), task))
+		}, 409},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			s, db, adapter, _, task := newGatewayMessageFixture(t)
+			taskUID := string(task.UID)
+			receipt, err := s.EnqueueTaskMessage(t.Context(), task.Namespace, task.Name, taskUID, "request", "update")
+			require.NoError(t, err)
+			before, err := db.GetGatewayDelivery(t.Context(), task.Namespace, receipt.DeliveryID)
+			require.NoError(t, err)
+			updateMessageGateway(t, s, func(g *gatewayv1alpha1.Gateway) { g.Status.Ready = false })
+			tt.change(t, s, task)
+			_, err = s.EnqueueTaskMessage(t.Context(), task.Namespace, task.Name, taskUID, "request", "update")
+			var httpErr *HTTPError
+			require.ErrorAs(t, err, &httpErr)
+			require.Equal(t, tt.code, httpErr.Code)
+			rows, err := db.ListGatewayDeliveries(t.Context(), store.GatewayDeliveryFilter{Namespace: task.Namespace})
+			require.NoError(t, err)
+			require.Equal(t, []store.GatewayDelivery{*before}, rows)
+			require.Empty(t, adapter.Deliveries())
+		})
+	}
+}
+
+func TestGatewayTaskMessageReceiptRejectsIdentityReadFailure(t *testing.T) {
+	for _, kind := range []string{"Task", "Namespace", "Gateway"} {
+		t.Run(kind, func(t *testing.T) {
+			s, _, _, _, task := newGatewayMessageFixture(t)
+			_, err := s.EnqueueTaskMessage(t.Context(), task.Namespace, task.Name, string(task.UID), "request", "update")
+			require.NoError(t, err)
+			s.APIReader = interceptor.NewClient(s.Client.(client.WithWatch), interceptor.Funcs{Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+				if (kind == "Task" && key.Name == task.Name) || (kind == "Namespace" && key.Name == "default") || (kind == "Gateway" && key.Name == "chat") {
+					return fmt.Errorf("read unavailable")
+				}
+				return c.Get(ctx, key, obj, opts...)
+			}})
+			_, err = s.EnqueueTaskMessage(t.Context(), task.Namespace, task.Name, string(task.UID), "request", "update")
+			var httpErr *HTTPError
+			require.ErrorAs(t, err, &httpErr)
+			require.Equal(t, http.StatusServiceUnavailable, httpErr.Code)
+			require.Equal(t, "gateway message identity is unavailable", httpErr.Message)
+		})
+	}
+}
+
 func TestGatewayTaskMessageContentAndControllerLimit(t *testing.T) {
 	for _, tt := range []struct {
 		name, content string
@@ -290,23 +374,53 @@ func TestGatewayTaskMessageIdempotencyUsesSanitizedContent(t *testing.T) {
 	require.Equal(t, "update", sends[0].Text)
 }
 
-func TestGatewayTaskMessageRechecksCapabilityImmediatelyBeforePOST(t *testing.T) {
-	s, db, adapter, _, task := newGatewayMessageFixture(t)
-	receipt, err := s.EnqueueTaskMessage(t.Context(), task.Namespace, task.Name, string(task.UID), "request", "update")
-	require.NoError(t, err)
-	// Withdraw after the initial Gateway read, while the outbound Secret is resolved.
-	s.APIReader = interceptor.NewClient(s.Client.(client.WithWatch), interceptor.Funcs{Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
-		err := c.Get(ctx, key, obj, opts...)
-		if _, ok := obj.(*corev1.Secret); ok && key.Name == "outbound" {
+func gatewayMessageCounterValue(t *testing.T, counter prometheus.Counter) float64 {
+	t.Helper()
+	var metric dto.Metric
+	require.NoError(t, counter.Write(&metric))
+	return metric.GetCounter().GetValue()
+}
+
+func TestGatewayTaskMessagePermanentAbandonmentImmediatelyBeforePOST(t *testing.T) {
+	for _, tt := range []struct {
+		name   string
+		change func(*testing.T, *Service, *corev1alpha1.Task)
+	}{
+		{"capability withdrawn", func(t *testing.T, s *Service, _ *corev1alpha1.Task) {
 			updateMessageGateway(t, s, func(g *gatewayv1alpha1.Gateway) { g.Status.ObservedCapabilities.Capabilities.InterimDelivery = false })
-		}
-		return err
-	}})
-	require.NoError(t, s.DeliverOnce(t.Context()))
-	require.Empty(t, adapter.Deliveries())
-	row, err := db.GetGatewayDelivery(t.Context(), task.Namespace, receipt.DeliveryID)
-	require.NoError(t, err)
-	require.Equal(t, store.GatewayDeliveryDeadLettered, row.State)
+		}},
+		{"Task deleting", func(t *testing.T, s *Service, task *corev1alpha1.Task) {
+			task.Finalizers = []string{"test.orka.ai/hold"}
+			require.NoError(t, s.Client.Update(t.Context(), task))
+			require.NoError(t, s.Client.Delete(t.Context(), task))
+		}},
+		{"Gateway identity changed", func(t *testing.T, s *Service, _ *corev1alpha1.Task) {
+			updateMessageGateway(t, s, func(g *gatewayv1alpha1.Gateway) { g.UID = "replacement" })
+		}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			s, db, adapter, _, task := newGatewayMessageFixture(t)
+			receipt, err := s.EnqueueTaskMessage(t.Context(), task.Namespace, task.Name, string(task.UID), "request", "update")
+			require.NoError(t, err)
+			// Change after the initial Gateway read, while the outbound Secret is resolved.
+			s.APIReader = interceptor.NewClient(s.Client.(client.WithWatch), interceptor.Funcs{Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+				err := c.Get(ctx, key, obj, opts...)
+				if _, ok := obj.(*corev1.Secret); ok && key.Name == "outbound" {
+					tt.change(t, s, task)
+				}
+				return err
+			}})
+			outcomes := gatewayMessageCounterValue(t, gatewayDeliveryTotal.WithLabelValues("non_retryable_error"))
+			deadLetters := gatewayMessageCounterValue(t, gatewayDeadLettersTotal.WithLabelValues("delivery"))
+			require.NoError(t, s.DeliverOnce(t.Context()))
+			require.Empty(t, adapter.Deliveries())
+			row, err := db.GetGatewayDelivery(t.Context(), task.Namespace, receipt.DeliveryID)
+			require.NoError(t, err)
+			require.Equal(t, store.GatewayDeliveryDeadLettered, row.State)
+			require.Equal(t, outcomes+1, gatewayMessageCounterValue(t, gatewayDeliveryTotal.WithLabelValues("non_retryable_error")))
+			require.Equal(t, deadLetters+1, gatewayMessageCounterValue(t, gatewayDeadLettersTotal.WithLabelValues("delivery")))
+		})
+	}
 }
 
 func TestGatewayTaskMessageRetriesReadinessLossImmediatelyBeforePOST(t *testing.T) {
@@ -331,7 +445,11 @@ func TestGatewayTaskMessageRetriesReadinessLossImmediatelyBeforePOST(t *testing.
 					}
 					return err
 				}})
+				outcomes := gatewayMessageCounterValue(t, gatewayDeliveryTotal.WithLabelValues("non_retryable_error"))
+				deadLetters := gatewayMessageCounterValue(t, gatewayDeadLettersTotal.WithLabelValues("delivery"))
 				require.NoError(t, s.DeliverOnce(t.Context()))
+				require.Equal(t, outcomes, gatewayMessageCounterValue(t, gatewayDeliveryTotal.WithLabelValues("non_retryable_error")))
+				require.Equal(t, deadLetters, gatewayMessageCounterValue(t, gatewayDeadLettersTotal.WithLabelValues("delivery")))
 				require.Empty(t, adapter.Deliveries())
 				row, err := db.GetGatewayDelivery(t.Context(), task.Namespace, receipt.DeliveryID)
 				require.NoError(t, err)
@@ -378,6 +496,65 @@ func TestGatewayTaskMessageRetriesReadinessLossImmediatelyBeforePOST(t *testing.
 				}
 				require.Equal(t, wantKind, sends[1].Kind)
 				require.Equal(t, terminal.ID, sends[1].DeliveryID)
+			})
+		}
+	}
+}
+
+func TestGatewayTaskMessageReceiptSurvivesAdmissionGate(t *testing.T) {
+	for _, tt := range []struct {
+		name        string
+		change      func(*gatewayv1alpha1.Gateway)
+		code        int
+		message     string
+		unsupported bool
+	}{
+		{"unready", func(g *gatewayv1alpha1.Gateway) { g.Status.Ready = false }, 503, "gateway is not ready for interim delivery", false},
+		{"stale observation", func(g *gatewayv1alpha1.Gateway) { g.Status.ObservedGeneration = 0 }, 503, "gateway is not ready for interim delivery", false},
+		{"no capabilities", func(g *gatewayv1alpha1.Gateway) { g.Status.ObservedCapabilities = nil }, 409, ErrInterimDeliveryUnsupported.Message, true},
+		{"capability withdrawn", func(g *gatewayv1alpha1.Gateway) { g.Status.ObservedCapabilities.Capabilities.InterimDelivery = false }, 409, ErrInterimDeliveryUnsupported.Message, true},
+		{"wrong contract", func(g *gatewayv1alpha1.Gateway) { g.Status.ObservedCapabilities.ContractVersion = "other" }, 409, "gateway does not currently support interim delivery", false},
+	} {
+		for _, state := range []store.GatewayDeliveryState{store.GatewayDeliveryPending, store.GatewayDeliveryDelivered, store.GatewayDeliveryDeadLettered} {
+			t.Run(tt.name+"/"+string(state), func(t *testing.T) {
+				s, db, adapter, _, task := newGatewayMessageFixture(t)
+				s.Config.InterimMessagesPerTask = 1
+				receipt, err := s.EnqueueTaskMessage(t.Context(), task.Namespace, task.Name, string(task.UID), "request", "  update\x00  ")
+				require.NoError(t, err)
+				if state != store.GatewayDeliveryPending {
+					_, err := db.ClaimNextGatewayDelivery(t.Context(), task.Namespace, s.Owner, time.Now().UTC(), time.Minute)
+					require.NoError(t, err)
+					if state == store.GatewayDeliveryDelivered {
+						require.NoError(t, db.MarkGatewayDeliveryDelivered(t.Context(), task.Namespace, receipt.DeliveryID, s.Owner, "provider-receipt", time.Now().UTC()))
+					} else {
+						require.NoError(t, db.MarkGatewayDeliveryTerminal(t.Context(), task.Namespace, receipt.DeliveryID, s.Owner, state, "abandoned", time.Now().UTC()))
+					}
+				}
+				before, err := db.GetGatewayDelivery(t.Context(), task.Namespace, receipt.DeliveryID)
+				require.NoError(t, err)
+				updateMessageGateway(t, s, tt.change)
+				replay, err := s.EnqueueTaskMessage(t.Context(), task.Namespace, task.Name, string(task.UID), "request", "update\x01")
+				require.NoError(t, err)
+				require.Equal(t, &TaskMessageReceipt{DeliveryID: receipt.DeliveryID, Status: state, Created: false}, replay)
+
+				_, err = s.EnqueueTaskMessage(t.Context(), task.Namespace, task.Name, string(task.UID), "request", "changed update")
+				var httpErr *HTTPError
+				require.ErrorAs(t, err, &httpErr)
+				require.Equal(t, http.StatusConflict, httpErr.Code)
+				require.Equal(t, "requestID was already used for different content", httpErr.Message)
+				require.NotErrorIs(t, err, ErrInterimDeliveryUnsupported)
+
+				_, err = s.EnqueueTaskMessage(t.Context(), task.Namespace, task.Name, string(task.UID), "new", "update")
+				require.ErrorAs(t, err, &httpErr)
+				require.Equal(t, tt.code, httpErr.Code)
+				require.Equal(t, tt.message, httpErr.Message)
+				if tt.unsupported {
+					require.ErrorIs(t, err, ErrInterimDeliveryUnsupported)
+				}
+				rows, err := db.ListGatewayDeliveries(t.Context(), store.GatewayDeliveryFilter{Namespace: task.Namespace})
+				require.NoError(t, err)
+				require.Equal(t, []store.GatewayDelivery{*before}, rows, "receipt lookup must not mutate or insert any row")
+				require.Empty(t, adapter.Deliveries())
 			})
 		}
 	}

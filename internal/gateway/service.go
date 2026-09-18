@@ -1541,6 +1541,8 @@ func (s *Service) DeliverOnce(ctx context.Context) error {
 		if err := s.validateMessageDelivery(ctx, delivery); err != nil {
 			var httpErr *HTTPError
 			if errors.As(err, &httpErr) && httpErr.Code != http.StatusServiceUnavailable {
+				gatewayDeliveryTotal.WithLabelValues("non_retryable_error").Inc()
+				gatewayDeadLettersTotal.WithLabelValues("delivery").Inc()
 				return s.DeliveryStore.MarkGatewayDeliveryTerminal(ctx, delivery.Namespace, delivery.ID, s.Owner,
 					store.GatewayDeliveryDeadLettered, httpErr.Message, time.Now().UTC())
 			}

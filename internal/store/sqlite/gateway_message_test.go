@@ -146,6 +146,92 @@ func TestGatewayMessageAdmissionIsNonterminalAndDeduplicated(t *testing.T) {
 	}
 }
 
+func TestGatewayMessageReplayOnlyIsAtomicReceiptLookup(t *testing.T) {
+	for _, state := range []store.GatewayDeliveryState{store.GatewayDeliveryPending, store.GatewayDeliveryDelivered, store.GatewayDeliveryDeadLettered} {
+		t.Run(string(state), func(t *testing.T) {
+			s := setupTestStore(t)
+			ctx := t.Context()
+			now := time.Now().UTC().Truncate(time.Second)
+			event := admitMessageTask(t, s, now)
+			request := messageEnqueue(event, now, "receipt")
+			request.MaxMessages = 1
+			seed := enqueueMessage(t, s, request)
+			if state != store.GatewayDeliveryPending {
+				claimMessageDelivery(t, s, now, seed.ID)
+				var err error
+				if state == store.GatewayDeliveryDelivered {
+					err = s.MarkGatewayDeliveryDelivered(ctx, event.Namespace, seed.ID, "sender", "receipt", now)
+				} else {
+					err = s.MarkGatewayDeliveryTerminal(ctx, event.Namespace, seed.ID, "sender", state, "abandoned", now)
+				}
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			before, err := s.GetGatewayDelivery(ctx, event.Namespace, seed.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			// Receipt lookup precedes lifecycle and quota, but never event identity.
+			if err := s.ReleaseLock(ctx, event.Namespace, event.SessionName, event.TaskName, event.TaskUID); err != nil {
+				t.Fatal(err)
+			}
+			request.ReplayOnly = true
+			request.Now = now.Add(25 * time.Hour)
+			request.ExpiresAt = request.Now.Add(time.Hour)
+			err = s.WithTaskDataTransaction(ctx, func(txCtx context.Context) error {
+				replay, created, err := s.EnqueueGatewayMessage(txCtx, request)
+				if err != nil || created || !reflect.DeepEqual(before, replay) {
+					t.Fatalf("receipt = (%+v, %v, %v), want unchanged %+v", replay, created, err, before)
+				}
+				changed := request
+				changed.Text = "different"
+				if _, _, err := s.EnqueueGatewayMessage(txCtx, changed); !errors.Is(err, store.ErrDuplicateMismatch) {
+					t.Fatalf("changed replay = %v", err)
+				}
+				changed = request
+				changed.TaskUID = "replacement"
+				if _, _, err := s.EnqueueGatewayMessage(txCtx, changed); !errors.Is(err, store.ErrConflict) {
+					t.Fatalf("wrong identity = %v", err)
+				}
+				changed = request
+				changed.EventID = "missing"
+				if _, _, err := s.EnqueueGatewayMessage(txCtx, changed); !errors.Is(err, store.ErrNotFound) {
+					t.Fatalf("missing event = %v", err)
+				}
+				changed = request
+				changed.RequestID = "new"
+				row, created, err := s.EnqueueGatewayMessage(txCtx, changed)
+				if !errors.Is(err, store.ErrGatewayMessageReplayOnly) || created || row != nil {
+					t.Fatalf("receipt miss = (%+v, %v, %v)", row, created, err)
+				}
+				return nil
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			rows, err := s.ListGatewayDeliveries(ctx, store.GatewayDeliveryFilter{Namespace: event.Namespace})
+			if err != nil || !reflect.DeepEqual(rows, []store.GatewayDelivery{*before}) {
+				t.Fatalf("receipt lookup changed rows: %+v, %v", rows, err)
+			}
+		})
+	}
+}
+
+func TestGatewayMessageReplayOnlyMissDoesNotConsumeQuota(t *testing.T) {
+	s := setupTestStore(t)
+	now := time.Now().UTC().Truncate(time.Second)
+	event := admitMessageTask(t, s, now)
+	request := messageEnqueue(event, now, "new")
+	request.MaxMessages = 1
+	request.ReplayOnly = true
+	if row, created, err := s.EnqueueGatewayMessage(t.Context(), request); !errors.Is(err, store.ErrGatewayMessageReplayOnly) || created || row != nil {
+		t.Fatalf("receipt miss = (%+v, %v, %v)", row, created, err)
+	}
+	request.ReplayOnly = false
+	enqueueMessage(t, s, request)
+}
+
 func TestGatewayMessageCapIsAtomicAndLifetime(t *testing.T) {
 	s := setupTestStore(t)
 	ctx := context.Background()

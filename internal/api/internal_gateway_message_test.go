@@ -169,6 +169,9 @@ func TestInternalGatewayMessageRejectsUntrustedWorker(t *testing.T) {
 		name   string
 		change func(*testing.T, *gatewayMessageAPIFixture)
 	}{
+		{"missing pod binding", func(t *testing.T, f *gatewayMessageAPIFixture) {
+			f.user.Extra = nil
+		}},
 		{"wrong pod UID", func(t *testing.T, f *gatewayMessageAPIFixture) {
 			f.user.Extra["authentication.kubernetes.io/pod-uid"] = authenticationv1.ExtraValue{"old-pod"}
 		}},
@@ -205,6 +208,11 @@ func TestInternalGatewayMessageRejectsUntrustedWorker(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			f := newGatewayMessageAPIFixture(t)
+			seed, err := f.service.EnqueueTaskMessage(t.Context(), f.task.Namespace, f.task.Name, string(f.task.UID), "step", "private content")
+			require.NoError(t, err)
+			before, err := f.db.GetGatewayDelivery(t.Context(), f.task.Namespace, seed.DeliveryID)
+			require.NoError(t, err)
+			withdrawGatewayMessageCapability(t, f)
 			tt.change(t, f)
 			status, result := f.request(t, []byte(`{"content":"private content","requestID":"step"}`))
 			require.Equal(t, 403, status)
@@ -213,7 +221,7 @@ func TestInternalGatewayMessageRejectsUntrustedWorker(t *testing.T) {
 			require.Equal(t, 1, f.reviews)
 			rows, err := f.db.ListGatewayDeliveries(t.Context(), store.GatewayDeliveryFilter{Namespace: "default"})
 			require.NoError(t, err)
-			require.Empty(t, rows)
+			require.Equal(t, []store.GatewayDelivery{*before}, rows)
 		})
 	}
 }
@@ -225,6 +233,7 @@ func TestInternalGatewayMessageStrictBoundedRequest(t *testing.T) {
 	}{
 		{"target", `{"content":"x","requestID":"step","target":"room"}`, 400},
 		{"policy", `{"content":"x","requestID":"step","maxMessages":100}`, 400},
+		{"replay control", `{"content":"x","requestID":"step","replayOnly":true}`, 400},
 		{"missing requestID", `{"content":"x"}`, 400},
 		{"noncanonical requestID", `{"content":"x","requestID":" step "}`, 400},
 		{"extra JSON", `{"content":"x","requestID":"step"}{}`, 400},
@@ -302,6 +311,11 @@ func (r *gatewayMessageCountingReader) Read(p []byte) (int, error) {
 
 func TestInternalGatewayMessageChecksRevocationInsideWriter(t *testing.T) {
 	f := newGatewayMessageAPIFixture(t)
+	seed, err := f.service.EnqueueTaskMessage(t.Context(), f.task.Namespace, f.task.Name, string(f.task.UID), "step", "working")
+	require.NoError(t, err)
+	before, err := f.db.GetGatewayDelivery(t.Context(), f.task.Namespace, seed.DeliveryID)
+	require.NoError(t, err)
+	withdrawGatewayMessageCapability(t, f)
 	// Register the Task's cleanup fence first so the test revokes only during the
 	// admission authorization, after the worker has been authenticated.
 	require.NoError(t, f.db.WithAuthorizedTaskDataTransaction(t.Context(), "default", f.task.Name, func(context.Context) error { return nil }, func(context.Context) error { return nil }))
@@ -323,5 +337,34 @@ func TestInternalGatewayMessageChecksRevocationInsideWriter(t *testing.T) {
 	require.Contains(t, result, "error")
 	rows, err := f.db.ListGatewayDeliveries(t.Context(), store.GatewayDeliveryFilter{Namespace: "default"})
 	require.NoError(t, err)
-	require.Empty(t, rows)
+	require.Equal(t, []store.GatewayDelivery{*before}, rows)
+}
+
+func withdrawGatewayMessageCapability(t *testing.T, f *gatewayMessageAPIFixture) {
+	t.Helper()
+	object := &gatewayv1alpha1.Gateway{}
+	require.NoError(t, f.h.k8sClient.Get(t.Context(), client.ObjectKey{Namespace: "default", Name: "chat"}, object))
+	object.Status.ObservedCapabilities.Capabilities.InterimDelivery = false
+	require.NoError(t, f.h.k8sClient.Status().Update(t.Context(), object))
+}
+
+func TestInternalGatewayMessageReceiptAfterCapabilityWithdrawal(t *testing.T) {
+	f := newGatewayMessageAPIFixture(t)
+	status, receipt := f.request(t, []byte(`{"content":"working","requestID":"step"}`))
+	require.Equal(t, 202, status)
+	before, err := f.db.GetGatewayDelivery(t.Context(), f.task.Namespace, receipt["deliveryID"].(string))
+	require.NoError(t, err)
+	withdrawGatewayMessageCapability(t, f)
+	status, replay := f.request(t, []byte(`{"content":"working","requestID":"step"}`))
+	require.Equal(t, 200, status)
+	require.Equal(t, map[string]any{"deliveryID": receipt["deliveryID"], "status": "Pending", "created": false}, replay)
+	status, result := f.request(t, []byte(`{"content":"changed","requestID":"step"}`))
+	require.Equal(t, 409, status)
+	require.Equal(t, "conflict", result["error"].(map[string]any)["code"])
+	status, result = f.request(t, []byte(`{"content":"working","requestID":"new"}`))
+	require.Equal(t, 409, status)
+	require.Equal(t, "interim_delivery_unsupported", result["error"].(map[string]any)["code"])
+	rows, err := f.db.ListGatewayDeliveries(t.Context(), store.GatewayDeliveryFilter{Namespace: "default"})
+	require.NoError(t, err)
+	require.Equal(t, []store.GatewayDelivery{*before}, rows)
 }

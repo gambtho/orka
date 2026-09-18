@@ -108,6 +108,9 @@ func enqueueGatewayMessageTx(ctx context.Context, tx *sql.Tx, request store.Gate
 	} else if !errors.Is(err, store.ErrNotFound) {
 		return nil, false, err
 	}
+	if request.ReplayOnly {
+		return nil, false, store.ErrGatewayMessageReplayOnly
+	}
 	if event.State != store.GatewayEventTaskCreated || event.DeliveryID != "" || !event.ExpiresAt.After(request.Now) {
 		return nil, false, store.ErrConflict
 	}

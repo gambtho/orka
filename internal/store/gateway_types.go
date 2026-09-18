@@ -195,7 +195,8 @@ type GatewayExpiryProjection struct {
 
 // GatewayMessageEnqueue admits one bounded nonterminal message for an exact Task/event.
 // All routing and delivery identity are derived from the durable event and RequestID;
-// callers must authorize the live Task and adapter capability before entering the writer.
+// callers must authorize the live Task and Gateway identity before entering the writer.
+// If current readiness/capability denies admission, ReplayOnly permits only receipt recovery.
 // MaxMessages and MaxAttempts are positive controller policy, not worker input.
 // Replays compare identity and Text, not mutable retry policy or request time.
 type GatewayMessageEnqueue struct {
@@ -206,6 +207,7 @@ type GatewayMessageEnqueue struct {
 	TaskUID      string
 	RequestID    string
 	Text         string
+	ReplayOnly   bool // Controller-only control bit; never persisted or accepted from workers.
 	MaxMessages  int
 	MaxAttempts  int
 	Now          time.Time

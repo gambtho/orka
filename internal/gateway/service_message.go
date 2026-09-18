@@ -36,8 +36,9 @@ type TaskMessageReceipt struct {
 // during live authorization, then enqueue in the authorized task-data writer.
 // It is not a worker credential and must not be retained across requests.
 type PreparedTaskMessage struct {
-	service *Service
-	request store.GatewayMessageEnqueue
+	service            *Service
+	request            store.GatewayMessageEnqueue
+	admissionGateError error
 }
 
 // EnqueueTaskMessage admits a message for an exact, already-authorized Task
@@ -81,15 +82,19 @@ func (s *Service) PrepareTaskMessage(ctx context.Context, namespace, taskName, t
 	if task.Status.Phase != corev1alpha1.TaskPhaseRunning || task.Status.ExecutionOutcome != nil || !task.DeletionTimestamp.IsZero() {
 		return nil, &HTTPError{Code: http.StatusConflict, Message: "task is not running"}
 	}
-	if err := s.liveMessageGateway(ctx, event); err != nil {
+	object, err := s.liveMessageGatewayIdentity(ctx, event)
+	if err != nil {
 		return nil, err
 	}
+	// Readiness/capability can deny new admission without hiding an authorized
+	// receipt. Only the atomic store dedupe may distinguish a replay from a miss.
+	gateErr := messageGatewayAdmissionError(object)
 	now := time.Now().UTC()
-	return &PreparedTaskMessage{service: s, request: store.GatewayMessageEnqueue{
+	return &PreparedTaskMessage{service: s, admissionGateError: gateErr, request: store.GatewayMessageEnqueue{
 		Namespace: event.Namespace, NamespaceUID: event.NamespaceUID, EventID: event.ID,
 		TaskName: event.TaskName, TaskUID: event.TaskUID, RequestID: requestID, Text: text,
 		MaxMessages: s.Config.InterimMessagesPerTask, MaxAttempts: s.Config.DeliveryMaxAttempts,
-		Now: now, ExpiresAt: now.Add(s.Config.EventExpiry),
+		Now: now, ExpiresAt: now.Add(s.Config.EventExpiry), ReplayOnly: gateErr != nil,
 	}}, nil
 }
 
@@ -104,6 +109,9 @@ func (s *Service) EnqueuePreparedTaskMessage(ctx context.Context, prepared *Prep
 	// Refresh admission time rather than reusing the earlier live-read time.
 	request.Now = time.Now().UTC()
 	row, created, err := s.DeliveryStore.EnqueueGatewayMessage(ctx, request)
+	if errors.Is(err, store.ErrGatewayMessageReplayOnly) {
+		return nil, prepared.admissionGateError
+	}
 	if err != nil {
 		return nil, taskMessageStoreError(err)
 	}
@@ -138,21 +146,25 @@ func (s *Service) liveMessageTask(ctx context.Context, event *store.GatewayEvent
 	return task, nil
 }
 
-func (s *Service) liveMessageGateway(ctx context.Context, event *store.GatewayEvent) error {
+func (s *Service) liveMessageGatewayIdentity(ctx context.Context, event *store.GatewayEvent) (*gatewayv1alpha1.Gateway, error) {
 	namespace := &corev1.Namespace{}
 	if err := s.freshReader().Get(ctx, client.ObjectKey{Name: event.Namespace}, namespace); err != nil {
-		return messageIdentityReadError(err)
+		return nil, messageIdentityReadError(err)
 	}
 	if event.NamespaceUID == "" || string(namespace.UID) != event.NamespaceUID || !namespace.DeletionTimestamp.IsZero() {
-		return &HTTPError{Code: http.StatusConflict, Message: "gateway namespace identity is no longer active"}
+		return nil, &HTTPError{Code: http.StatusConflict, Message: "gateway namespace identity is no longer active"}
 	}
 	object := &gatewayv1alpha1.Gateway{}
 	if err := s.freshReader().Get(ctx, client.ObjectKey{Namespace: event.Namespace, Name: event.GatewayName}, object); err != nil {
-		return messageIdentityReadError(err)
+		return nil, messageIdentityReadError(err)
 	}
 	if event.GatewayUID == "" || string(object.UID) != event.GatewayUID || event.GatewayGeneration <= 0 || object.Generation != event.GatewayGeneration || !object.DeletionTimestamp.IsZero() {
-		return &HTTPError{Code: http.StatusConflict, Message: "gateway identity is no longer active"}
+		return nil, &HTTPError{Code: http.StatusConflict, Message: "gateway identity is no longer active"}
 	}
+	return object, nil
+}
+
+func messageGatewayAdmissionError(object *gatewayv1alpha1.Gateway) error {
 	if !object.Status.Ready || object.Status.ObservedGeneration != object.Generation {
 		return &HTTPError{Code: http.StatusServiceUnavailable, Message: "gateway is not ready for interim delivery"}
 	}
@@ -191,5 +203,9 @@ func (s *Service) validateMessageDelivery(ctx context.Context, delivery *store.G
 	if !task.DeletionTimestamp.IsZero() {
 		return &HTTPError{Code: http.StatusConflict, Message: "gateway message task is deleting"}
 	}
-	return s.liveMessageGateway(ctx, event)
+	object, err := s.liveMessageGatewayIdentity(ctx, event)
+	if err != nil {
+		return err
+	}
+	return messageGatewayAdmissionError(object)
 }

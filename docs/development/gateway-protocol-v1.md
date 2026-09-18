@@ -159,13 +159,13 @@ A newly enqueued message returns **HTTP 202**; a replay with the same sanitized 
 {"deliveryID":"stable-controller-delivery-id","status":"Pending","created":true}
 ```
 
-This acknowledges admission, not provider delivery. Missing/false capability on a ready current Gateway returns **HTTP 409** with no enqueue:
+This acknowledges admission, not provider delivery. An authenticated replay can recover an existing receipt even if the same Gateway is now unready, has a stale readiness observation, or no longer advertises the supported contract/capability. It does not requeue or modify the delivery. Exact live Task/namespace/Gateway identity and generation fences still apply; the Task must remain Running, and worker Job revocation still denies receipt recovery. Changed sanitized content still conflicts. A new request ID must pass the current admission gate: missing/false capability on a ready current Gateway returns **HTTP 409** with no enqueue:
 
 ```json
 {"error":{"code":"interim_delivery_unsupported","message":"gateway adapter does not advertise interimDelivery capability"}}
 ```
 
-Errors produced by the message handler use the same `error.code`/`error.message` shape with string codes: `invalid_request` (400), `unauthorized` (401), `forbidden` (403), `not_found` (404), `conflict` (409, including changed sanitized content or lifecycle conflict), `too_large` (413), `limit_reached` (429), `unavailable` (503), or `internal_error` (500). Authentication can fail before the message handler runs: the shared auth middleware uses the common error envelope with a numeric HTTP status in `error.code` (for example, `{"error":{"code":401,"message":"missing authorization header"}}`), not the handler's string `unauthorized` code. A terminal worker loses authorization; do not rely on replay to authorize a completed Task. Transient unready/stale observations return `unavailable` (503), not a current adapter's unsupported-capability error.
+Errors produced by the message handler use the same `error.code`/`error.message` shape with string codes: `invalid_request` (400), `unauthorized` (401), `forbidden` (403), `not_found` (404), `conflict` (409, including changed sanitized content or lifecycle conflict), `too_large` (413), `limit_reached` (429), `unavailable` (503), or `internal_error` (500). Authentication can fail before the message handler runs: the shared auth middleware uses the common error envelope with a numeric HTTP status in `error.code` (for example, `{"error":{"code":401,"message":"missing authorization header"}}`), not the handler's string `unauthorized` code. A terminal worker loses authorization; do not rely on replay to authorize a completed Task. For new admissions, transient unready/stale observations return `unavailable` (503), not a current adapter's unsupported-capability error.
 
 ## Bounds
 
