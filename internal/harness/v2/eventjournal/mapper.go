@@ -1056,23 +1056,16 @@ func mapUsageUpdate(
 	mapped *store.ExecutionEvent,
 	content map[string]any,
 ) {
+	mapped.Summary = usageSummary(usage)
 	hasTokenUsage := usage.InputTokens > 0 || usage.OutputTokens > 0 || usage.CachedInputTokens > 0
 	hasContextWindow := usage.ContextWindowUsed != nil
 	if hasTokenUsage || !hasContextWindow {
 		mapped.Type = executionevents.ExecutionEventTypeModelUsageUpdated
-		mapped.Summary = fmt.Sprintf(
-			"Model usage updated: %d input, %d output, %d cached input tokens",
-			usage.InputTokens, usage.OutputTokens, usage.CachedInputTokens,
-		)
 		content["inputTokens"] = usage.InputTokens
 		content["outputTokens"] = usage.OutputTokens
 		content["cachedInputTokens"] = usage.CachedInputTokens
 	} else {
 		mapped.Type = executionevents.ExecutionEventTypeModelContextUpdated
-		mapped.Summary = fmt.Sprintf(
-			"Model context updated: %d of %d tokens used",
-			*usage.ContextWindowUsed, *usage.ContextWindowSize,
-		)
 	}
 	if usage.ContextWindowUsed != nil {
 		content["contextWindowUsed"] = *usage.ContextWindowUsed
@@ -1084,6 +1077,56 @@ func mapUsageUpdate(
 	if mapCtx.Model != "" {
 		content["model"] = mapCtx.Model
 	}
+}
+
+func usageSummary(usage *harnessv2.UsageUpdate) string {
+	if usage.InputTokens > 0 || usage.OutputTokens > 0 || usage.CachedInputTokens > 0 || usage.ContextWindowUsed == nil {
+		return fmt.Sprintf(
+			"Model usage updated: %d input, %d output, %d cached input tokens",
+			usage.InputTokens, usage.OutputTokens, usage.CachedInputTokens,
+		)
+	}
+	return fmt.Sprintf(
+		"Model context updated: %d of %d tokens used",
+		*usage.ContextWindowUsed, *usage.ContextWindowSize,
+	)
+}
+
+func mapUsageUpdateWithHistory(
+	event harnessv2.Event,
+	mapCtx MapContext,
+	journalKind string,
+	history []logicalFieldBoundaries,
+	historySaturated bool,
+) (*store.ExecutionEvent, []logicalFieldBoundaries, error) {
+	if event.Update == nil || event.Update.Usage == nil {
+		return nil, nil, fmt.Errorf("harness v2 usage update is required")
+	}
+	if err := event.Update.Usage.Validate(); err != nil {
+		return nil, nil, fmt.Errorf("invalid usage: %w", err)
+	}
+	mapCtx = mapCtx.normalized()
+	// Preserve metadata that is safe against history before checking the new
+	// summary. Its trailing "tokens" may complete an assignment, or exhaust
+	// the conservative search budget; masking the summary must not needlessly
+	// discard independently safe provider/model values.
+	provider, model, publishedFields := redactModelWithHistory(
+		mapCtx.Provider, mapCtx.Model, history, historySaturated, nil,
+	)
+	mapCtx.Provider, mapCtx.Model = provider, model
+	combined := make([]logicalFieldBoundaries, 0, len(history)+len(publishedFields))
+	combined = append(combined, history...)
+	combined = append(combined, publishedFields...)
+	values, summaryFields := redactLogicalFieldsWithPublicCopies(
+		combined, historySaturated, []logicalFieldCopyKind{logicalFieldSingleCopy}, usageSummary(event.Update.Usage),
+	)
+	publishedFields = append(publishedFields, summaryFields...)
+	mapped, err := mapUpdate(event, mapCtx, mapUpdateOptions{journalKind: journalKind})
+	if err != nil {
+		return nil, nil, err
+	}
+	mapped.Summary = values[0]
+	return mapped, publishedFields, nil
 }
 
 func hasUsageTelemetry(usage harnessv2.UsageUpdate) bool {
@@ -1193,17 +1236,14 @@ func mapTerminalUsageWithHistory(
 	if err := usage.Validate(); err != nil {
 		return nil, nil, fmt.Errorf("invalid completed usage: %w", err)
 	}
-	var publishedFields []logicalFieldBoundaries
 	if event.Completed.Result.Model != "" {
 		mapCtx.Model = event.Completed.Result.Model
 	}
-	mapCtx.Provider, mapCtx.Model, publishedFields = redactModelWithHistory(mapCtx.Provider, strings.TrimSpace(mapCtx.Model), history, historySaturated, nil)
 	update := event
 	update.Type = harnessv2.EventUpdate
 	update.Completed = nil
 	update.Update = &harnessv2.UpdateEvent{Kind: harnessv2.UpdateUsage, Usage: &usage}
-	mapped, err := mapUpdate(update, mapCtx, mapUpdateOptions{journalKind: mappedTerminalUsageKind})
-	return mapped, publishedFields, err
+	return mapUsageUpdateWithHistory(update, mapCtx, mappedTerminalUsageKind, history, historySaturated)
 }
 
 // MapPromptLifecycle maps prompt acceptance and settlement into the existing

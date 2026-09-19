@@ -684,13 +684,15 @@ func (s *State) appendUpdateIfNew(
 		options.diagnosticProjection = &projection
 		publishedFields = fields
 	}
-	mapCtx := s.journal.MapContext.normalized()
+	var mapped *store.ExecutionEvent
+	var err error
 	if event.Update != nil && event.Update.Kind == harnessv2.UpdateUsage {
-		mapCtx.Provider, mapCtx.Model, publishedFields = redactModelWithHistory(
-			mapCtx.Provider, mapCtx.Model, s.logicalFieldHistory, s.logicalFieldHistorySaturated, nil,
+		mapped, publishedFields, err = mapUsageUpdateWithHistory(
+			event, s.journal.MapContext, "", s.logicalFieldHistory, s.logicalFieldHistorySaturated,
 		)
+	} else {
+		mapped, err = mapUpdate(event, s.journal.MapContext, options)
 	}
-	mapped, err := mapUpdate(event, mapCtx, options)
 	if err != nil {
 		return nil, false, err
 	}
