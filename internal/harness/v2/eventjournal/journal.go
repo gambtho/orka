@@ -684,7 +684,13 @@ func (s *State) appendUpdateIfNew(
 		options.diagnosticProjection = &projection
 		publishedFields = fields
 	}
-	mapped, err := mapUpdate(event, s.journal.MapContext, options)
+	mapCtx := s.journal.MapContext.normalized()
+	if event.Update != nil && event.Update.Kind == harnessv2.UpdateUsage {
+		mapCtx.Model, publishedFields = redactModelWithHistory(
+			mapCtx.Model, s.logicalFieldHistory, s.logicalFieldHistorySaturated, nil,
+		)
+	}
+	mapped, err := mapUpdate(event, mapCtx, options)
 	if err != nil {
 		return nil, false, err
 	}
@@ -872,8 +878,8 @@ func (s *State) mapAssistantTranscript(
 ) (*store.ExecutionEvent, []logicalFieldBoundaries, error) {
 	var publishedFields []logicalFieldBoundaries
 	if !contentOmitted {
-		values, fields := redactLogicalFieldsWithHistory(
-			s.logicalFieldHistory, s.logicalFieldHistorySaturated, transcript,
+		values, fields := redactLogicalFieldsWithPublicCopies(
+			s.logicalFieldHistory, s.logicalFieldHistorySaturated, []logicalFieldCopyKind{logicalFieldSummaryCopies}, transcript,
 		)
 		transcript = values[0]
 		publishedFields = fields
@@ -1014,14 +1020,21 @@ func (s *State) AppendPromptSettlementIfNew(
 	}
 	identity := s.promptIdentity
 	identity.Sequence = s.promptAcceptedSequence
-	mapped, err := mapPromptSettlement(identity, settlement, cancellationReason, s.journal.MapContext)
+	mapped, publishedFields, err := mapPromptSettlement(
+		identity, settlement, cancellationReason, s.journal.MapContext,
+		s.logicalFieldHistory, s.logicalFieldHistorySaturated,
+	)
 	if err != nil {
 		return nil, false, err
 	}
-	return s.appendMappedEvent(
+	appended, isNew, err := s.appendMappedEvent(
 		ctx, identity, mappedJournalRecordPromptTerminal, mapped,
 		"append mapped harness v2 prompt settlement",
 	)
+	if err == nil {
+		s.rememberLogicalFields(publishedFields)
+	}
+	return appended, isNew, err
 }
 
 // AppendAssistantStreamClosureIfNew persists the complete assistant text seen

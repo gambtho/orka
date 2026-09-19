@@ -345,12 +345,21 @@ func redactPlanEntries(
 ) ([]harnessv2.PlanEntry, []logicalFieldBoundaries) {
 	redacted := append([]harnessv2.PlanEntry(nil), entries...)
 	values := make([]string, 0, len(entries)*2)
-	extraCopyCandidates := make([]bool, 0, len(entries)*2)
+	copyKinds := make([]logicalFieldCopyKind, 0, len(entries)*2)
+	summaryAssigned := false
 	for _, entry := range entries {
-		values = append(values, strings.TrimSpace(entry.Content), strings.TrimSpace(entry.Priority))
-		extraCopyCandidates = append(extraCopyCandidates, entry.Status == harnessv2.PlanEntryInProgress, false)
+		content := strings.TrimSpace(executionevents.RedactExecutionEventText(strings.TrimSpace(entry.Content)))
+		kind := logicalFieldTrimmedCopies
+		if !summaryAssigned && entry.Status == harnessv2.PlanEntryInProgress && strings.TrimSpace(content) != "" {
+			// Sanitization can empty an entry and move the summary to the next
+			// in-progress entry. Only its content has two extra summary copies.
+			summaryAssigned = true
+			kind = logicalFieldPlanSummaryCopies
+		}
+		values = append(values, content, strings.TrimSpace(entry.Priority))
+		copyKinds = append(copyKinds, kind, logicalFieldTrimmedCopies)
 	}
-	values, publishedFields := redactLogicalFieldsWithPublicCopies(history, historySaturated, "", extraCopyCandidates, values...)
+	values, publishedFields := redactLogicalFieldsWithPublicCopies(history, historySaturated, copyKinds, values...)
 	for index := range redacted {
 		redacted[index].Content = values[index*2]
 		redacted[index].Priority = values[index*2+1]
@@ -375,7 +384,8 @@ func projectDiagnosticUpdate(
 	historySaturated bool,
 ) (diagnosticProjection, []logicalFieldBoundaries) {
 	values, publishedFields := redactLogicalFieldsWithPublicCopies(
-		history, historySaturated, ": ", nil, update.Code, update.Message,
+		history, historySaturated, []logicalFieldCopyKind{logicalFieldDiagnosticCodeCopies, logicalFieldSummaryCopies},
+		update.Code, update.Message,
 	)
 	return diagnosticProjection{code: values[0], message: values[1]}, publishedFields
 }
@@ -386,11 +396,18 @@ func projectToolUpdate(
 	historySaturated bool,
 	contentText *string,
 ) (toolProjection, []logicalFieldBoundaries) {
-	values := []string{tool.Title, tool.Kind}
+	title := executionevents.RedactExecutionEventText(tool.Title)
+	values := []string{title, tool.Kind}
+	copyKinds := []logicalFieldCopyKind{logicalFieldSummaryCopies, logicalFieldToolNameCopies}
 	if contentText != nil {
 		values = append(values, *contentText)
+		kind := logicalFieldSingleCopy
+		if strings.TrimSpace(title) == "" {
+			kind = logicalFieldSummaryCopies
+		}
+		copyKinds = append(copyKinds, kind)
 	}
-	values, publishedFields := redactLogicalFieldsWithHistory(history, historySaturated, values...)
+	values, publishedFields := redactLogicalFieldsWithPublicCopies(history, historySaturated, copyKinds, values...)
 	projection := toolProjection{title: values[0], kind: values[1]}
 	if contentText != nil {
 		projection.contentText = values[2]
@@ -403,51 +420,103 @@ func redactLogicalFieldsWithHistory(
 	historySaturated bool,
 	values ...string,
 ) ([]string, []logicalFieldBoundaries) {
-	return redactLogicalFieldsWithPublicCopies(history, historySaturated, "", nil, values...)
+	return redactLogicalFieldsWithPublicCopies(history, historySaturated, nil, values...)
 }
 
-// Diagnostic summaries append a colon to the code before joining the message.
-// An in-progress plan entry appears in two documents and two summaries.
-// Keep these public copies in the field's existing logical history slot.
+// Each model-bearing event publishes its effective model, including configured
+// fallbacks. Check it against both history and fields already projected for this
+// event, then return all fields actually published by the event.
+func redactModelWithHistory(
+	model string,
+	history []logicalFieldBoundaries,
+	historySaturated bool,
+	published []logicalFieldBoundaries,
+) (string, []logicalFieldBoundaries) {
+	if model == "" {
+		return model, published
+	}
+	combined := make([]logicalFieldBoundaries, 0, len(history)+len(published))
+	combined = append(combined, history...)
+	combined = append(combined, published...)
+	values, fields := redactLogicalFieldsWithPublicCopies(
+		combined, historySaturated, []logicalFieldCopyKind{logicalFieldTrimmedCopies}, model,
+	)
+	return values[0], append(published, fields...)
+}
+
+type logicalFieldCopyKind uint8
+
+const (
+	logicalFieldSingleCopy logicalFieldCopyKind = iota
+	logicalFieldTrimmedCopies
+	logicalFieldSummaryCopies
+	logicalFieldToolNameCopies
+	logicalFieldDiagnosticCodeCopies
+	logicalFieldPlanSummaryCopies
+)
+
+// Count the actual field locations of a public record. Models have two raw
+// locations in the event DTO; titles and assistant text have raw/summary copies.
+// Replays of the same event identity do not introduce another logical field.
+func logicalFieldPublicCopies(value string, kind logicalFieldCopyKind) []string {
+	switch kind {
+	case logicalFieldTrimmedCopies:
+		return []string{value, value}
+	case logicalFieldSummaryCopies:
+		return []string{value, compactWhitespace(value)}
+	case logicalFieldToolNameCopies:
+		name, _, _ := executionevents.RedactAndTruncateExecutionEventText(strings.TrimSpace(value), 128)
+		return []string{value, name}
+	case logicalFieldDiagnosticCodeCopies:
+		return []string{value, compactWhitespace(value + ": ")}
+	case logicalFieldPlanSummaryCopies:
+		summary := compactWhitespace(value)
+		return []string{value, value, summary, summary}
+	default:
+		return []string{value}
+	}
+}
+
 func redactLogicalFieldsWithPublicCopies(
 	history []logicalFieldBoundaries,
 	historySaturated bool,
-	firstSummarySuffix string,
-	extraCopyCandidates []bool,
+	copyKinds []logicalFieldCopyKind,
 	values ...string,
 ) ([]string, []logicalFieldBoundaries) {
 	redacted := make([]string, len(values))
+	publicText := make([]bool, len(values))
 	current := make([]logicalFieldBoundaries, 0, len(values))
-	extraCopiesAssigned := false
 	for index, value := range values {
+		kind := logicalFieldSingleCopy
+		if index < len(copyKinds) {
+			kind = copyKinds[index]
+		}
+		trimmed := kind == logicalFieldTrimmedCopies || kind == logicalFieldPlanSummaryCopies
+		if trimmed {
+			value = strings.TrimSpace(value)
+		}
 		redacted[index] = executionevents.RedactExecutionEventText(value)
-		if historySaturated {
-			if redacted[index] != "" || index == 0 && firstSummarySuffix != "" {
+		if trimmed {
+			// URL removal can expose trailing whitespace. Match the final
+			// model/plan value before a downstream projection trims it again.
+			redacted[index] = strings.TrimSpace(redacted[index])
+		}
+		copies := logicalFieldPublicCopies(redacted[index], kind)
+		sensitiveCopy := false
+		for _, copy := range copies {
+			publicText[index] = publicText[index] || copy != ""
+			if copy != redacted[index] && executionevents.RedactExecutionEventText(copy) != copy {
+				sensitiveCopy = true
+			}
+		}
+		if historySaturated || sensitiveCopy {
+			if publicText[index] {
 				redacted[index] = executionevents.ExecutionEventRedactedValue
 			}
 			continue
 		}
-		summaryValue := redacted[index]
-		if index == 0 {
-			summaryValue += firstSummarySuffix
-		}
-		normalized := compactWhitespace(summaryValue)
-		if normalized != redacted[index] &&
-			executionevents.RedactExecutionEventText(normalized) != normalized {
-			// A public summary can expose an assignment that the original
-			// whitespace kept the text redactor from recognizing.
-			redacted[index] = executionevents.ExecutionEventRedactedValue
-		}
-		before := len(current)
-		current = appendLogicalFieldBoundaryWithSummary(current, redacted[index], normalized)
-		if !extraCopiesAssigned && index < len(extraCopyCandidates) && extraCopyCandidates[index] &&
-			strings.TrimSpace(redacted[index]) != "" {
-			// Sanitization can empty an entry, moving the plan summary to the
-			// next in-progress entry. Select its copies from the public text.
-			extraCopiesAssigned = true
-			if len(current) > before {
-				current[before] = append(current[before], current[before]...)
-			}
+		if redacted[index] != executionevents.ExecutionEventRedactedValue {
+			current = appendLogicalFieldCopies(current, copies...)
 		}
 	}
 	if historySaturated {
@@ -457,8 +526,8 @@ func redactLogicalFieldsWithPublicCopies(
 	fields = append(fields, history...)
 	fields = append(fields, current...)
 	if permutedLogicalFieldSubsetsSensitive(fields) {
-		for index, value := range redacted {
-			if value != "" || index == 0 && firstSummarySuffix != "" {
+		for index := range redacted {
+			if publicText[index] {
 				redacted[index] = executionevents.ExecutionEventRedactedValue
 			}
 		}
@@ -474,9 +543,8 @@ const (
 	maxLogicalFieldPermutationBitWords = 4 * maxLogicalFieldPermutationFields / 64
 )
 
-// Payloads retain original text while summaries normalize whitespace. Both
-// representations and any extra plan copies share one logical field's history
-// slot, but each needs its own permutation bit because all are public together.
+// Public copies share one logical field's history slot, but each needs its own
+// permutation bit because the record exposes them together.
 type logicalFieldBoundaries []logicalFieldBoundary
 
 type logicalFieldBoundary struct {
@@ -559,26 +627,48 @@ var logicalFieldOpenAssignmentRe = regexp.MustCompile(`(?i)(?:api[-_]?key|token|
 // such as the ampersand in a shell command.
 var logicalFieldAssignmentContinuationRe = regexp.MustCompile(`(?i)\A[a-z0-9_.-]*["']?\s*(?:[:=]|\z)`)
 
-func appendLogicalFieldBoundary(fields []logicalFieldBoundaries, value string) []logicalFieldBoundaries {
-	return appendLogicalFieldBoundaryWithSummary(fields, value, compactWhitespace(value))
+var logicalFieldWhitespaceRunRe = regexp.MustCompile(`[\t\n\f\r ]{2,}`)
+
+// The text redactors accept arbitrary ASCII whitespace between header and
+// natural-language credential parts. Keep that whitespace from clipping away
+// an unfinished marker. This changes only the bounded matcher representation,
+// retains line-break barriers, and leaves Unicode whitespace untouched.
+func compactLogicalFieldWhitespace(value string) string {
+	return logicalFieldWhitespaceRunRe.ReplaceAllStringFunc(value, func(run string) string {
+		if !strings.ContainsAny(run, "\r\n") {
+			return " "
+		}
+		var result strings.Builder
+		if run[0] != '\r' && run[0] != '\n' {
+			result.WriteByte(' ')
+		}
+		result.WriteByte('\n')
+		if last := run[len(run)-1]; last != '\r' && last != '\n' {
+			result.WriteByte(' ')
+		}
+		return result.String()
+	})
 }
 
-func appendLogicalFieldBoundaryWithSummary(fields []logicalFieldBoundaries, value, summary string) []logicalFieldBoundaries {
-	if value == "" && summary != "" {
-		return append(fields, logicalFieldBoundaries{boundLogicalFieldText(summary)})
+func appendLogicalFieldBoundary(fields []logicalFieldBoundaries, value string) []logicalFieldBoundaries {
+	return appendLogicalFieldCopies(fields, value, compactWhitespace(value))
+}
+
+func appendLogicalFieldCopies(fields []logicalFieldBoundaries, values ...string) []logicalFieldBoundaries {
+	var boundaries logicalFieldBoundaries
+	for _, value := range values {
+		if value != "" && value != executionevents.ExecutionEventRedactedValue {
+			boundaries = append(boundaries, boundLogicalFieldText(value))
+		}
 	}
-	if value == "" || value == executionevents.ExecutionEventRedactedValue {
-		return fields
+	if len(boundaries) > 0 {
+		fields = append(fields, boundaries)
 	}
-	boundary := boundLogicalFieldText(value)
-	boundaries := logicalFieldBoundaries{boundary, boundary}
-	if summary != value {
-		boundaries[1] = boundLogicalFieldText(summary)
-	}
-	return append(fields, boundaries)
+	return fields
 }
 
 func boundLogicalFieldText(value string) logicalFieldBoundary {
+	value = compactLogicalFieldWhitespace(value)
 	runes := []rune(value)
 	if len(runes) <= maxLogicalFieldBoundaryRunes {
 		return logicalFieldBoundary{prefix: value, suffix: value, whole: true}
@@ -651,6 +741,10 @@ func logicalFieldsMayReconstructSensitiveMarker(fields []logicalFieldBoundaries)
 		for _, field := range fields {
 			for _, boundary := range field {
 				text := foldLogicalFieldMarkerText(boundary.prefix)
+				if marker[state.matched-1] == ' ' {
+					// A marker's whitespace can span several source fields.
+					text = strings.TrimLeft(text, " ")
+				}
 				if strings.HasPrefix(text, remaining) {
 					return true
 				}
@@ -671,8 +765,13 @@ func logicalFieldsMayReconstructSensitiveMarker(fields []logicalFieldBoundaries)
 
 func foldLogicalFieldMarkerText(value string) string {
 	// Match the redactor's case-insensitive regular expressions, including
-	// Unicode folds such as long s. Lowercasing alone misses those aliases.
-	return strings.Map(func(r rune) rune {
+	// Unicode folds and ASCII whitespace in natural-language API key text.
+	// Only the conservative fallback folds line breaks into spaces.
+	value = strings.Map(func(r rune) rune {
+		switch r {
+		case '\t', '\n', '\f', '\r':
+			return ' '
+		}
 		lowest := r
 		for folded := unicode.SimpleFold(r); folded != r; folded = unicode.SimpleFold(folded) {
 			if folded < lowest {
@@ -681,6 +780,7 @@ func foldLogicalFieldMarkerText(value string) string {
 		}
 		return unicode.ToLower(lowest)
 	}, value)
+	return logicalFieldWhitespaceRunRe.ReplaceAllString(value, " ")
 }
 
 func permutedLogicalFieldSubsetsSensitive(fields []logicalFieldBoundaries) bool {
@@ -691,8 +791,8 @@ func permutedLogicalFieldSubsetsSensitive(fields []logicalFieldBoundaries) bool 
 	if len(fields) > maxLogicalFieldPermutationFields {
 		return logicalFieldsMayReconstructSensitiveMarker(fields)
 	}
-	// A field has raw and normalized copies. An in-progress plan entry has
-	// two of each, published in both the plan record and its journal event.
+	// Fields have one to four public copies. An in-progress plan entry has
+	// raw and normalized text in both the plan record and its journal event.
 	// Flatten only for exact search; history accounting still uses fields.
 	boundaries := make([]logicalFieldBoundary, 0, 4*len(fields))
 	for _, field := range fields {
@@ -751,6 +851,9 @@ func permutedLogicalFieldSubsetsSensitive(fields []logicalFieldBoundaries) bool 
 			next := candidate
 			next.used[word] |= bit
 			if boundary.whole {
+				// Measure clipping against the same normalized text as the
+				// suffix, not against whitespace removed by compression.
+				joined = compactLogicalFieldWhitespace(joined)
 				next.suffix = logicalFieldSuffix(joined)
 				if logicalFieldTruncatesAssignment(joined, next.suffix) {
 					return true
@@ -1092,12 +1195,9 @@ func mapTerminalUsageWithHistory(
 	}
 	var publishedFields []logicalFieldBoundaries
 	if event.Completed.Result.Model != "" {
-		fields, published := redactLogicalFieldsWithHistory(
-			history, historySaturated, event.Completed.Result.Model,
-		)
-		mapCtx.Model = fields[0]
-		publishedFields = published
+		mapCtx.Model = event.Completed.Result.Model
 	}
+	mapCtx.Model, publishedFields = redactModelWithHistory(strings.TrimSpace(mapCtx.Model), history, historySaturated, nil)
 	update := event
 	update.Type = harnessv2.EventUpdate
 	update.Completed = nil
@@ -1156,13 +1256,6 @@ func mapPromptLifecycleWithHistory(
 		if err := event.Accepted.Validate(); err != nil {
 			return nil, nil, fmt.Errorf("invalid accepted payload: %w", err)
 		}
-		if model != "" {
-			fields, published := redactLogicalFieldsWithHistory(
-				history, historySaturated, model,
-			)
-			model = fields[0]
-			publishedFields = published
-		}
 		content[mappedJournalKindContentKey] = mappedPromptAcceptedKind
 		content["acceptedAt"] = event.Accepted.AcceptedAt.UTC()
 		content["acpVersion"] = event.Accepted.ACPVersion
@@ -1176,11 +1269,7 @@ func mapPromptLifecycleWithHistory(
 			return nil, nil, fmt.Errorf("invalid completed payload: %w", err)
 		}
 		if event.Completed.Result.Model != "" {
-			fields, published := redactLogicalFieldsWithHistory(
-				history, historySaturated, event.Completed.Result.Model,
-			)
-			model = fields[0]
-			publishedFields = published
+			model = event.Completed.Result.Model
 		}
 		content[mappedJournalKindContentKey] = mappedPromptTerminalKind
 		content["terminalEvent"] = event.Type
@@ -1213,7 +1302,8 @@ func mapPromptLifecycleWithHistory(
 			return nil, nil, fmt.Errorf("invalid failed payload: %w", err)
 		}
 		fields, published := redactLogicalFieldsWithPublicCopies(
-			history, historySaturated, ": ", nil, event.Failed.Code, event.Failed.Message,
+			history, historySaturated, []logicalFieldCopyKind{logicalFieldDiagnosticCodeCopies, logicalFieldSummaryCopies},
+			event.Failed.Code, event.Failed.Message,
 		)
 		publishedFields = published
 		content[mappedJournalKindContentKey] = mappedPromptTerminalKind
@@ -1232,7 +1322,8 @@ func mapPromptLifecycleWithHistory(
 			return nil, nil, fmt.Errorf("invalid outcome_unknown payload: %w", err)
 		}
 		fields, published := redactLogicalFieldsWithPublicCopies(
-			history, historySaturated, ": ", nil, event.OutcomeUnknown.Code, event.OutcomeUnknown.Message,
+			history, historySaturated, []logicalFieldCopyKind{logicalFieldDiagnosticCodeCopies, logicalFieldSummaryCopies},
+			event.OutcomeUnknown.Code, event.OutcomeUnknown.Message,
 		)
 		publishedFields = published
 		content[mappedJournalKindContentKey] = mappedPromptTerminalKind
@@ -1250,6 +1341,7 @@ func mapPromptLifecycleWithHistory(
 	if mapCtx.Provider != "" {
 		content["provider"] = mapCtx.Provider
 	}
+	model, publishedFields = redactModelWithHistory(model, history, historySaturated, publishedFields)
 	if model != "" {
 		content["model"] = model
 	}
@@ -1287,7 +1379,8 @@ func mapPromptStreamFailure(
 		return nil, nil, fmt.Errorf("prompt stream failure timestamp is required")
 	}
 	fields, publishedFields := redactLogicalFieldsWithPublicCopies(
-		history, historySaturated, ": ", nil, mappedPromptStreamFailureCode, diagnostic,
+		history, historySaturated, []logicalFieldCopyKind{logicalFieldDiagnosticCodeCopies, logicalFieldSummaryCopies},
+		mappedPromptStreamFailureCode, diagnostic,
 	)
 	content := map[string]any{
 		mappedHarnessV2ContentKey:      identity,
@@ -1301,8 +1394,9 @@ func mapPromptStreamFailure(
 	if mapCtx.Provider != "" {
 		content["provider"] = mapCtx.Provider
 	}
-	if mapCtx.Model != "" {
-		content["model"] = mapCtx.Model
+	model, publishedFields := redactModelWithHistory(mapCtx.Model, history, historySaturated, publishedFields)
+	if model != "" {
+		content["model"] = model
 	}
 	encoded, err := json.Marshal(content)
 	if err != nil {
@@ -1334,19 +1428,21 @@ func mapPromptSettlement(
 	settlement harnessv2.PromptSettlement,
 	cancellationReason harnessv2.CancelReason,
 	mapCtx MapContext,
-) (*store.ExecutionEvent, error) {
+	history []logicalFieldBoundaries,
+	historySaturated bool,
+) (*store.ExecutionEvent, []logicalFieldBoundaries, error) {
 	if err := mapCtx.validate(); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	mapCtx = mapCtx.normalized()
 	if !identity.valid() {
-		return nil, fmt.Errorf("valid harness v2 prompt identity is required")
+		return nil, nil, fmt.Errorf("valid harness v2 prompt identity is required")
 	}
 	if err := settlement.Validate(); err != nil {
-		return nil, fmt.Errorf("invalid prompt settlement: %w", err)
+		return nil, nil, fmt.Errorf("invalid prompt settlement: %w", err)
 	}
 	if cancellationReason != "" && !validPromptCancellationReason(cancellationReason) {
-		return nil, fmt.Errorf("invalid prompt cancellation reason %q", cancellationReason)
+		return nil, nil, fmt.Errorf("invalid prompt cancellation reason %q", cancellationReason)
 	}
 	content := map[string]any{
 		mappedHarnessV2ContentKey:      identity,
@@ -1394,23 +1490,24 @@ func mapPromptSettlement(
 		mapped.Severity = executionevents.ExecutionEventSeverityError
 		mapped.Summary = "Model request outcome unknown"
 	default:
-		return nil, fmt.Errorf("unsupported prompt settlement terminal event %q", settlement.TerminalEvent)
+		return nil, nil, fmt.Errorf("unsupported prompt settlement terminal event %q", settlement.TerminalEvent)
 	}
 	if mapCtx.Provider != "" {
 		content["provider"] = mapCtx.Provider
 	}
-	if mapCtx.Model != "" {
-		content["model"] = mapCtx.Model
+	model, publishedFields := redactModelWithHistory(mapCtx.Model, history, historySaturated, nil)
+	if model != "" {
+		content["model"] = model
 	}
 	encoded, err := json.Marshal(content)
 	if err != nil {
-		return nil, fmt.Errorf("marshal mapped harness v2 prompt settlement: %w", err)
+		return nil, nil, fmt.Errorf("marshal mapped harness v2 prompt settlement: %w", err)
 	}
 	mapped.Content = encoded
 	if err := store.SanitizeExecutionEventPayloadFields(mapped); err != nil {
-		return nil, fmt.Errorf("sanitize mapped harness v2 prompt settlement: %w", err)
+		return nil, nil, fmt.Errorf("sanitize mapped harness v2 prompt settlement: %w", err)
 	}
-	return mapped, nil
+	return mapped, publishedFields, nil
 }
 
 func validPromptCancellationReason(reason harnessv2.CancelReason) bool {

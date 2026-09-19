@@ -522,6 +522,268 @@ func TestMapperJournalRedactsCredentialAcrossRepresentationsOfSameField(t *testi
 	}
 }
 
+func TestMapperJournalPreservesPWDWithAdjacentWhitespace(t *testing.T) {
+	for _, whitespace := range []struct{ name, value string }{
+		{name: "space", value: " "},
+		{name: "tab", value: "\t"},
+		{name: "line feed", value: "\n"},
+		{name: "CRLF", value: "\r\n"},
+		{name: "mixed", value: " \t\r\n "},
+	} {
+		for _, history := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/history=%t", whitespace.name, history), func(t *testing.T) {
+				ctx := context.Background()
+				state, err := (Journal{EventStore: storetest.NewFakeExecutionEventStore(), MapContext: testMapContext()}).Open(ctx)
+				if err != nil {
+					t.Fatal(err)
+				}
+				now := time.Now().UTC()
+				output := whitespace.value
+				if history {
+					event := testUpdateEvent(1, now, harnessv2.UpdateEvent{
+						Kind: harnessv2.UpdateToolCallUpdate, ToolCall: &harnessv2.ToolCallUpdate{
+							ToolCallID: "whitespace", Title: "Read output", Status: harnessv2.ToolCallStatusCompleted,
+							Content: []harnessv2.ContentBlock{{Type: harnessv2.ContentBlockText, Text: output}},
+						},
+					})
+					if _, isNew, err := state.AppendUpdateIfNew(ctx, event); err != nil || !isNew {
+						t.Fatalf("append whitespace history: new=%t err=%v", isNew, err)
+					}
+					output = "/workspace" + whitespace.value
+				}
+				title := "pwd" + whitespace.value
+				event := testUpdateEvent(2, now.Add(time.Second), harnessv2.UpdateEvent{
+					Kind: harnessv2.UpdateToolCallUpdate, ToolCall: &harnessv2.ToolCallUpdate{
+						ToolCallID: "pwd", Title: title, Kind: mapperTestToolKindShell, Status: harnessv2.ToolCallStatusCompleted,
+						Content: []harnessv2.ContentBlock{{Type: harnessv2.ContentBlockText, Text: output}},
+					},
+				})
+				mapped, isNew, err := state.AppendUpdateIfNew(ctx, event)
+				if err != nil || !isNew {
+					t.Fatalf("append pwd tool: new=%t err=%v", isNew, err)
+				}
+				var content struct{ Title, ToolKind string }
+				if err := json.Unmarshal(mapped.Content, &content); err != nil {
+					t.Fatal(err)
+				}
+				if content.Title != title || content.ToolKind != mapperTestToolKindShell ||
+					mapped.ToolName != mapperTestToolKindShell || mapped.Summary != "pwd" || mapped.ContentText != output {
+					t.Fatal("whitespace compression suppressed a harmless pwd command or its output")
+				}
+			})
+		}
+	}
+}
+
+func TestMapperJournalRedactsPaddedCredentials(t *testing.T) {
+	const canary = "fixture-padded-value"
+	for _, padding := range []struct {
+		name     string
+		value    string
+		nonASCII bool
+	}{
+		{name: "spaces", value: strings.Repeat(" ", 300)},
+		{name: "tabs and spaces", value: strings.Repeat("\t ", 150)},
+		{name: "line breaks", value: strings.Repeat("\r\n", 150)},
+		{name: "mixed whitespace", value: strings.Repeat(" \n\t\f", 100)},
+		{name: "non-ASCII whitespace", value: strings.Repeat("\u00a0", 300), nonASCII: true},
+	} {
+		for _, parts := range []struct {
+			title  string
+			tail   string
+			benign bool
+		}{
+			{title: "Authorization", tail: ": Bearer "},
+			{title: "Cookie", tail: ": "},
+			{title: "Set-Cookie", tail: ": "},
+			{title: "Txn-Token", tail: ": "},
+			{title: "Transaction-Token", tail: ": "},
+			{title: "token", tail: "is "},
+			{title: "api", tail: "key is "},
+			{title: "Authorization", tail: "has no colon ", benign: true},
+			{title: "token", tail: "island ", benign: true},
+			{title: "pwd && ls", tail: "README.md ", benign: true},
+		} {
+			t.Run(parts.title+"/"+parts.tail+"/"+padding.name, func(t *testing.T) {
+				output := padding.value + parts.tail + canary
+				benign := parts.benign || padding.nonASCII
+				if sensitive := executionevents.RedactExecutionEventText(parts.title+output) != parts.title+output; sensitive == benign {
+					t.Fatal("fixture does not match the expected credential grammar")
+				}
+				ctx := context.Background()
+				state, err := (Journal{EventStore: storetest.NewFakeExecutionEventStore(), MapContext: testMapContext()}).Open(ctx)
+				if err != nil {
+					t.Fatal(err)
+				}
+				event := testUpdateEvent(1, time.Now().UTC(), harnessv2.UpdateEvent{
+					Kind: harnessv2.UpdateToolCallUpdate,
+					ToolCall: &harnessv2.ToolCallUpdate{
+						ToolCallID: "padded-output", Title: parts.title, Kind: "shell", Status: harnessv2.ToolCallStatusCompleted,
+						Content: []harnessv2.ContentBlock{{Type: harnessv2.ContentBlockText, Text: output}},
+					},
+				})
+				mapped, isNew, err := state.AppendUpdateIfNew(ctx, event)
+				if err != nil || !isNew || mapped == nil {
+					t.Fatalf("append padded output: new=%t err=%v", isNew, err)
+				}
+				if benign {
+					if mapped.ContentText != output {
+						t.Fatal("padding changed harmless public output")
+					}
+				} else if strings.Contains(mapped.ContentText+mapped.Summary+string(mapped.Content), canary) {
+					t.Fatal("credential padding discarded its opening marker")
+				}
+			})
+		}
+	}
+}
+
+func TestMapperJournalPreservesSinglePublicCopies(t *testing.T) {
+	const value = "ken=X\tto"
+	if executionevents.RedactExecutionEventText(value) != value ||
+		executionevents.RedactExecutionEventText(value+value) == value+value {
+		t.Fatal("fixture must be harmless once and sensitive when duplicated")
+	}
+	for _, title := range []string{"Inspect output", "", "?discard=1"} {
+		t.Run("tool title="+title, func(t *testing.T) {
+			ctx := context.Background()
+			eventStore := storetest.NewFakeExecutionEventStore()
+			state, err := (Journal{EventStore: eventStore, MapContext: testMapContext()}).Open(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			event := testUpdateEvent(1, time.Now().UTC(), harnessv2.UpdateEvent{
+				Kind: harnessv2.UpdateToolCallUpdate,
+				ToolCall: &harnessv2.ToolCallUpdate{
+					ToolCallID: "single-output", Title: title, Kind: "shell", Status: harnessv2.ToolCallStatusCompleted,
+					Content: []harnessv2.ContentBlock{{Type: harnessv2.ContentBlockText, Text: value}},
+				},
+			})
+			mapped, isNew, err := state.AppendUpdateIfNew(ctx, event)
+			if err != nil || !isNew || mapped == nil {
+				t.Fatalf("append tool: new=%t err=%v", isNew, err)
+			}
+			want := value
+			if title != "Inspect output" {
+				want = executionevents.ExecutionEventRedactedValue
+			}
+			if mapped.ContentText != want {
+				t.Fatal("tool output did not account for whether it also supplies the summary")
+			}
+		})
+	}
+	t.Run("cancellation reason", func(t *testing.T) {
+		event := testTerminalEvent(2, time.Now().UTC())
+		event.Type = harnessv2.EventCancelled
+		event.Completed = nil
+		event.Cancelled = &harnessv2.CancelledEvent{StopReason: harnessv2.ACPStopReasonCancelled, Reason: value}
+		mapped, err := MapPromptLifecycle(event, testMapContext())
+		if err != nil {
+			t.Fatal(err)
+		}
+		var content map[string]any
+		if err := json.Unmarshal(mapped.Content, &content); err != nil {
+			t.Fatal(err)
+		}
+		if content["reason"] != value {
+			t.Fatal("cancellation reason was redacted using a nonexistent summary copy")
+		}
+	})
+}
+
+func TestMapperPreservesFieldsWithoutWhitespaceNormalization(t *testing.T) {
+	const value = "pwd\u00a0=fixture-value"
+	if executionevents.RedactExecutionEventText(value+value) != value+value ||
+		executionevents.RedactExecutionEventText(compactWhitespace(value)) == compactWhitespace(value) {
+		t.Fatal("fixture must require a normalized public representation")
+	}
+	t.Run("tool kind", func(t *testing.T) {
+		event := testUpdateEvent(1, time.Now().UTC(), harnessv2.UpdateEvent{
+			Kind:     harnessv2.UpdateToolCallUpdate,
+			ToolCall: &harnessv2.ToolCallUpdate{ToolCallID: "raw-kind", Title: "Inspect", Kind: value, Status: harnessv2.ToolCallStatusCompleted},
+		})
+		mapped, err := mapUpdate(event, testMapContext(), mapUpdateOptions{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if mapped.ToolName != value || !strings.Contains(string(mapped.Content), value) {
+			t.Fatal("tool kind was redacted using a nonexistent compacted copy")
+		}
+	})
+	for _, status := range []harnessv2.PlanEntryStatus{harnessv2.PlanEntryPending, harnessv2.PlanEntryCompleted} {
+		t.Run("plan content="+string(status), func(t *testing.T) {
+			projection := ProjectPlanUpdate(harnessv2.PlanUpdate{Entries: []harnessv2.PlanEntry{{Content: value, Status: status}}})
+			if !strings.Contains(projection.Document, value) || !strings.Contains(projection.EventDocument, value) {
+				t.Fatal("plan content was redacted using a nonexistent compacted copy")
+			}
+		})
+	}
+	t.Run("plan priority", func(t *testing.T) {
+		projection := ProjectPlanUpdate(harnessv2.PlanUpdate{Entries: []harnessv2.PlanEntry{{Content: "Inspect", Priority: value, Status: harnessv2.PlanEntryInProgress}}})
+		if !strings.Contains(projection.Document, value) || !strings.Contains(projection.EventDocument, value) {
+			t.Fatal("plan priority was redacted using a nonexistent compacted copy")
+		}
+	})
+	t.Run("later in-progress entry", func(t *testing.T) {
+		projection := ProjectPlanUpdate(harnessv2.PlanUpdate{Entries: []harnessv2.PlanEntry{
+			{Content: "Inspect", Status: harnessv2.PlanEntryInProgress},
+			{Content: value, Status: harnessv2.PlanEntryInProgress},
+		}})
+		if !strings.Contains(projection.Document, value) || !strings.Contains(projection.EventDocument, value) {
+			t.Fatal("plan content outside the summary was compacted")
+		}
+	})
+}
+
+func TestMapperModelCopiesMatchPublicTelemetry(t *testing.T) {
+	for _, kind := range []string{"accepted", "completed", "usage"} {
+		for _, value := range []string{"pwd\u00a0=fixture-value", "ken=X\tto"} {
+			t.Run(kind+"/"+value, func(t *testing.T) {
+				now := time.Now().UTC()
+				mapCtx := testMapContext()
+				mapCtx.Model = value
+				event := testTerminalEvent(2, now)
+				event.Completed = &harnessv2.CompletedEvent{
+					StopReason: harnessv2.ACPStopReasonEndTurn,
+					Result: harnessv2.PromptResult{
+						Model: value, Content: []harnessv2.ContentBlock{{Type: harnessv2.ContentBlockText, Text: mapperTestDone}},
+						Usage: harnessv2.UsageUpdate{InputTokens: 1},
+					},
+				}
+				if kind == "accepted" {
+					event.Type = harnessv2.EventAccepted
+					event.Completed = nil
+					event.Accepted = &harnessv2.AcceptedEvent{
+						AcceptedAt: now, ACPVersion: harnessv2.ACPProfileV1,
+						Lease: harnessv2.PromptLease{Generation: 1, IssuedAt: now, ExpiresAt: now.Add(time.Minute)},
+					}
+				}
+				var mapped *store.ExecutionEvent
+				var err error
+				if kind == "usage" {
+					mapped, _, err = mapTerminalUsageWithHistory(event, mapCtx, nil, false)
+				} else {
+					mapped, err = MapPromptLifecycle(event, mapCtx)
+				}
+				if err != nil {
+					t.Fatal(err)
+				}
+				var content map[string]any
+				if err := json.Unmarshal(mapped.Content, &content); err != nil {
+					t.Fatal(err)
+				}
+				want := value
+				if executionevents.RedactExecutionEventText(value+value) != value+value {
+					want = executionevents.ExecutionEventRedactedValue
+				}
+				if content["model"] != want {
+					t.Fatal("model did not account for its two raw public DTO locations")
+				}
+			})
+		}
+	}
+}
+
 func testMapperJournalRedactsCredentialAcrossRepresentations(t *testing.T, title string) {
 	t.Helper()
 	summary := compactWhitespace(title)
@@ -1091,6 +1353,46 @@ func TestProjectPlanUpdateRedactsCredentialSplitAcrossEntries(t *testing.T) {
 	if strings.Contains(projection.Document, mapperTestSecretPrefix) || strings.Contains(projection.Document, suffix) ||
 		!strings.Contains(projection.Document, executionevents.ExecutionEventRedactedValue) {
 		t.Fatalf("plan document exposed split credential: %q", projection.Document)
+	}
+}
+
+func TestProjectPlanUpdateMatchesFinalTrimmedFields(t *testing.T) {
+	for _, status := range []harnessv2.PlanEntryStatus{
+		harnessv2.PlanEntryPending, harnessv2.PlanEntryCompleted, harnessv2.PlanEntryInProgress,
+	} {
+		for _, priority := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/priority=%t", status, priority), func(t *testing.T) {
+				entries := []harnessv2.PlanEntry{
+					{Content: "pw ?x=1", Status: status},
+					{Content: "d=fixture-value", Status: status},
+				}
+				if priority {
+					for index := range entries {
+						entries[index].Priority = entries[index].Content
+						entries[index].Content = fmt.Sprintf("Step %d", index+1)
+					}
+				}
+				projection := ProjectPlanUpdate(harnessv2.PlanUpdate{Entries: entries})
+				for _, value := range []string{projection.Document, projection.EventDocument, projection.Summary} {
+					if strings.Contains(value, "fixture-value") {
+						t.Fatal("plan exposed a credential split across fields after URL removal and final trimming")
+					}
+				}
+				if !strings.Contains(projection.Document, executionevents.ExecutionEventRedactedValue) {
+					t.Fatal("plan did not redact the reconstructable credential")
+				}
+			})
+		}
+	}
+
+	projection := ProjectPlanUpdate(harnessv2.PlanUpdate{Entries: []harnessv2.PlanEntry{
+		{Content: "pwd && ls ?x=1", Priority: "high ?x=1", Status: harnessv2.PlanEntryInProgress},
+		{Content: "pwd", Status: harnessv2.PlanEntryPending},
+		{Content: "ls", Status: harnessv2.PlanEntryPending},
+	}})
+	if !strings.Contains(projection.Document, "pwd && ls _(in progress)_ _(priority: high)_") ||
+		strings.Contains(projection.Document, executionevents.ExecutionEventRedactedValue) {
+		t.Fatal("final trimming changed ordinary plan commands or priority")
 	}
 }
 

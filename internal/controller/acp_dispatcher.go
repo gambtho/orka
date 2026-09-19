@@ -6632,7 +6632,7 @@ func (d *ACPDispatcher) finishNonSuccessWithCancellationReason(
 		}
 		return d.failTask(ctx, task, corev1alpha1.TaskExecutionStateOutcomeUnknown, corev1alpha1.TaskExecutionOutcomeOutcomeUnknown, "RuntimeLost", "prompt outcome is unknown")
 	default:
-		message := acpPromptFailureMessage(terminal)
+		message := acpPromptFailedMessage
 		if err := d.transitionAttemptToFailed(ctx, attemptID, fence, "failed", acpPromptFailedReason, message); err != nil {
 			return err
 		}
@@ -6648,43 +6648,17 @@ func (d *ACPDispatcher) finishNonSuccessWithCancellationReason(
 	}
 }
 
-// acpPromptFailedReason classifies a prompt that the runtime settled as
-// failed; the message carries the runtime's bounded failure code and detail.
+// acpPromptFailedReason classifies a prompt that the runtime settled as failed.
 const acpPromptFailedReason corev1alpha1.TaskExecutionReason = "PromptFailed"
 
-// acpPromptFailureMessageLimit bounds the projected Task failure message so a
-// runtime-supplied detail can never bloat Task status.
-const acpPromptFailureMessageLimit = 512
+// Runtime diagnostics stay in the journal, whose redaction accounts for prior
+// prompt fields. Repeating them in status, Session outcomes, or TaskFailed
+// events would bypass that redaction and introduce additional public copies.
+const acpPromptFailedMessage = "prompt failed"
 
-// acpPromptFailureMessage projects the runtime's terminal Failed event into a
-// human-readable Task message. The generic "prompt failed" text is kept when
-// the runtime reported no code or detail; otherwise the runtime's bounded
-// failure code and message are appended so operators can distinguish provider
-// upstream errors, turn limits, and refusals without reading runtime logs.
-func acpPromptFailureMessage(terminal harnessv2.Event) string {
-	const generic = "prompt failed"
-	if terminal.Failed == nil {
-		return generic
-	}
-	// Both fields are runtime-controlled (only bounded by the harness).
-	// Controls are stripped before redaction so a control byte cannot split a
-	// credential-shaped value past the redactor, and the composed logical
-	// value is redacted as one string: a credential assignment split across
-	// the code and the message ("password" / "hunter2") is only recognizable
-	// once they are joined, so redacting the fields separately would persist
-	// the raw value in Task status, the PromptAttempt, and the Session turn.
-	detail := strings.TrimSpace(stripACPControlRunes(terminal.Failed.Message))
-	code := strings.TrimSpace(stripACPControlRunes(terminal.Failed.Code))
-	switch {
-	case detail == "" && code == "":
-		return generic
-	case detail == "":
-		detail = code
-	case code != "" && code != "acp_prompt_failed" && !strings.HasPrefix(detail, code):
-		detail = code + ": " + detail
-	}
-	return boundACPStatusMessage(generic + ": " + redact.SensitiveText(detail))
-}
+// acpPromptFailureMessageLimit bounds runtime-derived status messages so a
+// supervisor-supplied detail can never bloat Task status.
+const acpPromptFailureMessageLimit = 512
 
 // boundACPStatusMessage truncates a runtime-derived status message to
 // acpPromptFailureMessageLimit bytes on a rune boundary so the persisted
