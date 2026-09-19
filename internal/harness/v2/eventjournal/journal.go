@@ -881,7 +881,7 @@ func (s *State) mapAssistantTranscript(
 	var publishedFields []logicalFieldBoundaries
 	if !contentOmitted {
 		values, fields := redactLogicalFieldsWithPublicCopies(
-			s.logicalFieldHistory, s.logicalFieldHistorySaturated, []logicalFieldCopyKind{logicalFieldTranscriptCopies}, transcript,
+			s.logicalFieldHistory, s.logicalFieldHistorySaturated, []logicalFieldCopyKind{logicalFieldContentSummaryCopies}, transcript,
 		)
 		transcript = values[0]
 		publishedFields = fields

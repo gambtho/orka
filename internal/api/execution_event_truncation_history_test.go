@@ -106,6 +106,77 @@ func TestExecutionEventTranscriptHistoryUsesPublishedCopies(t *testing.T) {
 	}
 }
 
+func TestExecutionEventToolOutputHistoryUsesPublishedCopies(t *testing.T) {
+	// The raw stream fits the journal's 32K bound. Redaction expands the first
+	// assignment, pushing the harmless trailing marker out of the public text.
+	for _, test := range []struct {
+		name, output, contentText, summary string
+		originalChars                      int
+		maskLater, summaryMasksLater       bool
+		twoCopiesSensitive                 bool
+	}{
+		{
+			name: "unpublished-expanded-tail", output: "pwd=x\n" + strings.Repeat("x", 32759) + "pwd",
+			contentText: "pwd=[REDACTED]\n" + strings.Repeat("x", 32752) + "…",
+			summary:     "pwd=[REDACTED] " + strings.Repeat("x", 4080) + "…", originalChars: 32777,
+		},
+		{
+			name: "unpublished-expanded-unicode-tail", output: "pwd=x\n" + strings.Repeat("界", 32759) + "pwd",
+			contentText: "pwd=[REDACTED]\n" + strings.Repeat("界", 32752) + "…",
+			summary:     "pwd=[REDACTED] " + strings.Repeat("界", 4080) + "…", originalChars: 32777,
+		},
+		{
+			name: "visible-content-only", output: strings.Repeat("x", 4096) + "pwd",
+			contentText: strings.Repeat("x", 4096) + "pwd", summary: strings.Repeat("x", 4095) + "…", maskLater: true,
+		},
+		{name: "visible-both", output: "pwd", contentText: "pwd", summary: "pwd", maskLater: true},
+		{name: "visible-normalized-summary", output: "pwd\u00a0", contentText: "pwd\u00a0", summary: "pwd", summaryMasksLater: true},
+		{
+			name: "unpublished-normalized-summary-tail", output: strings.Repeat("x", 4096) + "pwd\u00a0",
+			contentText: strings.Repeat("x", 4096) + "pwd\u00a0", summary: strings.Repeat("x", 4095) + "…",
+		},
+		{name: "two-public-copies", output: "ken=X\tto", contentText: "ken=X\tto", summary: "ken=X to", twoCopiesSensitive: true},
+	} {
+		for _, title := range []string{"Inspect", ""} {
+			t.Run(test.name+"/title="+title, func(t *testing.T) {
+				journal, state := newModelHistoryJournal(t, "")
+				event := markerWhitespaceToolEvent(1, title, test.output)
+				appendMarkerWhitespaceUpdate(t, state, event, true)
+				appendMarkerWhitespaceUpdate(t, state, event, false)
+				const later = "=fixture-value"
+				appendMarkerWhitespaceUpdate(t, state, markerWhitespaceToolEvent(2, "Inspect", later), true)
+				rows := markerWhitespaceRows(t, journal, 2)
+				first := NewExecutionEventResponse(rows[0])
+				finalContentText, outputSummary := test.contentText, test.summary
+				if title != "" {
+					outputSummary = title
+				} else if test.twoCopiesSensitive {
+					finalContentText, outputSummary = events.ExecutionEventRedactedValue, events.ExecutionEventRedactedValue
+				}
+				if first.ContentText != finalContentText || first.Summary != outputSummary {
+					t.Fatal("public tool content/summary did not match the published cutoff")
+				}
+				if test.originalChars == 0 {
+					if first.Truncation != nil {
+						t.Fatalf("unexpected truncation metadata: %+v", first.Truncation)
+					}
+				} else if first.Truncation == nil || *first.Truncation != (events.ExecutionEventTruncation{
+					ContentTextTruncated: true, ContentTextOriginalChars: test.originalChars,
+				}) {
+					t.Fatalf("unexpected truncation metadata: %+v", first.Truncation)
+				}
+				wantLater := later
+				if test.maskLater || (title == "" && test.summaryMasksLater) {
+					wantLater = events.ExecutionEventRedactedValue
+				}
+				if second := markerWhitespacePublicDTO(t, rows[1]); second.ContentText != wantLater {
+					t.Errorf("later public output = %q, want %q", second.ContentText, wantLater)
+				}
+			})
+		}
+	}
+}
+
 func TestExecutionEventTruncationKeepsBoundarySeparator(t *testing.T) {
 	for _, test := range []struct {
 		name, prefix, padding string

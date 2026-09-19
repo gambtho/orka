@@ -346,20 +346,31 @@ func redactPlanEntries(
 	redacted := append([]harnessv2.PlanEntry(nil), entries...)
 	values := make([]string, 0, len(entries)*2)
 	copyKinds := make([]logicalFieldCopyKind, 0, len(entries)*2)
+	summaryCopies := make([][]string, len(entries)*2)
+	completed := 0
+	for _, entry := range entries {
+		if entry.Status == harnessv2.PlanEntryCompleted {
+			completed++
+		}
+	}
+	summaryPrefix := fmt.Sprintf("Plan in progress (%d/%d complete): ", completed, len(entries))
 	summaryAssigned := false
 	for _, entry := range entries {
 		content := strings.TrimSpace(executionevents.RedactExecutionEventText(strings.TrimSpace(entry.Content)))
-		kind := logicalFieldTrimmedCopies
-		if !summaryAssigned && entry.Status == harnessv2.PlanEntryInProgress && strings.TrimSpace(content) != "" {
-			// Sanitization can empty an entry and move the summary to the next
-			// in-progress entry. Only its content has two extra summary copies.
+		if !summaryAssigned && entry.Status == harnessv2.PlanEntryInProgress && content != "" {
+			// The entry is exposed inside both summaries, but only up to the
+			// final cutoff after the progress prefix and formatter redaction.
 			summaryAssigned = true
-			kind = logicalFieldPlanSummaryCopies
+			summary, _, _ := executionevents.RedactAndTruncateExecutionEventText(
+				summaryPrefix+compactSummary(content), executionevents.MaxExecutionEventSummaryChars,
+			)
+			published := strings.TrimPrefix(summary, summaryPrefix)
+			summaryCopies[len(values)] = []string{published, published}
 		}
 		values = append(values, content, strings.TrimSpace(entry.Priority))
-		copyKinds = append(copyKinds, kind, logicalFieldTrimmedCopies)
+		copyKinds = append(copyKinds, logicalFieldTrimmedCopies, logicalFieldTrimmedCopies)
 	}
-	values, publishedFields := redactLogicalFieldsWithPublicCopies(history, historySaturated, copyKinds, values...)
+	values, publishedFields := redactLogicalFieldsWithSummaryCopies(history, historySaturated, copyKinds, summaryCopies, values...)
 	for index := range redacted {
 		redacted[index].Content = values[index*2]
 		redacted[index].Priority = values[index*2+1]
@@ -383,11 +394,30 @@ func projectDiagnosticUpdate(
 	history []logicalFieldBoundaries,
 	historySaturated bool,
 ) (diagnosticProjection, []logicalFieldBoundaries) {
-	values, publishedFields := redactLogicalFieldsWithPublicCopies(
-		history, historySaturated, []logicalFieldCopyKind{logicalFieldDiagnosticCodeCopies, logicalFieldSummaryCopies},
-		update.Code, update.Message,
-	)
+	values, publishedFields := redactDiagnosticFields(update.Code, update.Message, logicalFieldContentTextCopy, history, historySaturated)
 	return diagnosticProjection{code: values[0], message: values[1]}, publishedFields
+}
+
+// Diagnostic messages publish contentText; failures publish raw JSON instead.
+// Their summary is shared: derive its contributions after formatting the whole
+// code/message pair, retaining the generated colon and the actual cutoff.
+func redactDiagnosticFields(
+	code, message string,
+	messageKind logicalFieldCopyKind,
+	history []logicalFieldBoundaries,
+	historySaturated bool,
+) ([]string, []logicalFieldBoundaries) {
+	code = executionevents.RedactExecutionEventText(code)
+	message = executionevents.RedactExecutionEventText(message)
+	summary := compactSummary(code + ": " + message)
+	codeSummary := compactSummary(code + ": ")
+	summaryCopies := [][]string{{summary}, nil}
+	if after, ok := strings.CutPrefix(summary, codeSummary); ok {
+		summaryCopies = [][]string{{codeSummary}, {strings.TrimSpace(after)}}
+	}
+	return redactLogicalFieldsWithSummaryCopies(
+		history, historySaturated, []logicalFieldCopyKind{logicalFieldSingleCopy, messageKind}, summaryCopies, code, message,
+	)
 }
 
 func projectToolUpdate(
@@ -401,9 +431,9 @@ func projectToolUpdate(
 	copyKinds := []logicalFieldCopyKind{logicalFieldSummaryCopies, logicalFieldToolNameCopies}
 	if contentText != nil {
 		values = append(values, *contentText)
-		kind := logicalFieldSingleCopy
+		kind := logicalFieldContentTextCopy
 		if strings.TrimSpace(title) == "" {
-			kind = logicalFieldSummaryCopies
+			kind = logicalFieldContentSummaryCopies
 		}
 		copyKinds = append(copyKinds, kind)
 	}
@@ -450,14 +480,13 @@ const (
 	logicalFieldSingleCopy logicalFieldCopyKind = iota
 	logicalFieldTrimmedCopies
 	logicalFieldSummaryCopies
-	logicalFieldTranscriptCopies
+	logicalFieldContentTextCopy
+	logicalFieldContentSummaryCopies
 	logicalFieldToolNameCopies
-	logicalFieldDiagnosticCodeCopies
-	logicalFieldPlanSummaryCopies
 )
 
 // Count the actual field locations of a public record. Providers and models each
-// have two raw DTO locations; titles and assistant text have raw/summary copies.
+// have two raw DTO locations; text-only fields have bounded content/summary copies.
 // Replays of the same event identity do not introduce another logical field.
 func logicalFieldPublicCopies(value string, kind logicalFieldCopyKind) []string {
 	switch kind {
@@ -465,18 +494,16 @@ func logicalFieldPublicCopies(value string, kind logicalFieldCopyKind) []string 
 		return []string{value, value}
 	case logicalFieldSummaryCopies:
 		return []string{value, compactWhitespace(value)}
-	case logicalFieldTranscriptCopies:
-		// Transcripts have no raw JSON copy; remember only their published text.
+	case logicalFieldContentTextCopy, logicalFieldContentSummaryCopies:
+		// Text-only fields have no raw JSON copy; remember only published text.
 		contentText, _, _ := executionevents.RedactAndTruncateExecutionEventText(value, executionevents.MaxExecutionEventContentTextChars)
+		if kind == logicalFieldContentTextCopy {
+			return []string{contentText}
+		}
 		return []string{contentText, compactSummary(value)}
 	case logicalFieldToolNameCopies:
 		name, _, _ := executionevents.RedactAndTruncateExecutionEventText(strings.TrimSpace(value), 128)
 		return []string{value, name}
-	case logicalFieldDiagnosticCodeCopies:
-		return []string{value, compactWhitespace(value + ": ")}
-	case logicalFieldPlanSummaryCopies:
-		summary := compactWhitespace(value)
-		return []string{value, value, summary, summary}
 	default:
 		return []string{value}
 	}
@@ -488,6 +515,16 @@ func redactLogicalFieldsWithPublicCopies(
 	copyKinds []logicalFieldCopyKind,
 	values ...string,
 ) ([]string, []logicalFieldBoundaries) {
+	return redactLogicalFieldsWithSummaryCopies(history, historySaturated, copyKinds, nil, values...)
+}
+
+func redactLogicalFieldsWithSummaryCopies(
+	history []logicalFieldBoundaries,
+	historySaturated bool,
+	copyKinds []logicalFieldCopyKind,
+	summaryCopies [][]string,
+	values ...string,
+) ([]string, []logicalFieldBoundaries) {
 	redacted := make([]string, len(values))
 	publicText := make([]bool, len(values))
 	current := make([]logicalFieldBoundaries, 0, len(values))
@@ -496,7 +533,7 @@ func redactLogicalFieldsWithPublicCopies(
 		if index < len(copyKinds) {
 			kind = copyKinds[index]
 		}
-		trimmed := kind == logicalFieldTrimmedCopies || kind == logicalFieldPlanSummaryCopies
+		trimmed := kind == logicalFieldTrimmedCopies
 		if trimmed {
 			value = strings.TrimSpace(value)
 		}
@@ -507,6 +544,9 @@ func redactLogicalFieldsWithPublicCopies(
 			redacted[index] = strings.TrimSpace(redacted[index])
 		}
 		copies := logicalFieldPublicCopies(redacted[index], kind)
+		if index < len(summaryCopies) {
+			copies = append(copies, summaryCopies[index]...)
+		}
 		sensitiveCopy := false
 		for _, copy := range copies {
 			publicText[index] = publicText[index] || copy != ""
@@ -1346,9 +1386,8 @@ func mapPromptLifecycleWithHistory(
 		if err := event.Failed.Validate(); err != nil {
 			return nil, nil, fmt.Errorf("invalid failed payload: %w", err)
 		}
-		fields, published := redactLogicalFieldsWithPublicCopies(
-			history, historySaturated, []logicalFieldCopyKind{logicalFieldDiagnosticCodeCopies, logicalFieldSummaryCopies},
-			event.Failed.Code, event.Failed.Message,
+		fields, published := redactDiagnosticFields(
+			event.Failed.Code, event.Failed.Message, logicalFieldSingleCopy, history, historySaturated,
 		)
 		publishedFields = published
 		content[mappedJournalKindContentKey] = mappedPromptTerminalKind
@@ -1366,9 +1405,8 @@ func mapPromptLifecycleWithHistory(
 		if err := event.OutcomeUnknown.Validate(); err != nil {
 			return nil, nil, fmt.Errorf("invalid outcome_unknown payload: %w", err)
 		}
-		fields, published := redactLogicalFieldsWithPublicCopies(
-			history, historySaturated, []logicalFieldCopyKind{logicalFieldDiagnosticCodeCopies, logicalFieldSummaryCopies},
-			event.OutcomeUnknown.Code, event.OutcomeUnknown.Message,
+		fields, published := redactDiagnosticFields(
+			event.OutcomeUnknown.Code, event.OutcomeUnknown.Message, logicalFieldSingleCopy, history, historySaturated,
 		)
 		publishedFields = published
 		content[mappedJournalKindContentKey] = mappedPromptTerminalKind
@@ -1423,9 +1461,8 @@ func mapPromptStreamFailure(
 	if at.IsZero() {
 		return nil, nil, fmt.Errorf("prompt stream failure timestamp is required")
 	}
-	fields, publishedFields := redactLogicalFieldsWithPublicCopies(
-		history, historySaturated, []logicalFieldCopyKind{logicalFieldDiagnosticCodeCopies, logicalFieldSummaryCopies},
-		mappedPromptStreamFailureCode, diagnostic,
+	fields, publishedFields := redactDiagnosticFields(
+		mappedPromptStreamFailureCode, diagnostic, logicalFieldSingleCopy, history, historySaturated,
 	)
 	content := map[string]any{
 		mappedHarnessV2ContentKey:      identity,
