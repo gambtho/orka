@@ -425,8 +425,14 @@ func projectToolUpdate(
 	history []logicalFieldBoundaries,
 	historySaturated bool,
 	contentText *string,
+	contentTruncated bool,
 ) (toolProjection, []logicalFieldBoundaries) {
 	title := executionevents.RedactExecutionEventText(tool.Title)
+	contentOmitted := contentTruncated || tool.ContentOmitted
+	if contentOmitted && strings.TrimSpace(title) != "" {
+		// A titled tool has no output summary, and mapUpdate drops its text.
+		contentText = nil
+	}
 	values := []string{title, tool.Kind}
 	copyKinds := []logicalFieldCopyKind{logicalFieldSummaryCopies, logicalFieldToolNameCopies}
 	if contentText != nil {
@@ -434,6 +440,10 @@ func projectToolUpdate(
 		kind := logicalFieldContentTextCopy
 		if strings.TrimSpace(title) == "" {
 			kind = logicalFieldContentSummaryCopies
+			if contentOmitted {
+				// mapUpdate retains the summary before clearing contentText.
+				kind = logicalFieldCompactSummaryCopy
+			}
 		}
 		copyKinds = append(copyKinds, kind)
 	}
@@ -483,6 +493,7 @@ const (
 	logicalFieldContentTextCopy
 	logicalFieldContentSummaryCopies
 	logicalFieldToolNameCopies
+	logicalFieldCompactSummaryCopy
 )
 
 // Count the actual field locations of a public record. Providers and models each
@@ -501,6 +512,8 @@ func logicalFieldPublicCopies(value string, kind logicalFieldCopyKind) []string 
 			return []string{contentText}
 		}
 		return []string{contentText, compactSummary(value)}
+	case logicalFieldCompactSummaryCopy:
+		return []string{compactSummary(value)}
 	case logicalFieldToolNameCopies:
 		name, _, _ := executionevents.RedactAndTruncateExecutionEventText(strings.TrimSpace(value), 128)
 		return []string{value, name}
@@ -1009,7 +1022,7 @@ func mapUpdate(event harnessv2.Event, mapCtx MapContext, options mapUpdateOption
 			mapped.Summary = toolCallSummary(metadataFree)
 			content["metadataOmitted"] = "streamed_metadata_pending_completion_redaction"
 		} else {
-			projection, _ := projectToolUpdate(*tool, nil, false, options.toolContentText)
+			projection, _ := projectToolUpdate(*tool, nil, false, options.toolContentText, options.toolContentTruncated)
 			if options.toolProjection != nil {
 				projection = *options.toolProjection
 			}
@@ -1193,7 +1206,7 @@ func mapToolUpdateWithHistory(
 		return nil, nil, fmt.Errorf("harness v2 tool update is required")
 	}
 	projection, publishedFields := projectToolUpdate(
-		*event.Update.ToolCall, history, historySaturated, contentText,
+		*event.Update.ToolCall, history, historySaturated, contentText, contentTruncated,
 	)
 	mapped, err := mapUpdate(event, mapCtx, mapUpdateOptions{
 		toolContentText:                  contentText,

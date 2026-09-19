@@ -1332,7 +1332,7 @@ func TestProjectToolUpdateRedactsPWDCredentialsAcrossHistoryCaps(t *testing.T) {
 					output := "fixture-value"
 					projection, published := projectToolUpdate(harnessv2.ToolCallUpdate{
 						Title: test.title, Kind: test.kind,
-					}, history, false, &output)
+					}, history, false, &output, false)
 					if projection.title != executionevents.ExecutionEventRedactedValue ||
 						projection.kind != executionevents.ExecutionEventRedactedValue ||
 						projection.contentText != executionevents.ExecutionEventRedactedValue || len(published) != 0 {
