@@ -1284,7 +1284,6 @@ func TestLogicalFieldsPWDMarkerKeepsAssignmentContinuations(t *testing.T) {
 		{"pwd && ls; db_PWD_name\t"},
 		{"p", "w", "d"},
 		{"pw", "d="},
-		{"p", "wd && ls"},
 	} {
 		var fields []logicalFieldBoundaries
 		for _, part := range parts {

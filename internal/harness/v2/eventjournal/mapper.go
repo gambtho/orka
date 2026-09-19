@@ -611,6 +611,7 @@ type logicalFieldBoundary struct {
 	whole                  bool
 	assignmentTruncated    bool
 	assignmentContinuation bool
+	assignmentDelimiter    bool
 }
 
 type logicalFieldPermutationCandidate struct {
@@ -621,6 +622,24 @@ type logicalFieldPermutationCandidate struct {
 type logicalFieldSensitiveMarkerState struct {
 	marker  int
 	matched int
+	// Each consumed copy advances the marker by at least one byte. The
+	// longest current marker is 18 bytes; leave room for future additions.
+	used [32]int
+}
+
+func (state logicalFieldSensitiveMarkerState) consume(index int) (logicalFieldSensitiveMarkerState, bool) {
+	identity := index + 1
+	for slot, used := range state.used {
+		if used == identity {
+			return state, false
+		}
+		if used == 0 || used > identity {
+			copy(state.used[slot+1:], state.used[slot:len(state.used)-1])
+			state.used[slot] = identity
+			return state, true
+		}
+	}
+	return state, false
 }
 
 var logicalFieldSensitiveMarkers = []string{
@@ -634,6 +653,7 @@ var logicalFieldSensitiveMarkers = []string{
 	"apikey",
 	"api key",
 	"token",
+	"token is",
 	"secret",
 	"password",
 	"passwd",
@@ -673,6 +693,12 @@ var logicalFieldSensitiveMarkers = []string{
 // such as the ampersand in `pwd && ls` cannot become an assignment by joining
 // more fields. Keep open keys conservative, including quoted/whitespace tails.
 var logicalFieldPWDAssignmentRe = regexp.MustCompile(`(?i)pwd[a-z0-9_.-]*["']?\s*(?:[:=]|\z)`)
+var logicalFieldTokenAssignmentRe = regexp.MustCompile(`(?i)token[a-z0-9_.-]*["']?\s*(?:[:=]|\z)`)
+
+// Only a delimiter reachable from the beginning of another public copy can
+// complete an open assignment key. A colon after fixed words in a generated
+// usage summary cannot do so.
+var logicalFieldAssignmentDelimiterRe = regexp.MustCompile(`(?i)\A[a-z0-9_.-]*["']?\s*[:=]`)
 
 // Assignment keys and quoted values have no fixed length in the text redactor.
 // Remember when clipping would discard an unfinished assignment, including
@@ -737,6 +763,7 @@ func boundLogicalFieldText(value string) logicalFieldBoundary {
 		suffix:                 suffix,
 		assignmentTruncated:    logicalFieldTruncatesAssignment(value, suffix),
 		assignmentContinuation: logicalFieldAssignmentContinuationRe.MatchString(value),
+		assignmentDelimiter:    logicalFieldAssignmentDelimiterRe.MatchString(value),
 	}
 }
 
@@ -752,73 +779,156 @@ func logicalFieldTruncatesAssignment(value, suffix string) bool {
 }
 
 func logicalFieldsMayReconstructSensitiveMarker(fields []logicalFieldBoundaries) bool {
-	// pwd requires an assignment delimiter. With complete delimiter-free
-	// fields, even repeated public copies cannot form an assignment. Keep
-	// clipped fields conservative because their omitted text may contain one.
-	assignmentPossible := false
+	// First reject unreachable markers without tracking copies. Otherwise a
+	// bounded copy-aware search could exhaust its work budget on benign text
+	// whose fragments cannot form any marker, even with unlimited reuse.
+	return logicalFieldsHaveSensitiveMarker(fields, false) && logicalFieldsHaveSensitiveMarker(fields, true)
+}
+
+func logicalFieldsHaveSensitiveMarker(fields []logicalFieldBoundaries, countCopies bool) bool {
+	var boundaries []logicalFieldBoundary
 	for _, field := range fields {
-		for _, boundary := range field {
-			if !boundary.whole || strings.ContainsAny(boundary.prefix, ":=") {
-				assignmentPossible = true
-			}
+		boundaries = append(boundaries, field...)
+	}
+	prefixes := make([]string, len(boundaries))
+	suffixes := make([]string, len(boundaries))
+	delimiters := make([]int, 0)
+	for index, boundary := range boundaries {
+		if boundary.assignmentTruncated {
+			return true
+		}
+		prefixes[index] = foldLogicalFieldMarkerText(boundary.prefix)
+		suffixes[index] = foldLogicalFieldMarkerText(boundary.suffix)
+		if boundary.assignmentDelimiter || logicalFieldAssignmentDelimiterRe.MatchString(boundary.prefix) {
+			delimiters = append(delimiters, index)
 		}
 	}
-	states := make([]logicalFieldSensitiveMarkerState, 0)
 	seen := make(map[logicalFieldSensitiveMarkerState]struct{})
-	for markerIndex, marker := range logicalFieldSensitiveMarkers {
-		if marker == "pwd" && !assignmentPossible {
-			continue
-		}
-		for _, field := range fields {
-			for _, boundary := range field {
-				if boundary.assignmentTruncated {
-					return true
-				}
-				text := foldLogicalFieldMarkerText(boundary.suffix)
-				if strings.Contains(text, marker) && (marker != "pwd" || logicalFieldPWDAssignmentRe.MatchString(text)) {
-					return true
-				}
-				for matched := 1; matched < len(marker) && matched <= len(text); matched++ {
-					if !strings.HasSuffix(text, marker[:matched]) {
-						continue
-					}
-					state := logicalFieldSensitiveMarkerState{marker: markerIndex, matched: matched}
-					if _, exists := seen[state]; exists {
-						continue
-					}
-					seen[state] = struct{}{}
-					states = append(states, state)
-				}
-			}
-		}
+	states, sensitive := initialLogicalFieldMarkerStates(suffixes, delimiters, countCopies, seen)
+	if sensitive {
+		return true
 	}
 	for cursor := 0; cursor < len(states); cursor++ {
 		state := states[cursor]
 		marker := logicalFieldSensitiveMarkers[state.marker]
 		remaining := marker[state.matched:]
-		for _, field := range fields {
-			for _, boundary := range field {
-				text := foldLogicalFieldMarkerText(boundary.prefix)
-				if marker[state.matched-1] == ' ' {
-					// A marker's whitespace can span several source fields.
-					text = strings.TrimLeft(text, " ")
+		for index, boundary := range boundaries {
+			next := state
+			if countCopies {
+				var unused bool
+				next, unused = state.consume(index)
+				if !unused {
+					continue
 				}
-				if strings.HasPrefix(text, remaining) {
+			}
+			text := prefixes[index]
+			if marker[state.matched-1] == ' ' {
+				// A marker's whitespace can span several source fields.
+				text = strings.TrimLeft(text, " ")
+			}
+			if text == "" {
+				continue
+			}
+			if strings.HasPrefix(text, remaining) {
+				if !countCopies || (marker != "pwd" && marker != "token") {
 					return true
 				}
-				if !boundary.whole || !strings.HasPrefix(remaining, text) {
-					continue
+				tail := text[len(remaining):]
+				if logicalFieldAssignmentDelimiterRe.MatchString(tail) || boundary.assignmentDelimiter {
+					return true
 				}
-				next := logicalFieldSensitiveMarkerState{marker: state.marker, matched: state.matched + len(text)}
-				if _, exists := seen[next]; exists {
-					continue
+				// Fixed text after the marker cannot be removed by appending
+				// another copy. Clipped fields must also have a feasible tail
+				// in the original text, beyond the retained prefix.
+				if logicalFieldAssignmentContinuationRe.MatchString(tail) &&
+					(boundary.whole || boundary.assignmentContinuation) && logicalFieldAssignmentPossible(next, delimiters, countCopies) {
+					return true
 				}
-				seen[next] = struct{}{}
-				states = append(states, next)
+				continue
 			}
+			if !boundary.whole || !strings.HasPrefix(remaining, text) {
+				continue
+			}
+			next.matched += len(text)
+			if _, exists := seen[next]; exists {
+				continue
+			}
+			if len(seen) >= maxLogicalFieldSubsetCandidates {
+				return true
+			}
+			seen[next] = struct{}{}
+			states = append(states, next)
 		}
 	}
 	return false
+}
+
+func logicalFieldAssignmentPossible(state logicalFieldSensitiveMarkerState, delimiters []int, countCopies bool) bool {
+	for _, index := range delimiters {
+		if !countCopies {
+			return true
+		}
+		if _, unused := state.consume(index); unused {
+			return true
+		}
+	}
+	return false
+}
+
+func initialLogicalFieldMarkerStates(
+	suffixes []string,
+	delimiters []int,
+	countCopies bool,
+	seen map[logicalFieldSensitiveMarkerState]struct{},
+) ([]logicalFieldSensitiveMarkerState, bool) {
+	states := make([]logicalFieldSensitiveMarkerState, 0)
+	for markerIndex, marker := range logicalFieldSensitiveMarkers {
+		if len(marker) > len(logicalFieldSensitiveMarkerState{}.used) {
+			return nil, true
+		}
+		var assignmentMarker *regexp.Regexp
+		switch marker {
+		case "pwd":
+			assignmentMarker = logicalFieldPWDAssignmentRe
+		case "token":
+			assignmentMarker = logicalFieldTokenAssignmentRe
+		}
+		for index := range suffixes {
+			initial := logicalFieldSensitiveMarkerState{marker: markerIndex}
+			if countCopies {
+				initial, _ = initial.consume(index)
+			}
+			text := suffixes[index]
+			if strings.Contains(text, marker) {
+				if assignmentMarker == nil {
+					return nil, true
+				}
+				match := assignmentMarker.FindString(text)
+				if match != "" && (strings.ContainsAny(match, ":=") || logicalFieldAssignmentPossible(initial, delimiters, countCopies)) {
+					return nil, true
+				}
+			}
+			if assignmentMarker != nil && len(delimiters) == 0 {
+				continue
+			}
+			for matched := 1; matched < len(marker) && matched <= len(text); matched++ {
+				if !strings.HasSuffix(text, marker[:matched]) {
+					continue
+				}
+				state := initial
+				state.matched = matched
+				if _, exists := seen[state]; exists {
+					continue
+				}
+				if len(seen) >= maxLogicalFieldSubsetCandidates {
+					return nil, true
+				}
+				seen[state] = struct{}{}
+				states = append(states, state)
+			}
+		}
+	}
+	return states, false
 }
 
 func foldLogicalFieldMarkerText(value string) string {
