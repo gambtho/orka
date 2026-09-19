@@ -5491,6 +5491,9 @@ func (d *ACPDispatcher) renewPromptLeaseLoop(
 	// digest_conflict on a rebuilt request with fresh timestamps.
 	var pending *harnessv2.RenewPromptLeaseRequest
 	for {
+		if ctx.Err() != nil {
+			return
+		}
 		now := time.Now().UTC()
 		remaining := lease.ExpiresAt.Sub(now)
 		if remaining <= 0 {
@@ -5558,6 +5561,11 @@ func (d *ACPDispatcher) renewPromptLeaseLoop(
 		}
 		proposed := request.Lease
 		response, err := runtimeClient.RenewPromptLease(ctx, sessionID, request)
+		// Stream completion stops renewal while the runtime context remains
+		// live for delivery. A cancelled in-flight renewal must not abort it.
+		if ctx.Err() != nil {
+			return
+		}
 		if err == nil && response.Lease.Generation == proposed.Generation {
 			pending = nil
 			lease = response.Lease
