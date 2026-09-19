@@ -1292,6 +1292,31 @@ func TestJournalDoesNotRetryWhenAppendAbsenceCannotBeConfirmed(t *testing.T) {
 	}
 }
 
+func TestJournalTranscriptHistoryKeepsOneSlotWithTwoPublishedCopies(t *testing.T) {
+	ctx := context.Background()
+	state, err := (Journal{EventStore: storetest.NewFakeExecutionEventStore(), MapContext: testMapContext()}).Open(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	terminal := testTerminalEvent(1, time.Now().UTC())
+	transcript := strings.Repeat("界", 32768) + "pwd"
+	mapped, isNew, err := state.AppendAssistantTranscriptIfNew(ctx, terminal, transcript, false)
+	if err != nil || !isNew || mapped == nil {
+		t.Fatalf("append transcript: new=%t err=%v", isNew, err)
+	}
+	if duplicate, isNew, err := state.AppendAssistantTranscriptIfNew(ctx, terminal, transcript, false); err != nil || isNew || duplicate != nil {
+		t.Fatalf("replay transcript: new=%t err=%v", isNew, err)
+	}
+	if len(state.logicalFieldHistory) != 1 || len(state.logicalFieldHistory[0]) != 2 {
+		t.Fatal("transcript and replay must retain one logical field with two public copies")
+	}
+	for index, published := range []string{mapped.ContentText, mapped.Summary} {
+		if state.logicalFieldHistory[0][index] != boundLogicalFieldText(published) {
+			t.Errorf("history copy %d differs from its published boundary", index)
+		}
+	}
+}
+
 func TestJournalRedactsCredentialsSplitAcrossAssistantChunks(t *testing.T) {
 	ctx := context.Background()
 	eventStore := storetest.NewFakeExecutionEventStore()

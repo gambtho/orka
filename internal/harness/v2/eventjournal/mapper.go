@@ -450,6 +450,7 @@ const (
 	logicalFieldSingleCopy logicalFieldCopyKind = iota
 	logicalFieldTrimmedCopies
 	logicalFieldSummaryCopies
+	logicalFieldTranscriptCopies
 	logicalFieldToolNameCopies
 	logicalFieldDiagnosticCodeCopies
 	logicalFieldPlanSummaryCopies
@@ -464,6 +465,10 @@ func logicalFieldPublicCopies(value string, kind logicalFieldCopyKind) []string 
 		return []string{value, value}
 	case logicalFieldSummaryCopies:
 		return []string{value, compactWhitespace(value)}
+	case logicalFieldTranscriptCopies:
+		// Transcripts have no raw JSON copy; remember only their published text.
+		contentText, _, _ := executionevents.RedactAndTruncateExecutionEventText(value, executionevents.MaxExecutionEventContentTextChars)
+		return []string{contentText, compactSummary(value)}
 	case logicalFieldToolNameCopies:
 		name, _, _ := executionevents.RedactAndTruncateExecutionEventText(strings.TrimSpace(value), 128)
 		return []string{value, name}
