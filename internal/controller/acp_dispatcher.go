@@ -1780,11 +1780,11 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 		if err := sealMutation(&promptRequest.Metadata.RequestDigest, promptRequest); err != nil {
 			return err
 		}
-		leaseCtx, stopLease := context.WithCancel(runtimeCtx)
+		leaseCtx, stopLease, cancelOnLeaseFailure := newPromptLeaseContext(runtimeCtx, cancelRuntime)
 		admitted := make(chan struct{})
 		var admitOnce sync.Once
 		go d.renewPromptLeaseLoop(
-			leaseCtx, admitted, cancelRuntime, runtimeClient, createRequest.RuntimeSessionID, task, runtimeFence,
+			leaseCtx, admitted, cancelOnLeaseFailure, runtimeClient, createRequest.RuntimeSessionID, task, runtimeFence,
 			promptRequest.Lease, promptRequest.MCPAuthorization, promptLimits,
 		)
 		summary, streamErr := runtimeClient.StreamPrompt(runtimeCtx, createRequest.RuntimeSessionID, promptRequest, func(event harnessv2.Event) error {
@@ -5463,6 +5463,28 @@ func (d *ACPDispatcher) publishTaskResultReference(ctx context.Context, task *co
 		task.Status = latest.Status
 		return nil
 	})
+}
+
+// newPromptLeaseContext serializes renewal shutdown with failure cancellation.
+// The runtime context is still needed for delivery after the prompt stream ends:
+// once stopLease returns, even a renewal past its ctx.Err check cannot cancel it.
+// A failure that wins the lock first still cancels the active runtime normally.
+func newPromptLeaseContext(parent context.Context, cancelRuntime context.CancelFunc) (leaseCtx context.Context, stopLease, cancelOnFailure context.CancelFunc) {
+	leaseCtx, cancelLease := context.WithCancel(parent)
+	var mu sync.Mutex
+	stopLease = func() {
+		mu.Lock()
+		defer mu.Unlock()
+		cancelLease()
+	}
+	cancelOnFailure = func() {
+		mu.Lock()
+		defer mu.Unlock()
+		if leaseCtx.Err() == nil {
+			cancelRuntime()
+		}
+	}
+	return leaseCtx, stopLease, cancelOnFailure
 }
 
 func (d *ACPDispatcher) renewPromptLeaseLoop(

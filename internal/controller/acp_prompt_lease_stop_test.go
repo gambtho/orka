@@ -7,12 +7,15 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/go-logr/logr/funcr"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
@@ -27,12 +30,16 @@ func TestRenewPromptLeaseLoopSeparatesStopFromRuntimeCancellation(t *testing.T) 
 	}{
 		{name: "stopped-authority-read", stopAt: "authority"},
 		{name: "stopped-http-request", stopAt: "http"},
+		{name: "stopped-after-rejection-check", stopAt: "decision"},
 		{name: "stopped-with-expired-lease", stopAt: "before", expired: true},
 		{name: "active-rejection", wantCancelled: true},
 		{name: "active-expired-lease", expired: true, wantCancelled: true},
 	} {
 		t.Run(scenario.name, func(t *testing.T) {
 			entered := make(chan struct{})
+			resume := make(chan struct{})
+			resumeRenewal := sync.OnceFunc(func() { close(resume) })
+			defer resumeRenewal()
 			var authorityReads atomic.Int32
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				if scenario.stopAt == "http" {
@@ -101,9 +108,17 @@ func TestRenewPromptLeaseLoopSeparatesStopFromRuntimeCancellation(t *testing.T) 
 				MCPConfigurationDigest: mcpDigest, ToolPolicy: toolPolicy, ApprovalPolicy: approvalPolicy,
 				ExpiresAt: now, // Renew immediately so the test controls the in-flight operation.
 			}
-			runtimeCtx, cancelRuntime := context.WithCancel(t.Context())
+			ctx := logf.IntoContext(t.Context(), funcr.New(func(_, message string) {
+				if scenario.stopAt == "decision" && strings.Contains(message, "renewal rejected") {
+					// Pause after the loop observes a live lease context, but before
+					// it cancels the context also needed by result delivery.
+					close(entered)
+					<-resume
+				}
+			}, funcr.Options{}))
+			runtimeCtx, cancelRuntime := context.WithCancel(ctx)
 			defer cancelRuntime()
-			leaseCtx, stopLease := context.WithCancel(runtimeCtx)
+			leaseCtx, stopLease, cancelOnLeaseFailure := newPromptLeaseContext(runtimeCtx, cancelRuntime)
 			defer stopLease()
 			admitted := make(chan struct{})
 			close(admitted)
@@ -114,11 +129,11 @@ func TestRenewPromptLeaseLoopSeparatesStopFromRuntimeCancellation(t *testing.T) 
 			go func() {
 				defer close(done)
 				(&ACPDispatcher{}).renewPromptLeaseLoop(
-					leaseCtx, admitted, cancelRuntime, runtimeClient, "runtime-session-renew-stop-g1",
+					leaseCtx, admitted, cancelOnLeaseFailure, runtimeClient, "runtime-session-renew-stop-g1",
 					task, fence, lease, authorization, harnessv2.DefaultProtocolLimits(),
 				)
 			}()
-			if scenario.stopAt == "authority" || scenario.stopAt == "http" {
+			if scenario.stopAt == "authority" || scenario.stopAt == "http" || scenario.stopAt == "decision" {
 				select {
 				case <-entered:
 				case <-time.After(3 * time.Second):
@@ -126,12 +141,15 @@ func TestRenewPromptLeaseLoopSeparatesStopFromRuntimeCancellation(t *testing.T) 
 				}
 				// Stream completion stops renewal before result delivery and cleanup.
 				stopLease()
+				resumeRenewal()
 			}
 			select {
 			case <-done:
 			case <-time.After(3 * time.Second):
 				t.Fatal("renewal loop did not stop")
 			}
+			// Stopping cannot undo a failure that already cancelled an active runtime.
+			stopLease()
 			if cancelled := runtimeCtx.Err() != nil; cancelled != scenario.wantCancelled {
 				t.Fatalf("runtime cancelled = %t, want %t", cancelled, scenario.wantCancelled)
 			}
