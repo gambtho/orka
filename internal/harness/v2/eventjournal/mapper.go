@@ -423,25 +423,25 @@ func redactLogicalFieldsWithHistory(
 	return redactLogicalFieldsWithPublicCopies(history, historySaturated, nil, values...)
 }
 
-// Each model-bearing event publishes its effective model, including configured
-// fallbacks. Check it against both history and fields already projected for this
-// event, then return all fields actually published by the event.
+// Each model-bearing event publishes its provider and effective model, including
+// configured fallbacks. Check them together against history and fields already
+// projected for this event, then return all fields actually published.
 func redactModelWithHistory(
-	model string,
+	provider, model string,
 	history []logicalFieldBoundaries,
 	historySaturated bool,
 	published []logicalFieldBoundaries,
-) (string, []logicalFieldBoundaries) {
-	if model == "" {
-		return model, published
+) (string, string, []logicalFieldBoundaries) {
+	if provider == "" && model == "" {
+		return provider, model, published
 	}
 	combined := make([]logicalFieldBoundaries, 0, len(history)+len(published))
 	combined = append(combined, history...)
 	combined = append(combined, published...)
 	values, fields := redactLogicalFieldsWithPublicCopies(
-		combined, historySaturated, []logicalFieldCopyKind{logicalFieldTrimmedCopies}, model,
+		combined, historySaturated, []logicalFieldCopyKind{logicalFieldTrimmedCopies, logicalFieldTrimmedCopies}, provider, model,
 	)
-	return values[0], append(published, fields...)
+	return values[0], values[1], append(published, fields...)
 }
 
 type logicalFieldCopyKind uint8
@@ -455,8 +455,8 @@ const (
 	logicalFieldPlanSummaryCopies
 )
 
-// Count the actual field locations of a public record. Models have two raw
-// locations in the event DTO; titles and assistant text have raw/summary copies.
+// Count the actual field locations of a public record. Providers and models each
+// have two raw DTO locations; titles and assistant text have raw/summary copies.
 // Replays of the same event identity do not introduce another logical field.
 func logicalFieldPublicCopies(value string, kind logicalFieldCopyKind) []string {
 	switch kind {
@@ -1197,7 +1197,7 @@ func mapTerminalUsageWithHistory(
 	if event.Completed.Result.Model != "" {
 		mapCtx.Model = event.Completed.Result.Model
 	}
-	mapCtx.Model, publishedFields = redactModelWithHistory(strings.TrimSpace(mapCtx.Model), history, historySaturated, nil)
+	mapCtx.Provider, mapCtx.Model, publishedFields = redactModelWithHistory(mapCtx.Provider, strings.TrimSpace(mapCtx.Model), history, historySaturated, nil)
 	update := event
 	update.Type = harnessv2.EventUpdate
 	update.Completed = nil
@@ -1338,10 +1338,10 @@ func mapPromptLifecycleWithHistory(
 	default:
 		return nil, nil, fmt.Errorf("accepted or terminal harness v2 event is required")
 	}
+	mapCtx.Provider, model, publishedFields = redactModelWithHistory(mapCtx.Provider, model, history, historySaturated, publishedFields)
 	if mapCtx.Provider != "" {
 		content["provider"] = mapCtx.Provider
 	}
-	model, publishedFields = redactModelWithHistory(model, history, historySaturated, publishedFields)
 	if model != "" {
 		content["model"] = model
 	}
@@ -1391,10 +1391,10 @@ func mapPromptStreamFailure(
 		"code":                         fields[0],
 		"message":                      fields[1],
 	}
-	if mapCtx.Provider != "" {
-		content["provider"] = mapCtx.Provider
+	provider, model, publishedFields := redactModelWithHistory(mapCtx.Provider, mapCtx.Model, history, historySaturated, publishedFields)
+	if provider != "" {
+		content["provider"] = provider
 	}
-	model, publishedFields := redactModelWithHistory(mapCtx.Model, history, historySaturated, publishedFields)
 	if model != "" {
 		content["model"] = model
 	}
@@ -1492,10 +1492,10 @@ func mapPromptSettlement(
 	default:
 		return nil, nil, fmt.Errorf("unsupported prompt settlement terminal event %q", settlement.TerminalEvent)
 	}
-	if mapCtx.Provider != "" {
-		content["provider"] = mapCtx.Provider
+	provider, model, publishedFields := redactModelWithHistory(mapCtx.Provider, mapCtx.Model, history, historySaturated, nil)
+	if provider != "" {
+		content["provider"] = provider
 	}
-	model, publishedFields := redactModelWithHistory(mapCtx.Model, history, historySaturated, nil)
 	if model != "" {
 		content["model"] = model
 	}
