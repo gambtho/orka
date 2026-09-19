@@ -1275,7 +1275,7 @@ func (s *State) appendMappedEventWithPlan(
 	}
 	appended, isNew, err := appendIfAbsent()
 	if err == nil {
-		s.markPersisted(identity, kind)
+		s.markPersisted(identity, kind, isNew)
 		if !isNew {
 			return nil, false, nil
 		}
@@ -1287,13 +1287,13 @@ func (s *State) appendMappedEventWithPlan(
 		return nil, false, errors.Join(firstErr, fmt.Errorf("reconcile failed append: %w", reconcileErr))
 	}
 	if persisted {
-		s.markPersisted(identity, kind)
+		s.markPersisted(identity, kind, false)
 		return nil, false, nil
 	}
 
 	appended, isNew, err = appendIfAbsent()
 	if err == nil {
-		s.markPersisted(identity, kind)
+		s.markPersisted(identity, kind, isNew)
 		if !isNew {
 			return nil, false, nil
 		}
@@ -1305,13 +1305,19 @@ func (s *State) appendMappedEventWithPlan(
 		return nil, false, errors.Join(firstErr, retryErr, fmt.Errorf("reconcile failed append retry: %w", reconcileErr))
 	}
 	if persisted {
-		s.markPersisted(identity, kind)
+		s.markPersisted(identity, kind, false)
 		return nil, false, nil
 	}
 	return nil, false, errors.Join(firstErr, retryErr)
 }
 
-func (s *State) markPersisted(identity MappedUpdateIdentity, kind mappedJournalRecordKind) {
+func (s *State) markPersisted(identity MappedUpdateIdentity, kind mappedJournalRecordKind, isNew bool) {
+	if !isNew {
+		// A duplicate or reconciled append may have a different durable winner.
+		// Its public boundaries are unknown, so later runtime text fails closed.
+		s.logicalFieldHistory = nil
+		s.logicalFieldHistorySaturated = true
+	}
 	s.markProcessed(identity)
 	switch kind {
 	case mappedJournalRecordAssistantTranscript:
