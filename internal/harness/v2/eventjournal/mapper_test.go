@@ -291,7 +291,7 @@ func TestMapToolUpdatePreservesBenignOutputAfterPWDHistory(t *testing.T) {
 	}
 	history = append(history, fields...)
 	if len(history) != 5 {
-		t.Fatalf("provider, model, and first tool published %d historical fields, want 5", len(history))
+		t.Fatalf("provider, model and first tool published %d historical fields, want 5", len(history))
 	}
 
 	output := "README.md\ncmd\ninternal\n"

@@ -12,7 +12,7 @@ import (
 	"github.com/orka-agents/orka/internal/store"
 )
 
-func TestExecutionEventProviderModelPublicCopies(t *testing.T) {
+func TestExecutionEventProviderModelPublicCopyPermutations(t *testing.T) {
 	for _, kind := range []string{
 		"accepted", "usage", "context", "completed", "completed-explicit", "failed", "cancelled", "outcome-unknown",
 		"stream-failure", "terminal-usage", "terminal-usage-explicit",

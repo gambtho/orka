@@ -686,8 +686,8 @@ func (s *State) appendUpdateIfNew(
 	}
 	mapCtx := s.journal.MapContext.normalized()
 	if event.Update != nil && event.Update.Kind == harnessv2.UpdateUsage {
-		mapCtx, publishedFields = redactModelContextWithHistory(
-			mapCtx, s.logicalFieldHistory, s.logicalFieldHistorySaturated, nil,
+		mapCtx.Provider, mapCtx.Model, publishedFields = redactModelWithHistory(
+			mapCtx.Provider, mapCtx.Model, s.logicalFieldHistory, s.logicalFieldHistorySaturated, nil,
 		)
 	}
 	mapped, err := mapUpdate(event, mapCtx, options)

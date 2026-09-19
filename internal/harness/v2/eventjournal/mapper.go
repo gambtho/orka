@@ -426,24 +426,22 @@ func redactLogicalFieldsWithHistory(
 // Each model-bearing event publishes its provider and effective model, including
 // configured fallbacks. Check them together against history and fields already
 // projected for this event, then return all fields actually published.
-func redactModelContextWithHistory(
-	mapCtx MapContext,
+func redactModelWithHistory(
+	provider, model string,
 	history []logicalFieldBoundaries,
 	historySaturated bool,
 	published []logicalFieldBoundaries,
-) (MapContext, []logicalFieldBoundaries) {
-	if mapCtx.Provider == "" && mapCtx.Model == "" {
-		return mapCtx, published
+) (string, string, []logicalFieldBoundaries) {
+	if provider == "" && model == "" {
+		return provider, model, published
 	}
 	combined := make([]logicalFieldBoundaries, 0, len(history)+len(published))
 	combined = append(combined, history...)
 	combined = append(combined, published...)
 	values, fields := redactLogicalFieldsWithPublicCopies(
-		combined, historySaturated, []logicalFieldCopyKind{logicalFieldTrimmedCopies, logicalFieldTrimmedCopies},
-		mapCtx.Provider, mapCtx.Model,
+		combined, historySaturated, []logicalFieldCopyKind{logicalFieldTrimmedCopies, logicalFieldTrimmedCopies}, provider, model,
 	)
-	mapCtx.Provider, mapCtx.Model = values[0], values[1]
-	return mapCtx, append(published, fields...)
+	return values[0], values[1], append(published, fields...)
 }
 
 type logicalFieldCopyKind uint8
@@ -457,8 +455,8 @@ const (
 	logicalFieldPlanSummaryCopies
 )
 
-// Count the actual field locations of a public record. Providers and models have
-// two raw locations in the event DTO; titles and assistant text have raw/summary copies.
+// Count the actual field locations of a public record. Providers and models each
+// have two raw DTO locations; titles and assistant text have raw/summary copies.
 // Replays of the same event identity do not introduce another logical field.
 func logicalFieldPublicCopies(value string, kind logicalFieldCopyKind) []string {
 	switch kind {
@@ -500,7 +498,7 @@ func redactLogicalFieldsWithPublicCopies(
 		redacted[index] = executionevents.RedactExecutionEventText(value)
 		if trimmed {
 			// URL removal can expose trailing whitespace. Match the final
-			// provider/model/plan value before a downstream projection trims it again.
+			// model/plan value before a downstream projection trims it again.
 			redacted[index] = strings.TrimSpace(redacted[index])
 		}
 		copies := logicalFieldPublicCopies(redacted[index], kind)
@@ -1199,7 +1197,7 @@ func mapTerminalUsageWithHistory(
 	if event.Completed.Result.Model != "" {
 		mapCtx.Model = event.Completed.Result.Model
 	}
-	mapCtx, publishedFields = redactModelContextWithHistory(mapCtx, history, historySaturated, nil)
+	mapCtx.Provider, mapCtx.Model, publishedFields = redactModelWithHistory(mapCtx.Provider, strings.TrimSpace(mapCtx.Model), history, historySaturated, nil)
 	update := event
 	update.Type = harnessv2.EventUpdate
 	update.Completed = nil
@@ -1340,13 +1338,12 @@ func mapPromptLifecycleWithHistory(
 	default:
 		return nil, nil, fmt.Errorf("accepted or terminal harness v2 event is required")
 	}
-	mapCtx.Model = model
-	mapCtx, publishedFields = redactModelContextWithHistory(mapCtx, history, historySaturated, publishedFields)
+	mapCtx.Provider, model, publishedFields = redactModelWithHistory(mapCtx.Provider, model, history, historySaturated, publishedFields)
 	if mapCtx.Provider != "" {
 		content["provider"] = mapCtx.Provider
 	}
-	if mapCtx.Model != "" {
-		content["model"] = mapCtx.Model
+	if model != "" {
+		content["model"] = model
 	}
 	encoded, err := json.Marshal(content)
 	if err != nil {
@@ -1394,12 +1391,12 @@ func mapPromptStreamFailure(
 		"code":                         fields[0],
 		"message":                      fields[1],
 	}
-	mapCtx, publishedFields = redactModelContextWithHistory(mapCtx, history, historySaturated, publishedFields)
-	if mapCtx.Provider != "" {
-		content["provider"] = mapCtx.Provider
+	provider, model, publishedFields := redactModelWithHistory(mapCtx.Provider, mapCtx.Model, history, historySaturated, publishedFields)
+	if provider != "" {
+		content["provider"] = provider
 	}
-	if mapCtx.Model != "" {
-		content["model"] = mapCtx.Model
+	if model != "" {
+		content["model"] = model
 	}
 	encoded, err := json.Marshal(content)
 	if err != nil {
@@ -1495,12 +1492,12 @@ func mapPromptSettlement(
 	default:
 		return nil, nil, fmt.Errorf("unsupported prompt settlement terminal event %q", settlement.TerminalEvent)
 	}
-	mapCtx, publishedFields := redactModelContextWithHistory(mapCtx, history, historySaturated, nil)
-	if mapCtx.Provider != "" {
-		content["provider"] = mapCtx.Provider
+	provider, model, publishedFields := redactModelWithHistory(mapCtx.Provider, mapCtx.Model, history, historySaturated, nil)
+	if provider != "" {
+		content["provider"] = provider
 	}
-	if mapCtx.Model != "" {
-		content["model"] = mapCtx.Model
+	if model != "" {
+		content["model"] = model
 	}
 	encoded, err := json.Marshal(content)
 	if err != nil {
