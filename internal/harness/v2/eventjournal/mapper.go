@@ -1225,13 +1225,19 @@ func mapUsageUpdate(
 	content map[string]any,
 ) {
 	mapped.Summary = usageSummary(usage)
-	hasTokenUsage := usage.InputTokens > 0 || usage.OutputTokens > 0 || usage.CachedInputTokens > 0
-	hasContextWindow := usage.ContextWindowUsed != nil
-	if hasTokenUsage || !hasContextWindow {
+	if hasTokenUsage(*usage) || usage.ContextWindowUsed == nil {
 		mapped.Type = executionevents.ExecutionEventTypeModelUsageUpdated
 		content["inputTokens"] = usage.InputTokens
 		content["outputTokens"] = usage.OutputTokens
-		content["cachedInputTokens"] = usage.CachedInputTokens
+		if usage.CachedInputTokens != nil {
+			content["cachedInputTokens"] = *usage.CachedInputTokens
+		}
+		if usage.CacheWriteInputTokens != nil {
+			content["cacheWriteInputTokens"] = *usage.CacheWriteInputTokens
+		}
+		content["usageScope"] = usage.Scope
+		content["usageReported"] = usage.Reported
+		content["usageComplete"] = usage.Complete
 	} else {
 		mapped.Type = executionevents.ExecutionEventTypeModelContextUpdated
 	}
@@ -1248,11 +1254,12 @@ func mapUsageUpdate(
 }
 
 func usageSummary(usage *harnessv2.UsageUpdate) string {
-	if usage.InputTokens > 0 || usage.OutputTokens > 0 || usage.CachedInputTokens > 0 || usage.ContextWindowUsed == nil {
-		return fmt.Sprintf(
-			"Model usage updated: %d input, %d output, %d cached input tokens",
-			usage.InputTokens, usage.OutputTokens, usage.CachedInputTokens,
-		)
+	if hasTokenUsage(*usage) || usage.ContextWindowUsed == nil {
+		summary := fmt.Sprintf("Model usage updated: %d input, %d output", usage.InputTokens, usage.OutputTokens)
+		if usage.CachedInputTokens != nil {
+			summary += fmt.Sprintf(", %d cached input", *usage.CachedInputTokens)
+		}
+		return summary + " tokens"
 	}
 	return fmt.Sprintf(
 		"Model context updated: %d of %d tokens used",
@@ -1297,9 +1304,14 @@ func mapUsageUpdateWithHistory(
 	return mapped, publishedFields, nil
 }
 
+func hasTokenUsage(usage harnessv2.UsageUpdate) bool {
+	return usage.Reported || usage.InputTokens > 0 || usage.OutputTokens > 0 ||
+		(usage.CachedInputTokens != nil && *usage.CachedInputTokens > 0) ||
+		(usage.CacheWriteInputTokens != nil && *usage.CacheWriteInputTokens > 0)
+}
+
 func hasUsageTelemetry(usage harnessv2.UsageUpdate) bool {
-	return usage.InputTokens > 0 || usage.OutputTokens > 0 || usage.CachedInputTokens > 0 ||
-		usage.ContextWindowUsed != nil || usage.ContextWindowSize != nil
+	return hasTokenUsage(usage) || usage.ContextWindowUsed != nil || usage.ContextWindowSize != nil
 }
 
 func mapToolUpdateWithHistory(

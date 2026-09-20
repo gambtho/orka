@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/stretchr/testify/require"
+
 	"github.com/orka-agents/orka/internal/events"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 	"github.com/orka-agents/orka/internal/harness/v2/eventjournal"
@@ -167,6 +169,81 @@ func TestExecutionEventUsageSummaryWithOverriddenHistoricalModel(t *testing.T) {
 	}
 }
 
+func TestExecutionEventUsageSummaryOptionalCounts(t *testing.T) {
+	for _, fixture := range []struct {
+		name, summary string
+		usage         harnessv2.UsageUpdate
+	}{
+		{
+			name: "unavailable caches", summary: "Model usage updated: 120 input, 30 output tokens",
+			usage: harnessv2.UsageUpdate{InputTokens: 120, OutputTokens: 30},
+		},
+		{
+			name: "reported zero caches", summary: "Model usage updated: 120 input, 30 output, 0 cached input tokens",
+			usage: harnessv2.UsageUpdate{InputTokens: 120, OutputTokens: 30,
+				CachedInputTokens: new(uint64(0)), CacheWriteInputTokens: new(uint64(0))},
+		},
+		{
+			name: "cache writes only", summary: "Model usage updated: 120 input, 30 output tokens",
+			usage: harnessv2.UsageUpdate{InputTokens: 120, OutputTokens: 30, CacheWriteInputTokens: new(uint64(40))},
+		},
+		{
+			name: "reported zero with context", summary: "Model usage updated: 0 input, 0 output tokens",
+			usage: harnessv2.UsageUpdate{ContextWindowUsed: new(uint64(53_000)), ContextWindowSize: new(uint64(200_000))},
+		},
+	} {
+		for _, terminal := range []bool{false, true} {
+			for _, provider := range []string{"openai", "=fixture-value"} {
+				t.Run(fixture.name+"/"+usageSummaryTestName(terminal, false)+"/"+provider, func(t *testing.T) {
+					journal, state := newProviderModelHistoryJournal(t, provider, "")
+					usage := fixture.usage
+					usage.Scope, usage.Reported, usage.Complete = "attempt", true, true
+					event := modelHistoryEvent(2)
+					event.Type = harnessv2.EventUpdate
+					event.Update = &harnessv2.UpdateEvent{Kind: harnessv2.UpdateUsage, Usage: &usage}
+					appendEvent := state.AppendUpdateIfNew
+					if terminal {
+						event.Type, event.Update = harnessv2.EventCompleted, nil
+						event.Completed = &harnessv2.CompletedEvent{StopReason: harnessv2.ACPStopReasonEndTurn,
+							Result: harnessv2.PromptResult{Usage: usage,
+								Content: []harnessv2.ContentBlock{{Type: harnessv2.ContentBlockText, Text: "."}}}}
+						appendEvent = state.AppendTerminalUsageIfNew
+					}
+					require.NoError(t, event.Validate(harnessv2.DefaultEventStreamLimits()))
+					_, added, err := appendEvent(t.Context(), event)
+					require.NoError(t, err)
+					require.True(t, added)
+					rows := modelHistoryRows(t, journal)
+					require.Len(t, rows, 1)
+					dto := NewExecutionEventResponse(rows[0])
+					require.Equal(t, events.ExecutionEventTypeModelUsageUpdated, dto.Type)
+					wantSummary := fixture.summary
+					if provider == "=fixture-value" {
+						wantSummary = events.ExecutionEventRedactedValue
+					}
+					require.Equal(t, wantSummary, dto.Summary)
+					var content struct {
+						harnessv2.UsageUpdate
+						Scope    string `json:"usageScope"`
+						Reported bool   `json:"usageReported"`
+						Complete bool   `json:"usageComplete"`
+					}
+					require.NoError(t, json.Unmarshal(dto.Content, &content))
+					require.Equal(t, usage.InputTokens, content.InputTokens)
+					require.Equal(t, usage.OutputTokens, content.OutputTokens)
+					require.Equal(t, usage.CachedInputTokens, content.CachedInputTokens)
+					require.Equal(t, usage.CacheWriteInputTokens, content.CacheWriteInputTokens)
+					require.Equal(t, usage.ContextWindowUsed, content.ContextWindowUsed)
+					require.Equal(t, usage.ContextWindowSize, content.ContextWindowSize)
+					require.Equal(t, usage.Scope, content.Scope)
+					require.True(t, content.Reported)
+					require.True(t, content.Complete)
+				})
+			}
+		}
+	}
+}
+
 func usageSummaryTestName(terminal, contextOnly bool) string {
 	name := "streamed"
 	if terminal {
@@ -181,7 +258,7 @@ func usageSummaryTestName(terminal, contextOnly bool) string {
 func appendUsageSummaryEvent(t *testing.T, state *eventjournal.State, terminal, contextOnly bool, explicitModel string) harnessv2.Event {
 	t.Helper()
 	used, size := uint64(53_000), uint64(200_000)
-	usage := harnessv2.UsageUpdate{InputTokens: 120, OutputTokens: 30, CachedInputTokens: 40}
+	usage := harnessv2.UsageUpdate{InputTokens: 120, OutputTokens: 30, CachedInputTokens: new(uint64(40))}
 	if contextOnly {
 		usage = harnessv2.UsageUpdate{ContextWindowUsed: &used, ContextWindowSize: &size}
 	}
