@@ -423,6 +423,46 @@ func TestGatewayTaskMessagePermanentAbandonmentImmediatelyBeforePOST(t *testing.
 	}
 }
 
+func TestGatewayTaskMessageTimingAfterRevalidation(t *testing.T) {
+	const requestTimeout = 250 * time.Millisecond
+	for _, tt := range []struct {
+		name      string
+		expiry    time.Duration
+		wantState store.GatewayDeliveryState
+		wantPOSTs int
+	}{
+		{"adapter timeout", time.Hour, store.GatewayDeliveryDelivered, 1},
+		{"delivery expiry", requestTimeout, store.GatewayDeliveryExpired, 0},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			s, db, adapter, _, task := newGatewayMessageFixture(t)
+			s.Config.DeliveryTimeout = requestTimeout
+			s.Config.DeliveryMaxAttempts = 1
+			s.Config.EventExpiry = tt.expiry
+			receipt, err := s.EnqueueTaskMessage(t.Context(), task.Namespace, task.Name, string(task.UID), "progress", "working")
+			require.NoError(t, err)
+			gatewayReads := 0
+			s.APIReader = interceptor.NewClient(s.Client.(client.WithWatch), interceptor.Funcs{Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+				if _, ok := obj.(*gatewayv1alpha1.Gateway); ok {
+					gatewayReads++
+					if gatewayReads == 2 {
+						// The successful final eligibility read outlasts the adapter timeout.
+						time.Sleep(2 * requestTimeout)
+					}
+				}
+				return c.Get(ctx, key, obj, opts...)
+			}})
+			require.NoError(t, s.DeliverOnce(t.Context()))
+			require.Equal(t, 2, gatewayReads)
+			require.Equal(t, tt.wantPOSTs, adapter.Attempts(receipt.DeliveryID))
+			row, err := db.GetGatewayDelivery(t.Context(), task.Namespace, receipt.DeliveryID)
+			require.NoError(t, err)
+			require.Equal(t, tt.wantState, row.State)
+			require.Equal(t, 1, row.AttemptCount)
+		})
+	}
+}
+
 func TestGatewayTaskMessageRetriesReadinessLossImmediatelyBeforePOST(t *testing.T) {
 	for _, tt := range []struct {
 		name   string

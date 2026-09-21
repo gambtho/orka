@@ -1516,6 +1516,19 @@ func (s *Service) DeliverOnce(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	// Eligibility reads must finish before starting the adapter request timeout.
+	if delivery.Kind == protocol.DeliveryKindMessage {
+		if err := s.validateMessageDelivery(ctx, delivery); err != nil {
+			var httpErr *HTTPError
+			if errors.As(err, &httpErr) && httpErr.Code != http.StatusServiceUnavailable {
+				gatewayDeliveryTotal.WithLabelValues("non_retryable_error").Inc()
+				gatewayDeadLettersTotal.WithLabelValues("delivery").Inc()
+				return s.DeliveryStore.MarkGatewayDeliveryTerminal(ctx, delivery.Namespace, delivery.ID, s.Owner,
+					store.GatewayDeliveryDeadLettered, httpErr.Message, time.Now().UTC())
+			}
+			return s.retryOrDeadLetterDelivery(ctx, delivery, "gateway message eligibility is unavailable", time.Now().UTC())
+		}
+	}
 	deliveryWindow := delivery.ExpiresAt.Sub(time.Now().UTC())
 	if deliveryWindow <= 0 {
 		return s.DeliveryStore.MarkGatewayDeliveryTerminal(
@@ -1536,18 +1549,6 @@ func (s *Service) DeliverOnce(ctx context.Context) error {
 	)
 	if err != nil {
 		return s.retryOrDeadLetterDelivery(ctx, delivery, "adapter HTTP client is unsafe", time.Now().UTC())
-	}
-	if delivery.Kind == protocol.DeliveryKindMessage {
-		if err := s.validateMessageDelivery(ctx, delivery); err != nil {
-			var httpErr *HTTPError
-			if errors.As(err, &httpErr) && httpErr.Code != http.StatusServiceUnavailable {
-				gatewayDeliveryTotal.WithLabelValues("non_retryable_error").Inc()
-				gatewayDeadLettersTotal.WithLabelValues("delivery").Inc()
-				return s.DeliveryStore.MarkGatewayDeliveryTerminal(ctx, delivery.Namespace, delivery.ID, s.Owner,
-					store.GatewayDeliveryDeadLettered, httpErr.Message, time.Now().UTC())
-			}
-			return s.retryOrDeadLetterDelivery(ctx, delivery, "gateway message eligibility is unavailable", time.Now().UTC())
-		}
 	}
 	response, err := httpClient.Do(httpRequest)
 	if err != nil {

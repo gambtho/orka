@@ -288,8 +288,14 @@ func checkInterimDeliveries(ctx context.Context, client *http.Client, baseURL st
 	second := message
 	second.DeliveryID = prefix + "-message-2"
 	second.IdempotencyID = second.DeliveryID
-	_, err = sendInterimProbe(ctx, client, baseURL, target, second)
-	return message, first, err
+	secondResponse, err := sendInterimProbe(ctx, client, baseURL, target, second)
+	if err != nil {
+		return message, first, err
+	}
+	if first.ProviderMessageID != "" && secondResponse.ProviderMessageID == first.ProviderMessageID {
+		return message, first, fmt.Errorf("distinct interim deliveries reused a provider message ID")
+	}
+	return message, first, nil
 }
 
 func sendInterimProbe(ctx context.Context, client *http.Client, baseURL string, target Target, delivery protocol.DeliveryRequest) (protocol.DeliveryResponse, error) {
