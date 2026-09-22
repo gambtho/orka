@@ -108,6 +108,7 @@ func TestNativeGatewayReplyBindingAndSpoofExclusions(t *testing.T) {
 		}, false},
 	} {
 		t.Run(test.name, func(t *testing.T) {
+			logs := captureNativeReplyStderr(t)
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				require.Equal(t, "Bearer projected-token", r.Header.Get("Authorization"))
 				w.WriteHeader(test.status)
@@ -131,13 +132,21 @@ func TestNativeGatewayReplyBindingAndSpoofExclusions(t *testing.T) {
 			scheme := runtime.NewScheme()
 			require.NoError(t, corev1alpha1.AddToScheme(scheme))
 			kube := fake.NewClientBuilder().WithScheme(scheme).WithObjects(task).Build()
-			sender, err := newNativeGatewayReplySender(t.Context(), kube, env, path)
+			sender, err := newNativeGatewayReplySender(
+				t.Context(), func() (client.Reader, error) { return kube, nil }, env, path, nativeGatewayReplyBootstrapTimeout,
+			)
 			if test.want {
 				require.NoError(t, err)
 				require.NotNil(t, sender)
 			} else {
 				require.Nil(t, sender)
+				if test.name == "no enable flag" || test.name == "not selected" {
+					require.NoError(t, err)
+				} else {
+					require.Error(t, err, "identity denials must remain fatal")
+				}
 			}
+			require.Empty(t, logs(), "neither successful binding, explicit denial, nor policy exclusion is degradation")
 			tc := &tools.ToolContext{
 				Namespace: env.TaskNamespace, TaskID: env.TaskName, TaskUID: env.TaskUID, GatewayReplySender: sender,
 			}
@@ -166,6 +175,7 @@ func TestNativeGatewayReplyBootstrapAvailabilityAndRecovery(t *testing.T) {
 		{name: "inactive identity", originStatus: 409, wantError: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
+			logs := captureNativeReplyStderr(t)
 			var originCalls atomic.Int32
 			var recovered atomic.Bool
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -177,6 +187,10 @@ func TestNativeGatewayReplyBootstrapAvailabilityAndRecovery(t *testing.T) {
 						status = 503
 					}
 					w.WriteHeader(status)
+					if status != http.StatusOK {
+						_, _ = fmt.Fprint(w, "opaque upstream diagnostic https://private.invalid?token=secret Task text")
+						return
+					}
 					_, _ = fmt.Fprint(w, `{"taskUID":"uid"}`)
 				case "/internal/v1/tasks/default/task/gateway-messages/budget":
 					if test.budgetStatus != 0 && !recovered.Load() {
@@ -205,13 +219,21 @@ func TestNativeGatewayReplyBootstrapAvailabilityAndRecovery(t *testing.T) {
 			scheme := runtime.NewScheme()
 			require.NoError(t, corev1alpha1.AddToScheme(scheme))
 			kube := fake.NewClientBuilder().WithScheme(scheme).WithObjects(task).Build()
-			sender, err := newNativeGatewayReplySender(t.Context(), kube, env, path)
+			sender, err := newNativeGatewayReplySender(
+				t.Context(), func() (client.Reader, error) { return kube, nil }, env, path, nativeGatewayReplyBootstrapTimeout,
+			)
 			if test.wantError {
 				require.Error(t, err)
 			} else {
 				require.NoError(t, err, "optional service availability must not terminate Task startup")
 			}
 			require.Equal(t, test.wantSender, sender != nil)
+			if !test.wantSender && !test.wantError {
+				require.Equal(t, "warning: reply_in_conversation omitted reason=origin_unavailable\n", logs(),
+					"exhausted retries must warn only once, without upstream diagnostics")
+			} else {
+				require.Empty(t, logs())
+			}
 			tc := &tools.ToolContext{Namespace: "default", TaskID: "task", TaskUID: "uid", GatewayReplySender: sender}
 			definitions := buildLLMTools(env.Tools, nil, tc)
 			require.Equal(t, test.wantSender, len(definitions) == 1)
@@ -247,6 +269,7 @@ func TestNativeGatewayReplyBootstrapAvailabilityAndRecovery(t *testing.T) {
 func TestNativeGatewayReplyUnavailableDependenciesDenyToolOnly(t *testing.T) {
 	for _, dependency := range []string{"task read", "transport", "response transport", "projected token"} {
 		t.Run(dependency, func(t *testing.T) {
+			logs := captureNativeReplyStderr(t)
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				if dependency == "response transport" {
 					w.Header().Set("Content-Length", "1000")
@@ -284,9 +307,16 @@ func TestNativeGatewayReplyUnavailableDependenciesDenyToolOnly(t *testing.T) {
 					return c.Get(ctx, key, obj, opts...)
 				},
 			}).Build()
-			sender, err := newNativeGatewayReplySender(t.Context(), kube, env, path)
+			sender, err := newNativeGatewayReplySender(
+				t.Context(), func() (client.Reader, error) { return kube, nil }, env, path, nativeGatewayReplyBootstrapTimeout,
+			)
 			require.NoError(t, err)
 			require.Nil(t, sender)
+			reason := "origin_unavailable"
+			if dependency == "task read" {
+				reason = "task_read_unavailable"
+			}
+			require.Equal(t, "warning: reply_in_conversation omitted reason="+reason+"\n", logs())
 		})
 	}
 }
@@ -335,7 +365,9 @@ func TestNativeGatewayReplyTokenReviewBackendUnavailable(t *testing.T) {
 				},
 				Tools: []string{"reply_in_conversation"}, GatewayReplyEnabled: true,
 			}
-			sender, err := newNativeGatewayReplySender(t.Context(), kube, env, path)
+			sender, err := newNativeGatewayReplySender(
+				t.Context(), func() (client.Reader, error) { return kube, nil }, env, path, nativeGatewayReplyBootstrapTimeout,
+			)
 			require.Nil(t, sender)
 			require.Zero(t, handled.Load(), "failed auth must never grant origin or reach its handler")
 			tc := &tools.ToolContext{Namespace: "default", TaskID: "task", TaskUID: "uid", GatewayReplySender: sender}

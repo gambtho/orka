@@ -334,7 +334,8 @@ func run(transcriptPath string) (err error) {
 	}
 
 	baseToolCtx.GatewayReplySender, err = newNativeGatewayReplySender(
-		ctx, k8sClient, workerEnv, workerenv.ServiceAccountTokenFile,
+		ctx, inClusterNativeGatewayReplyTaskReader, workerEnv,
+		workerenv.ServiceAccountTokenFile, nativeGatewayReplyBootstrapTimeout,
 	)
 	if err != nil {
 		return err
