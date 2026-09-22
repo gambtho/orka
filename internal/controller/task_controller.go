@@ -51,6 +51,7 @@ import (
 	"github.com/orka-agents/orka/internal/artifactcap"
 	execevents "github.com/orka-agents/orka/internal/events"
 	"github.com/orka-agents/orka/internal/executionmode"
+	gatewayruntime "github.com/orka-agents/orka/internal/gateway"
 	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/outboundaccess"
 	"github.com/orka-agents/orka/internal/store"
@@ -114,6 +115,7 @@ type TaskReconciler struct {
 	APIReader                    client.Reader
 	Scheme                       *runtime.Scheme
 	JobBuilder                   *JobBuilder
+	GatewayService               *gatewayruntime.Service
 	SessionManager               *SessionManager
 	WebhookNotifier              *WebhookNotifier
 	Recorder                     record.EventRecorder
@@ -1511,10 +1513,20 @@ func (r *TaskReconciler) createTaskJob(ctx context.Context, task *corev1alpha1.T
 		}
 	}
 
+	// Do not freeze a tool-less Job in the create-before-durable-link window.
+	gatewayReplyEligible, err := r.GatewayService.ResolveReplyEligibility(ctx, latest)
+	if errors.Is(err, store.ErrNotReady) {
+		return ctrl.Result{RequeueAfter: time.Second}, nil
+	}
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+
 	// Create the Job
 	job, err := r.JobBuilder.BuildWithOptions(ctx, jobTask, agent, provider, JobBuildOptions{
 		ResolvedApprovalsJSON:       resolvedApprovalsJSON,
 		RepositoryMonitorValidation: validationTask,
+		GatewayReplyEligible:        gatewayReplyEligible,
 	})
 	if err != nil {
 		log.Error(err, "failed to build Job")
