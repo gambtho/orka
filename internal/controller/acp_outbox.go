@@ -360,7 +360,9 @@ func (p *ACPOutboxProjector) deliver(ctx context.Context, projection store.Outbo
 		now := metav1.Now()
 		task.Status.Phase = payload.Phase
 		task.Status.Message = payload.Message
-		task.Status.CompletionTime = &now
+		if task.Status.CompletionTime == nil {
+			task.Status.CompletionTime = &now
+		}
 		execution := mergeTerminalExecutionStatus(task.Status.Execution, payload.Execution)
 		execution.LastTransitionTime = &now
 		task.Status.Execution = &execution

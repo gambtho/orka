@@ -1419,7 +1419,9 @@ func (d *ACPDispatcher) completeSuccessWithDelivery(ctx context.Context, task *c
 		now := metav1.Now()
 		latest.Status.Phase = corev1alpha1.TaskPhaseSucceeded
 		latest.Status.Message = message
-		latest.Status.CompletionTime = &now
+		if latest.Status.CompletionTime == nil {
+			latest.Status.CompletionTime = &now
+		}
 		if latest.Status.Execution == nil {
 			latest.Status.Execution = &corev1alpha1.TaskExecutionStatus{}
 		}
@@ -1454,7 +1456,9 @@ func (d *ACPDispatcher) failTaskForDelivery(ctx context.Context, task *corev1alp
 		now := metav1.Now()
 		latest.Status.Phase = corev1alpha1.TaskPhaseFailed
 		latest.Status.Message = message
-		latest.Status.CompletionTime = &now
+		if latest.Status.CompletionTime == nil {
+			latest.Status.CompletionTime = &now
+		}
 		if latest.Status.Execution == nil {
 			latest.Status.Execution = &corev1alpha1.TaskExecutionStatus{}
 		}
@@ -1490,7 +1494,9 @@ func (d *ACPDispatcher) cancelTaskAfterExecution(ctx context.Context, task *core
 		now := metav1.Now()
 		latest.Status.Phase = corev1alpha1.TaskPhaseCancelled
 		latest.Status.Message = message
-		latest.Status.CompletionTime = &now
+		if latest.Status.CompletionTime == nil {
+			latest.Status.CompletionTime = &now
+		}
 		if latest.Status.Execution == nil {
 			latest.Status.Execution = &corev1alpha1.TaskExecutionStatus{}
 		}
