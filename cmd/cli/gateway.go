@@ -27,26 +27,29 @@ func newGatewayCmd() *cobra.Command {
 	}
 
 	gatewaySpec := crudResourceSpec{
-		Use:      cliGatewayCommand,
-		Short:    "Inspect Gateway adapter instances",
-		BasePath: "/api/v1/gateways",
-		Name:     cliGatewayCommand,
-		ReadOnly: true,
+		Use:          cliGatewayCommand,
+		Short:        "Inspect Gateway adapter instances",
+		BasePath:     "/api/v1/gateways",
+		Name:         cliGatewayCommand,
+		ReadOnly:     true,
+		DescribeRows: gatewayDescribeRows,
 	}
 	cmd.AddCommand(newCRUDListCmd(gatewaySpec), newCRUDGetCmd(gatewaySpec))
 	cmd.AddCommand(newCRUDResourceCmd(crudResourceSpec{
-		Use:      "class",
-		Short:    "Inspect cluster-scoped GatewayClass profiles",
-		BasePath: "/api/v1/gatewayclasses",
-		Name:     "gateway class",
-		ReadOnly: true,
+		Use:          "class",
+		Short:        "Inspect cluster-scoped GatewayClass profiles",
+		BasePath:     "/api/v1/gatewayclasses",
+		Name:         "gateway class",
+		ReadOnly:     true,
+		DescribeRows: gatewayClassDescribeRows,
 	}))
 	cmd.AddCommand(newCRUDResourceCmd(crudResourceSpec{
-		Use:      cliBindingCommand,
-		Short:    "Inspect GatewayBinding routes",
-		BasePath: "/api/v1/gatewaybindings",
-		Name:     "gateway binding",
-		ReadOnly: true,
+		Use:          cliBindingCommand,
+		Short:        "Inspect GatewayBinding routes",
+		BasePath:     "/api/v1/gatewaybindings",
+		Name:         "gateway binding",
+		ReadOnly:     true,
+		DescribeRows: gatewayBindingDescribeRows,
 	}))
 	cmd.AddCommand(newGatewayEventsCmd())
 	cmd.AddCommand(newGatewayDeliveriesCmd())
@@ -56,11 +59,12 @@ func newGatewayCmd() *cobra.Command {
 func newGatewayEventsCmd() *cobra.Command {
 	var state, gatewayName, binding, session, task string
 	spec := crudResourceSpec{
-		Use:      "events",
-		Short:    "Inspect durable normalized gateway ingress events",
-		BasePath: "/api/v1/gateway-events",
-		Name:     "gateway event",
-		ReadOnly: true,
+		Use:          "events",
+		Short:        "Inspect durable normalized gateway ingress events",
+		BasePath:     "/api/v1/gateway-events",
+		Name:         "gateway event",
+		ReadOnly:     true,
+		DescribeRows: gatewayEventDescribeRows,
 		ListFlags: func(cmd *cobra.Command) {
 			cmd.Flags().StringVar(&state, "state", "", "Filter by comma-separated event state")
 			cmd.Flags().StringVar(&gatewayName, cliGatewayCommand, "", "Filter by Gateway name")
@@ -81,11 +85,12 @@ func newGatewayEventsCmd() *cobra.Command {
 func newGatewayDeliveriesCmd() *cobra.Command {
 	var state, gatewayName, binding, event, session, task string
 	spec := crudResourceSpec{
-		Use:      "deliveries",
-		Short:    "Inspect and retry durable gateway deliveries",
-		BasePath: "/api/v1/gateway-deliveries",
-		Name:     "gateway delivery",
-		ReadOnly: true,
+		Use:          "deliveries",
+		Short:        "Inspect and retry durable gateway deliveries",
+		BasePath:     "/api/v1/gateway-deliveries",
+		Name:         "gateway delivery",
+		ReadOnly:     true,
+		DescribeRows: gatewayDeliveryDescribeRows,
 		ListFlags: func(cmd *cobra.Command) {
 			cmd.Flags().StringVar(&state, "state", "", "Filter by comma-separated delivery state")
 			cmd.Flags().StringVar(&gatewayName, cliGatewayCommand, "", "Filter by Gateway name")
@@ -116,10 +121,10 @@ func newGatewayDeliveriesCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			return printStructured(cmd, result)
+			return printDescribed(cmd, result, gatewayDeliveryDescribeRows)
 		},
 	}
-	addOutputFlag(retryCmd, outputJSON)
+	addOutputFlag(retryCmd, outputTable)
 	cmd.AddCommand(retryCmd)
 	return cmd
 }
