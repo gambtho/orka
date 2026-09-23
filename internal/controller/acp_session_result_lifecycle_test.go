@@ -79,11 +79,17 @@ func TestACPSessionResultProjectionPreservesTerminalLifecycleMessage(t *testing.
 					if test.phase != corev1alpha1.TaskPhaseSucceeded {
 						delivery.Message = test.directText
 					}
+					// A fixed historical completionTime models an already-authoritative Task
+					// status from an interrupted prior settlement pass. Neither status writer
+					// in this matrix (queued outbox projection delivery, or the direct
+					// terminal delivery helper) may replace it with a fresh value.
+					historicalCompletion := metav1.NewTime(time.Date(2024, 9, 17, 8, 0, 0, 0, time.UTC))
 					task := &corev1alpha1.Task{
 						ObjectMeta: metav1.ObjectMeta{Namespace: control.Namespace, Name: "result-lifecycle", UID: types.UID(attempt.Key.TaskUID)},
 						Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent, Prompt: "inspect pwd",
 							SessionRef: &corev1alpha1.SessionReference{Name: control.SessionName, Create: true, Append: true}},
 						Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseRunning, Message: "runtime admission will be retried", Attempts: 1,
+							CompletionTime: &historicalCompletion,
 							Execution: &corev1alpha1.TaskExecutionStatus{
 								State: corev1alpha1.TaskExecutionStateSucceeded, Outcome: corev1alpha1.TaskExecutionOutcomeSucceeded,
 								Attempt: 1, PromptID: attempt.Key.PromptID, RequestDigest: attempt.RequestDigest,
@@ -172,7 +178,7 @@ func TestACPSessionResultProjectionPreservesTerminalLifecycleMessage(t *testing.
 						writes[0], writes[1] = writes[1], writes[0]
 					}
 					reconciler := TaskReconciler{Client: kube, ExecutionEventStore: controls}
-					assertACPSessionResultLifecycleWrites(t, &reconciler, task, test.phase, payload, writes, assistantResult)
+					assertACPSessionResultLifecycleWrites(t, &reconciler, task, test.phase, payload, writes, assistantResult, historicalCompletion)
 				})
 			}
 		}
@@ -192,6 +198,7 @@ func assertACPSessionResultLifecycleWrites(
 	payload taskTerminalProjection,
 	writes []acpSessionResultLifecycleWrite,
 	assistantResult string,
+	wantCompletionTime metav1.Time,
 ) {
 	t.Helper()
 	ctx := context.Background()
@@ -208,6 +215,9 @@ func assertACPSessionResultLifecycleWrites(
 		}
 		if latest.Status.Phase != phase || latest.Status.Message != write.message {
 			t.Errorf("write %d: phase/message = %q/%q, want %q/%q", index, latest.Status.Phase, latest.Status.Message, phase, write.message)
+		}
+		if latest.Status.CompletionTime == nil || !latest.Status.CompletionTime.Time.Equal(wantCompletionTime.Time) {
+			t.Errorf("write %d: completionTime = %v, want preserved historical value %v", index, latest.Status.CompletionTime, wantCompletionTime)
 		}
 		if !reconciler.recordTerminalTaskLifecycleEventIfMissing(ctx, latest) {
 			t.Fatal("record terminal lifecycle event")
