@@ -371,7 +371,7 @@ func (p *ACPOutboxProjector) deliver(ctx context.Context, projection store.Outbo
 			delivery.LastTransitionTime = &now
 			task.Status.Delivery = &delivery
 		}
-		if err := p.Client.Status().Patch(ctx, task, client.MergeFrom(base)); err != nil {
+		if err := p.Client.Status().Patch(ctx, task, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); err != nil {
 			return err
 		}
 		deliveredResourceVersion = task.ResourceVersion
