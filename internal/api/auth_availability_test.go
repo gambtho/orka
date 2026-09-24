@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -16,6 +17,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
+	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 )
 
 func TestNewAuthMiddlewareTokenReviewUnavailableOptIn(t *testing.T) {
@@ -34,6 +36,11 @@ func TestNewAuthMiddlewareTokenReviewUnavailableOptIn(t *testing.T) {
 		{name: "opt-in invalid token", optIn: true, status: 401},
 	} {
 		t.Run(test.name, func(t *testing.T) {
+			// Capture the actual middleware logger, not only the returned HTTP body.
+			var logs bytes.Buffer
+			previousLog := log
+			log = zap.New(zap.WriteTo(&logs))
+			t.Cleanup(func() { log = previousLog })
 			scheme := runtime.NewScheme()
 			require.NoError(t, authenticationv1.AddToScheme(scheme))
 			var reviews atomic.Int32
@@ -82,7 +89,9 @@ func TestNewAuthMiddlewareTokenReviewUnavailableOptIn(t *testing.T) {
 				_, cached = tokenCache.Load(getTokenHash(token))
 				require.False(t, cached)
 			}
-			if test.statusError {
+			require.Contains(t, logs.String(), "token validation failed")
+			require.NotContains(t, logs.String(), "private", "middleware logs must not expose opaque backend diagnostics")
+			if test.backendFailure || test.statusError {
 				user, err := validateToken(t.Context(), kube, token)
 				require.Nil(t, user)
 				require.ErrorIs(t, err, errTokenReviewUnavailable)

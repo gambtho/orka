@@ -50,10 +50,14 @@ func (s *Service) resolveReplyOrigin(ctx context.Context, task *corev1alpha1.Tas
 		if err != nil {
 			return nil, err
 		}
-		if event.TaskUID == "" && event.State == store.GatewayEventDispatching && event.ExpiresAt.After(time.Now()) && gatewayTaskCorrelatesWithEvent(task, event) {
-			return nil, store.ErrNotReady
+		if event.TaskUID == "" {
+			if event.State == store.GatewayEventDispatching && event.ExpiresAt.After(time.Now()) && gatewayTaskCorrelatesWithEvent(task, event) {
+				return nil, store.ErrNotReady
+			}
+			return nil, nil
 		}
-		return nil, nil
+		// Dispatch may have linked the Task between reads. Apply the same durable
+		// ownership and live identity checks as a successful task-index lookup.
 	}
 	if err != nil {
 		return nil, err

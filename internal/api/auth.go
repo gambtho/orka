@@ -261,9 +261,10 @@ func validateToken(ctx context.Context, c client.Client, token string, audiences
 		},
 	}
 
-	// Submit the token review
+	// Submit the token review. Backend diagnostics are opaque and must not reach
+	// the middleware logger; retain only the availability classification.
 	if err := c.Create(ctx, review); err != nil {
-		return nil, fmt.Errorf("%w: %w", errTokenReviewUnavailable, err)
+		return nil, errTokenReviewUnavailable
 	}
 
 	// A status error means the token could not be checked, even if the response
