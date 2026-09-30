@@ -317,7 +317,8 @@ type acpToolCallIdentity struct {
 	ToolName   string `json:"name"`
 	Title      string `json:"title"`
 	Meta       struct {
-		ClaudeCode struct {
+		IsMCPToolCall json.RawMessage `json:"is_mcp_tool_call"`
+		ClaudeCode    struct {
 			ToolName string `json:"toolName"`
 		} `json:"claudeCode"`
 	} `json:"_meta"`
@@ -338,15 +339,18 @@ func (identity acpToolCallIdentity) name() (string, error) {
 }
 
 // rememberToolCallName retains structured identities only for this prompt.
-// Claude emits its tool name in a preceding update, while the corresponding
-// permission request can contain only a toolCallId and a display title.
-func (prompt *promptState) rememberToolCallName(notification *acp.SessionNotification) error {
+// Claude and Codex can identify a tool in a preceding update while their
+// permission request carries only the toolCallId, never an authoritative title.
+func (prompt *promptState) rememberToolCallName(
+	notification *acp.SessionNotification, provider string, policy harnessv2.MCPToolPolicy,
+) error {
 	if notification == nil {
 		return nil
 	}
 	var call struct {
 		acpToolCallIdentity
-		SessionUpdate string `json:"sessionUpdate"`
+		SessionUpdate string          `json:"sessionUpdate"`
+		RawInput      json.RawMessage `json:"rawInput"`
 	}
 	if err := json.Unmarshal(notification.Update, &call); err != nil {
 		return fmt.Errorf("decode ACP tool identity: %w", err)
@@ -355,8 +359,17 @@ func (prompt *promptState) rememberToolCallName(notification *acp.SessionNotific
 		return nil
 	}
 	name, err := call.name()
-	if err != nil || name == "" {
+	if err != nil {
 		return err
+	}
+	if provider == providerKindCodex {
+		name, err = codexMCPPermissionToolName(call.Meta.IsMCPToolCall, call.RawInput, name, policy)
+		if err != nil {
+			return err
+		}
+	}
+	if name == "" {
+		return nil
 	}
 	id, err := canonicalACPToolCallID(call.ToolCallID)
 	if err != nil {
@@ -376,6 +389,37 @@ func (prompt *promptState) rememberToolCallName(notification *acp.SessionNotific
 	}
 	prompt.toolCallNames[id] = name
 	return nil
+}
+
+// The pinned Codex adapter marks MCP updates and supplies structured server/tool
+// fields instead of name. Only the configured Orka server and a frozen brokered
+// descriptor can supply an identity; titles and native-tool collisions cannot.
+func codexMCPPermissionToolName(marker, rawInput json.RawMessage, name string, policy harnessv2.MCPToolPolicy) (string, error) {
+	if len(marker) == 0 {
+		return name, nil
+	}
+	var mcpCall bool
+	if err := json.Unmarshal(marker, &mcpCall); err != nil {
+		return "", fmt.Errorf("codex MCP tool update has invalid identity marker")
+	}
+	if !mcpCall {
+		return name, nil
+	}
+	var input struct {
+		Server string `json:"server"`
+		Tool   string `json:"tool"`
+	}
+	if err := json.Unmarshal(rawInput, &input); err != nil {
+		return "", fmt.Errorf("codex MCP tool update has invalid structured identity")
+	}
+	descriptor, allowed := policy.Descriptor(input.Tool)
+	if input.Server != mcpProxyServerName || !allowed || !descriptor.Source.Brokered() {
+		return "", fmt.Errorf("codex MCP tool identity is outside the frozen broker policy")
+	}
+	if name != "" && name != descriptor.Name {
+		return "", fmt.Errorf("codex MCP tool update has conflicting structured identities")
+	}
+	return descriptor.Name, nil
 }
 
 func canonicalPermissionToolName(provider string, policy harnessv2.MCPToolPolicy, name string) string {
