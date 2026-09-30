@@ -18,6 +18,19 @@ import (
 
 const gatewayDeliveryKindMessage = protocol.DeliveryKindMessage
 
+// CROSS JOIN keeps both lifetime counts event-first, using the Task identity
+// index before probing its deliveries. A reorderable join can scan the entire
+// namespace's delivery history while holding the store's single connection.
+const gatewayMessageCountSQL = `SELECT COUNT(*) FROM gateway_events event
+		CROSS JOIN gateway_deliveries delivery ON event.namespace = delivery.namespace AND event.id = delivery.event_id
+		WHERE event.namespace = ? AND event.task_name = ? AND event.task_uid = ? AND delivery.kind = ?`
+
+const gatewayMessageBudgetSQL = `SELECT
+		(SELECT COUNT(*) FROM gateway_events e CROSS JOIN gateway_deliveries d ON e.namespace = d.namespace AND e.id = d.event_id
+		 WHERE e.namespace = event.namespace AND e.task_name = event.task_name AND e.task_uid = event.task_uid AND d.kind = ?),
+		EXISTS (SELECT 1 FROM gateway_deliveries d WHERE d.namespace = event.namespace AND d.id = ? AND d.event_id = event.id AND d.kind = ?)
+		FROM gateway_events event WHERE event.namespace = ? AND event.namespace_uid = ? AND event.id = ? AND event.task_name = ? AND event.task_uid = ?`
+
 // EnqueueGatewayMessage serializes eligibility, dedupe, quota and insertion with
 // terminal projection and cleanup. Reuse the authorized task-data writer rather
 // than nesting BeginTx (the store uses a single SQLite connection).
@@ -124,10 +137,8 @@ func enqueueGatewayMessageTx(ctx context.Context, tx *sql.Tx, request store.Gate
 		return nil, false, store.ErrConflict
 	}
 	var accepted int
-	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM gateway_deliveries delivery
-		JOIN gateway_events event ON event.namespace = delivery.namespace AND event.id = delivery.event_id
-		WHERE event.namespace = ? AND event.task_uid = ? AND delivery.kind = ?`,
-		event.Namespace, event.TaskUID, gatewayDeliveryKindMessage).Scan(&accepted); err != nil {
+	if err := tx.QueryRowContext(ctx, gatewayMessageCountSQL,
+		event.Namespace, event.TaskName, event.TaskUID, gatewayDeliveryKindMessage).Scan(&accepted); err != nil {
 		return nil, false, err
 	}
 	if accepted >= request.MaxMessages {
@@ -157,11 +168,7 @@ func (s *Store) GetGatewayMessageBudget(ctx context.Context, request store.Gatew
 	id := gatewayMessageDeliveryID(request.Namespace, request.NamespaceUID, request.EventID, request.TaskUID, request.RequestID)
 	var budget store.GatewayMessageBudget
 	// One statement keeps the identity, lifetime count and replay snapshot consistent.
-	err := q.QueryRowContext(ctx, `SELECT
-		(SELECT COUNT(*) FROM gateway_deliveries d JOIN gateway_events e ON e.namespace = d.namespace AND e.id = d.event_id
-		 WHERE e.namespace = event.namespace AND e.task_uid = event.task_uid AND d.kind = ?),
-		EXISTS (SELECT 1 FROM gateway_deliveries d WHERE d.namespace = event.namespace AND d.id = ? AND d.event_id = event.id AND d.kind = ?)
-		FROM gateway_events event WHERE event.namespace = ? AND event.namespace_uid = ? AND event.id = ? AND event.task_name = ? AND event.task_uid = ?`,
+	err := q.QueryRowContext(ctx, gatewayMessageBudgetSQL,
 		gatewayDeliveryKindMessage, id, gatewayDeliveryKindMessage, request.Namespace, request.NamespaceUID, request.EventID, request.TaskName, request.TaskUID).Scan(&budget.Accepted, &budget.RequestExists)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, store.ErrNotFound
