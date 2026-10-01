@@ -103,6 +103,10 @@ func workerBindingHasSubject(binding workerRBACDocument, name, namespace string)
 	return false
 }
 
+func workerBindingHasOnlySubject(binding workerRBACDocument, name, namespace string) bool {
+	return len(binding.Subjects) == 1 && workerBindingHasSubject(binding, name, namespace)
+}
+
 func TestWorkerRoleRejectsAggregatedPermissions(t *testing.T) {
 	const manifest = `apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
@@ -124,9 +128,14 @@ func TestWorkerBindingMatchesImplicitSubjectNamespace(t *testing.T) {
 	binding := workerRBACDocument{Kind: "RoleBinding"}
 	binding.Metadata.Namespace = "orka-test"
 	binding.Subjects = []rbacv1.Subject{{Kind: "ServiceAccount", Name: "test-orka-ai-worker"}}
-	if !workerBindingHasSubject(binding, "test-orka-ai-worker", "orka-test") {
-		t.Fatal("RoleBinding subject without namespace must match its binding namespace")
+	if !workerBindingHasOnlySubject(binding, "test-orka-ai-worker", "orka-test") {
+		t.Fatal("RoleBinding with one implicit-namespace worker subject must match")
 	}
+	binding.Subjects = append(binding.Subjects, rbacv1.Subject{Kind: "ServiceAccount", Name: "other-worker"})
+	if workerBindingHasOnlySubject(binding, "test-orka-ai-worker", "orka-test") {
+		t.Fatal("RoleBinding with an extra subject must not match")
+	}
+	binding.Subjects = binding.Subjects[:1]
 	binding.Metadata.Namespace = "another-namespace"
 	if workerBindingHasSubject(binding, "test-orka-ai-worker", "orka-test") {
 		t.Fatal("RoleBinding in another namespace must not match")
@@ -224,10 +233,9 @@ func checkWorkerRBACParity(t *testing.T, sharedDocs, chartDocs []workerRBACDocum
 		t.Fatalf("worker %s has %d RoleBindings to its ClusterRole, want one", tier, len(bindings))
 	}
 	binding := bindings[0]
-	wantSubject := rbacv1.Subject{Kind: "ServiceAccount", Name: serviceAccountName, Namespace: namespace}
 	if binding.Metadata.Namespace != namespace || binding.RoleRef != (rbacv1.RoleRef{
 		APIGroup: "rbac.authorization.k8s.io", Kind: "ClusterRole", Name: chartRoleName,
-	}) || !slices.Equal(binding.Subjects, []rbacv1.Subject{wantSubject}) {
+	}) || !workerBindingHasOnlySubject(binding, serviceAccountName, namespace) {
 		t.Errorf("worker %s RoleBinding %q does not bind only its release-namespace ServiceAccount",
 			tier, binding.Metadata.Name)
 	}
