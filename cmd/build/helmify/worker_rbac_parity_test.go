@@ -19,9 +19,10 @@ type workerRBACDocument struct {
 		Name      string `json:"name"`
 		Namespace string `json:"namespace"`
 	} `json:"metadata"`
-	Rules    []rbacv1.PolicyRule `json:"rules"`
-	RoleRef  rbacv1.RoleRef      `json:"roleRef"`
-	Subjects []rbacv1.Subject    `json:"subjects"`
+	Rules           []rbacv1.PolicyRule     `json:"rules"`
+	AggregationRule *rbacv1.AggregationRule `json:"aggregationRule"`
+	RoleRef         rbacv1.RoleRef          `json:"roleRef"`
+	Subjects        []rbacv1.Subject        `json:"subjects"`
 }
 
 func decodeWorkerRBACDocuments(t *testing.T, manifest string) []workerRBACDocument {
@@ -85,6 +86,58 @@ func workerPermissions(rules []rbacv1.PolicyRule) map[workerPermission]bool {
 	return permissions
 }
 
+func workerRoleUsesExplicitRules(role workerRBACDocument) bool {
+	return role.AggregationRule == nil
+}
+
+func workerBindingHasSubject(binding workerRBACDocument, name, namespace string) bool {
+	for _, subject := range binding.Subjects {
+		subjectNamespace := subject.Namespace
+		if subjectNamespace == "" && binding.Kind == "RoleBinding" {
+			subjectNamespace = binding.Metadata.Namespace
+		}
+		if subject.Kind == "ServiceAccount" && subject.Name == name && subjectNamespace == namespace {
+			return true
+		}
+	}
+	return false
+}
+
+func TestWorkerRoleRejectsAggregatedPermissions(t *testing.T) {
+	const manifest = `apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: ai-worker-role
+aggregationRule:
+  clusterRoleSelectors:
+  - matchLabels:
+      orka.ai/worker: ai
+rules: []
+`
+	roles := decodeWorkerRBACDocuments(t, manifest)
+	if len(roles) != 1 || workerRoleUsesExplicitRules(roles[0]) {
+		t.Fatal("aggregated worker role must not pass explicit-rule parity")
+	}
+}
+
+func TestWorkerBindingMatchesImplicitSubjectNamespace(t *testing.T) {
+	binding := workerRBACDocument{Kind: "RoleBinding"}
+	binding.Metadata.Namespace = "orka-test"
+	binding.Subjects = []rbacv1.Subject{{Kind: "ServiceAccount", Name: "test-orka-ai-worker"}}
+	if !workerBindingHasSubject(binding, "test-orka-ai-worker", "orka-test") {
+		t.Fatal("RoleBinding subject without namespace must match its binding namespace")
+	}
+	binding.Metadata.Namespace = "another-namespace"
+	if workerBindingHasSubject(binding, "test-orka-ai-worker", "orka-test") {
+		t.Fatal("RoleBinding in another namespace must not match")
+	}
+	binding.Kind = "ClusterRoleBinding"
+	binding.Metadata.Namespace = "orka-test"
+	if workerBindingHasSubject(binding, "test-orka-ai-worker", "orka-test") {
+		t.Fatal("ClusterRoleBinding subject without namespace must not match")
+	}
+}
+
 func TestStaticChartWorkerRBACMatchesSharedManifest(t *testing.T) {
 	shared, err := os.ReadFile(filepath.Join("..", "..", "..", "config", "rbac", "worker_role.yaml"))
 	if err != nil {
@@ -126,6 +179,9 @@ func checkWorkerRBACParity(t *testing.T, sharedDocs, chartDocs []workerRBACDocum
 	if len(sharedRoles) != 1 || len(chartRoles) != 1 {
 		t.Fatalf("%s ClusterRole count: shared=%d chart=%d, want one each", tier, len(sharedRoles), len(chartRoles))
 	}
+	if !workerRoleUsesExplicitRules(sharedRoles[0]) || !workerRoleUsesExplicitRules(chartRoles[0]) {
+		t.Fatalf("%s worker roles must have explicit rules for permission parity", tier)
+	}
 	sharedGrants := workerPermissions(sharedRoles[0].Rules)
 	chartGrants := workerPermissions(chartRoles[0].Rules)
 	for _, direction := range []struct {
@@ -150,12 +206,7 @@ func checkWorkerRBACParity(t *testing.T, sharedDocs, chartDocs []workerRBACDocum
 
 	var bindings []workerRBACDocument
 	for _, doc := range chartDocs {
-		workerSubject := false
-		for _, subject := range doc.Subjects {
-			if subject.Kind == "ServiceAccount" && subject.Name == serviceAccountName && subject.Namespace == namespace {
-				workerSubject = true
-			}
-		}
+		workerSubject := workerBindingHasSubject(doc, serviceAccountName, namespace)
 		switch doc.Kind {
 		case "ClusterRoleBinding":
 			if doc.RoleRef.Name == chartRoleName || workerSubject {
