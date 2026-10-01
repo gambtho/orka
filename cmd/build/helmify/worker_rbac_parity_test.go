@@ -41,6 +41,21 @@ func decodeWorkerRBACDocuments(t *testing.T, manifest string) []workerRBACDocume
 	}
 }
 
+func requireWorkerServiceAccount(t *testing.T, docs []workerRBACDocument, tier, name, namespace string) {
+	t.Helper()
+	var serviceAccounts []workerRBACDocument
+	for _, doc := range docs {
+		if doc.Kind == "ServiceAccount" && doc.Metadata.Name == name {
+			serviceAccounts = append(serviceAccounts, doc)
+		}
+	}
+	if len(serviceAccounts) != 1 || (serviceAccounts[0].Metadata.Namespace != "" &&
+		serviceAccounts[0].Metadata.Namespace != namespace) {
+		t.Fatalf("worker %s has %d ServiceAccounts in release namespace %q, want one", tier,
+			len(serviceAccounts), namespace)
+	}
+}
+
 type workerPermission struct {
 	group, resource, resourceName, url, verb string
 }
@@ -96,17 +111,7 @@ func checkWorkerRBACParity(t *testing.T, sharedDocs, chartDocs []workerRBACDocum
 	sharedRoleName := tier + "-worker-role"
 	chartRoleName := "test-orka-" + sharedRoleName
 	serviceAccountName := "test-orka-" + tier + "-worker"
-	var serviceAccounts []workerRBACDocument
-	for _, doc := range chartDocs {
-		if doc.Kind == "ServiceAccount" && doc.Metadata.Name == serviceAccountName {
-			serviceAccounts = append(serviceAccounts, doc)
-		}
-	}
-	if len(serviceAccounts) != 1 || (serviceAccounts[0].Metadata.Namespace != "" &&
-		serviceAccounts[0].Metadata.Namespace != namespace) {
-		t.Fatalf("worker %s has %d ServiceAccounts in release namespace %q, want one", tier,
-			len(serviceAccounts), namespace)
-	}
+	requireWorkerServiceAccount(t, chartDocs, tier, serviceAccountName, namespace)
 	var sharedRoles, chartRoles []workerRBACDocument
 	for _, doc := range sharedDocs {
 		if doc.Kind == "ClusterRole" && doc.Metadata.Name == sharedRoleName {
