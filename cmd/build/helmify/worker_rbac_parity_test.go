@@ -92,19 +92,32 @@ func workerRoleUsesExplicitRules(role workerRBACDocument) bool {
 
 func workerBindingHasSubject(binding workerRBACDocument, name, namespace string) bool {
 	for _, subject := range binding.Subjects {
-		subjectNamespace := subject.Namespace
-		if subjectNamespace == "" && binding.Kind == "RoleBinding" {
-			subjectNamespace = binding.Metadata.Namespace
-		}
-		if subject.Kind == "ServiceAccount" && subject.Name == name && subjectNamespace == namespace {
-			return true
+		switch subject.Kind {
+		case "ServiceAccount":
+			subjectNamespace := subject.Namespace
+			if subjectNamespace == "" && binding.Kind == "RoleBinding" {
+				subjectNamespace = binding.Metadata.Namespace
+			}
+			if subject.Name == name && subjectNamespace == namespace {
+				return true
+			}
+		case "User":
+			if subject.Name == "system:serviceaccount:"+namespace+":"+name {
+				return true
+			}
+		case "Group":
+			switch subject.Name {
+			case "system:serviceaccounts", "system:serviceaccounts:" + namespace, "system:authenticated":
+				return true
+			}
 		}
 	}
 	return false
 }
 
 func workerBindingHasOnlySubject(binding workerRBACDocument, name, namespace string) bool {
-	return len(binding.Subjects) == 1 && workerBindingHasSubject(binding, name, namespace)
+	return len(binding.Subjects) == 1 && binding.Subjects[0].Kind == "ServiceAccount" &&
+		workerBindingHasSubject(binding, name, namespace)
 }
 
 func TestWorkerRoleRejectsAggregatedPermissions(t *testing.T) {
@@ -144,6 +157,74 @@ func TestWorkerBindingMatchesImplicitSubjectNamespace(t *testing.T) {
 	binding.Metadata.Namespace = "orka-test"
 	if workerBindingHasSubject(binding, "test-orka-ai-worker", "orka-test") {
 		t.Fatal("ClusterRoleBinding subject without namespace must not match")
+	}
+}
+
+func TestWorkerBindingMatchesUserAndGroupSubjects(t *testing.T) {
+	const (
+		name      = "test-orka-ai-worker"
+		namespace = "orka-test"
+	)
+	for _, kind := range []string{"RoleBinding", "ClusterRoleBinding"} {
+		t.Run(kind, func(t *testing.T) {
+			for _, tc := range []struct {
+				name    string
+				subject rbacv1.Subject
+				matches bool
+			}{
+				{
+					name:    "worker username",
+					subject: rbacv1.Subject{Kind: "User", Name: "system:serviceaccount:orka-test:test-orka-ai-worker"},
+					matches: true,
+				},
+				{
+					name:    "other worker username",
+					subject: rbacv1.Subject{Kind: "User", Name: "system:serviceaccount:orka-test:other-worker"},
+				},
+				{
+					name:    "other namespace username",
+					subject: rbacv1.Subject{Kind: "User", Name: "system:serviceaccount:other:test-orka-ai-worker"},
+				},
+				{
+					name:    "namespace service accounts",
+					subject: rbacv1.Subject{Kind: "Group", Name: "system:serviceaccounts:orka-test"},
+					matches: true,
+				},
+				{
+					name:    "other namespace service accounts",
+					subject: rbacv1.Subject{Kind: "Group", Name: "system:serviceaccounts:other"},
+				},
+				{
+					name:    "all service accounts",
+					subject: rbacv1.Subject{Kind: "Group", Name: "system:serviceaccounts"},
+					matches: true,
+				},
+				{
+					name:    "authenticated users",
+					subject: rbacv1.Subject{Kind: "Group", Name: "system:authenticated"},
+					matches: true,
+				},
+				{
+					name:    "unauthenticated users",
+					subject: rbacv1.Subject{Kind: "Group", Name: "system:unauthenticated"},
+				},
+				{
+					name:    "unrelated group",
+					subject: rbacv1.Subject{Kind: "Group", Name: "developers"},
+				},
+			} {
+				t.Run(tc.name, func(t *testing.T) {
+					binding := workerRBACDocument{Kind: kind, Subjects: []rbacv1.Subject{tc.subject}}
+					binding.Metadata.Namespace = namespace
+					if got := workerBindingHasSubject(binding, name, namespace); got != tc.matches {
+						t.Errorf("workerBindingHasSubject() = %t, want %t", got, tc.matches)
+					}
+					if workerBindingHasOnlySubject(binding, name, namespace) {
+						t.Error("the intended worker binding must use a literal ServiceAccount subject")
+					}
+				})
+			}
+		})
 	}
 }
 
