@@ -112,6 +112,10 @@ type ToolExecutor struct {
 	authSecretValues            map[string]string
 	requester                   *corev1alpha1.RequestedBy
 	frozenConnections           map[string]outboundaccess.FrozenConnection
+	checkedPolicies             map[string]outboundaccess.PolicyIdentity
+	// sendGate, when set, is judged after every lookup and credential
+	// resolution and immediately before the request leaves the process.
+	sendGate func(context.Context) error
 
 	ttsMu        sync.Mutex
 	ttsClient    *contexttoken.TTSClient
@@ -145,6 +149,38 @@ func (e *ToolExecutor) SetFrozenConnections(frozen map[string]outboundaccess.Fro
 	}
 	e.frozenConnections = make(map[string]outboundaccess.FrozenConnection, len(frozen))
 	maps.Copy(e.frozenConnections, frozen)
+}
+
+// SetSendGate installs a check run immediately before the tool request is
+// sent, after policy reads and credential resolution (which can refresh a
+// token and take a while). A failing gate sends nothing; its error is
+// returned unmarked, so the caller can tell nothing was attempted.
+func (e *ToolExecutor) SetSendGate(gate func(context.Context) error) {
+	if e == nil {
+		return
+	}
+	e.sendGate = gate
+}
+
+// SetCheckedPolicy records the OutboundAccessPolicy object the caller
+// validated before execution. Resolution of that policy name then refuses
+// any other policy object or generation.
+func (e *ToolExecutor) SetCheckedPolicy(name string, identity outboundaccess.PolicyIdentity) {
+	if e == nil || strings.TrimSpace(name) == "" {
+		return
+	}
+	if e.checkedPolicies == nil {
+		e.checkedPolicies = map[string]outboundaccess.PolicyIdentity{}
+	}
+	e.checkedPolicies[name] = identity
+}
+
+func (e *ToolExecutor) checkedPolicy(name string) *outboundaccess.PolicyIdentity {
+	identity, ok := e.checkedPolicies[name]
+	if !ok {
+		return nil
+	}
+	return &identity
 }
 
 // Requester returns a copy of the bound requester identity, or nil.
@@ -414,6 +450,12 @@ func (e *ToolExecutor) executePreparedToolRequest(ctx context.Context, prepared 
 		}
 		httpClient, err = directCredentialHTTPClient(httpClient, dialContext)
 		if err != nil {
+			return "", err
+		}
+	}
+
+	if e.sendGate != nil {
+		if err := e.sendGate(ctx); err != nil {
 			return "", err
 		}
 	}
@@ -947,6 +989,7 @@ func (e *ToolExecutor) applyOutboundAccessPolicy(ctx context.Context, tool *core
 		CredentialSecret:            e.credentialSecret,
 		Requester:                   e.requester,
 		FrozenConnections:           e.frozenConnections,
+		CheckedPolicy:               e.checkedPolicy(ref.Name),
 		Tool: outboundaccess.ToolBinding{
 			Name: tool.Name, URL: strings.TrimSpace(tool.Spec.HTTP.URL), Method: prepared.request.Method, Class: tool.Spec.BrokeredToolClass,
 			Headers: tool.Spec.HTTP.Headers, Parameters: tool.Spec.Parameters,

@@ -321,6 +321,13 @@ func (r *TaskReconciler) resolveAgentExecutionCandidateWithWorkspaceSessionUID(
 	if err != nil {
 		return nil, err
 	}
+	// Connector-backed tool visibility and approval defaults depend on the
+	// requester's links; apply them to copies so the plan, the MCP policy,
+	// and the frozen snapshot all describe the same effective policy.
+	task, agent, connectorClassification, err := adjustInputsForConnectorTools(ctx, reader, r.MCPRegistry, task, agent)
+	if err != nil {
+		return nil, err
+	}
 	plan, err := PlanACPRuntimeWithConfiguration(task, withEffectiveBuiltInContract(agent, r.Mode), r.ACPRuntimeImages, configuration)
 	if err != nil {
 		return nil, permanentACPAgentConfiguration(err)
@@ -398,9 +405,14 @@ func (r *TaskReconciler) resolveAgentExecutionCandidateWithWorkspaceSessionUID(
 	if err != nil {
 		return nil, fmt.Errorf("resolve frozen ACP MCP configuration: %w", err)
 	}
-	frozenConnections, err := freezeRequesterConnections(ctx, reader, task, mcpConfiguration)
+	frozenConnections, frozenClassification, frozenTools, err := freezeRequesterConnectionsClassified(ctx, reader, r.MCPRegistry, task, mcpConfiguration)
 	if err != nil {
 		return nil, fmt.Errorf("freeze requester connections: %w", err)
+	}
+	// Visibility and approvals were decided from the first classification;
+	// the snapshot must not bind a tool that read differently since.
+	if err := connectorClassificationUnchanged(connectorClassification, frozenClassification, frozenTools); err != nil {
+		return nil, err
 	}
 
 	namespace := &corev1.Namespace{}
@@ -559,7 +571,7 @@ func (r *TaskReconciler) resolveExternalAgentExecutionCandidate(
 		registry = tools.DefaultRegistry
 	}
 	candidates := brokeredCustomCandidates(connectorCandidateTools(task, agent, runtimeDisallowed), profile.ProviderKind, registry)
-	if connectorTools, err := connectorToolsFor(ctx, reader, task.Namespace, candidates); err != nil {
+	if connectorTools, err := classifyConnectorTools(ctx, reader, r.MCPRegistry, task.Namespace, candidates, true); err != nil {
 		return nil, err
 	} else if len(connectorTools) > 0 {
 		return nil, permanentACPAgentConfiguration(errors.New("connector-backed tools are not supported on external v2 AgentRuntimes"))
