@@ -174,7 +174,7 @@ func (r *HTTPEventRecorder) record(ctx context.Context, typ string, retry bool, 
 	}
 
 	if !retry {
-		err, _ := r.postEventAttempt(ctx, body)
+		_, err := r.postEventAttempt(ctx, body)
 		return err
 	}
 	return r.postEvent(ctx, body)

@@ -21,12 +21,6 @@ import (
 	"github.com/orka-agents/orka/internal/events"
 )
 
-type eventRetryTransport func(*http.Request) (*http.Response, error)
-
-func (f eventRetryTransport) RoundTrip(req *http.Request) (*http.Response, error) {
-	return f(req)
-}
-
 func refusedEventDial() error {
 	return &net.OpError{Op: "dial", Net: "tcp", Err: syscall.ECONNREFUSED}
 }
@@ -61,7 +55,7 @@ func TestEventPOSTRetryExhaustsSixAttempts(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		var starts []time.Time
 		var bodies []string
-		recorder := retryTestRecorder(t, eventRetryTransport(func(req *http.Request) (*http.Response, error) {
+		recorder := retryTestRecorder(t, roundTripFunc(func(req *http.Request) (*http.Response, error) {
 			starts = append(starts, time.Now())
 			body, err := io.ReadAll(req.Body)
 			if err != nil {
@@ -94,7 +88,7 @@ func TestEventPOSTRetryExhaustsSixAttempts(t *testing.T) {
 func TestEventPOSTRetryStopsAtOverallCap(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		attempts := 0
-		recorder := retryTestRecorder(t, eventRetryTransport(func(req *http.Request) (*http.Response, error) {
+		recorder := retryTestRecorder(t, roundTripFunc(func(req *http.Request) (*http.Response, error) {
 			attempts++
 			<-req.Context().Done()
 			return nil, &net.OpError{Op: "dial", Net: "tcp", Err: req.Context().Err()}
@@ -121,7 +115,7 @@ func TestEventPOSTRetryRecoversDNSAndProxyDialFailures(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
 				attempts := 0
-				recorder := retryTestRecorder(t, eventRetryTransport(func(req *http.Request) (*http.Response, error) {
+				recorder := retryTestRecorder(t, roundTripFunc(func(req *http.Request) (*http.Response, error) {
 					attempts++
 					if attempts == 1 {
 						return nil, failure
@@ -143,7 +137,7 @@ func TestEventPOSTRetryCapsPerRequestTimeout(t *testing.T) {
 		recorder := NewHTTPEventRecorder(HTTPEventRecorderConfig{
 			ControllerURL: "http://controller.test", Namespace: "default", TaskName: "task-1",
 			BearerPath: writeTestSAToken(t, "fixture"), Timeout: 10 * time.Second,
-			Client: &http.Client{Transport: eventRetryTransport(func(req *http.Request) (*http.Response, error) {
+			Client: &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
 				attempts++
 				<-req.Context().Done()
 				return nil, req.Context().Err() // No evidence this was pre-delivery.
@@ -162,7 +156,7 @@ func TestEventPOSTRetryHonorsCallerDeadline(t *testing.T) {
 		ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
 		defer cancel()
 		attempts := 0
-		recorder := retryTestRecorder(t, eventRetryTransport(func(*http.Request) (*http.Response, error) {
+		recorder := retryTestRecorder(t, roundTripFunc(func(*http.Request) (*http.Response, error) {
 			attempts++
 			return nil, refusedEventDial()
 		}))
@@ -186,7 +180,7 @@ func TestEventPOSTRetryRejectsDialValidationErrors(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
 				attempts := 0
-				recorder := retryTestRecorder(t, eventRetryTransport(func(*http.Request) (*http.Response, error) {
+				recorder := retryTestRecorder(t, roundTripFunc(func(*http.Request) (*http.Response, error) {
 					attempts++
 					return nil, &net.OpError{Op: "dial", Net: "tcp", Err: cause}
 				}))
@@ -201,7 +195,7 @@ func TestEventPOSTRetryRejectsDialValidationErrors(t *testing.T) {
 
 func TestEventPOSTRetryAcquiredConnectionIsNotReplayable(t *testing.T) {
 	attempts := 0
-	recorder := retryTestRecorder(t, eventRetryTransport(func(req *http.Request) (*http.Response, error) {
+	recorder := retryTestRecorder(t, roundTripFunc(func(req *http.Request) (*http.Response, error) {
 		attempts++
 		if trace := httptrace.ContextClientTrace(req.Context()); trace != nil && trace.GotConn != nil {
 			trace.GotConn(httptrace.GotConnInfo{})
@@ -249,7 +243,7 @@ func TestEventPOSTRetryCancellationInterruptsBackoff(t *testing.T) {
 		ctx, cancel := context.WithCancel(t.Context())
 		defer cancel()
 		attempts := 0
-		recorder := retryTestRecorder(t, eventRetryTransport(func(*http.Request) (*http.Response, error) {
+		recorder := retryTestRecorder(t, roundTripFunc(func(*http.Request) (*http.Response, error) {
 			attempts++
 			return nil, refusedEventDial()
 		}))
@@ -429,7 +423,7 @@ func TestEventPOSTRetryDoesNotReplayHTTP2DeliveredRequest(t *testing.T) {
 func TestEventPOSTRetryDoesNotReplayRedirectedPOST(t *testing.T) {
 	var delivered atomic.Int32
 	attempts := 0
-	transport := eventRetryTransport(func(req *http.Request) (*http.Response, error) {
+	transport := roundTripFunc(func(req *http.Request) (*http.Response, error) {
 		attempts++
 		if req.Method != http.MethodPost {
 			return nil, refusedEventDial()

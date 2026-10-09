@@ -31,7 +31,7 @@ func (r *HTTPEventRecorder) postEvent(ctx context.Context, body []byte) error {
 		if err := ctx.Err(); err != nil {
 			return fmt.Errorf("record execution event: %w", err)
 		}
-		err, retryable := r.postEventAttempt(ctx, body)
+		retryable, err := r.postEventAttempt(ctx, body)
 		if err == nil || !retryable || attempt+1 == eventPOSTMaxAttempts {
 			return err
 		}
@@ -48,7 +48,7 @@ func (r *HTTPEventRecorder) postEvent(ctx context.Context, body []byte) error {
 	}
 }
 
-func (r *HTTPEventRecorder) postEventAttempt(ctx context.Context, body []byte) (error, bool) {
+func (r *HTTPEventRecorder) postEventAttempt(ctx context.Context, body []byte) (bool, error) {
 	requestCtx, cancel := context.WithTimeout(ctx, min(r.timeout, defaultEventRecorderTimeout))
 	defer cancel()
 
@@ -76,7 +76,7 @@ func (r *HTTPEventRecorder) postEventAttempt(ctx context.Context, body []byte) (
 		httptrace.WithClientTrace(requestCtx, trace), http.MethodPost, r.endpoint, bytes.NewReader(body),
 	)
 	if err != nil {
-		return fmt.Errorf("create execution event request: %w", err), false
+		return false, fmt.Errorf("create execution event request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 	if token := readServiceAccountToken(r.bearerPath); token != "" {
@@ -102,16 +102,16 @@ func (r *HTTPEventRecorder) postEventAttempt(ctx context.Context, body []byte) (
 				}
 			}
 		}
-		return fmt.Errorf("record execution event: %w", err), retryable
+		return retryable, fmt.Errorf("record execution event: %w", err)
 	}
 	defer resp.Body.Close() //nolint:errcheck
 	bodyPreview, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 	_, _ = io.CopyN(io.Discard, resp.Body, 64<<10)
 	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
-		return fmt.Errorf("controller rejected execution event: HTTP %d: %s",
-			resp.StatusCode, strings.TrimSpace(string(bodyPreview))), false
+		return false, fmt.Errorf("controller rejected execution event: HTTP %d: %s",
+			resp.StatusCode, strings.TrimSpace(string(bodyPreview)))
 	}
-	return nil, false
+	return false, nil
 }
 
 func preDeliveryDialError(err error) bool {
