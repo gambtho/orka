@@ -42,6 +42,21 @@ func retryTestRecorder(t *testing.T, transport http.RoundTripper) EventRecorder 
 	})
 }
 
+func TestEventPOSTBestEffortDoesNotRetryRefusedConnection(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		attempts := 0
+		recorder := retryTestRecorder(t, roundTripFunc(func(*http.Request) (*http.Response, error) {
+			attempts++
+			return nil, refusedEventDial()
+		}))
+		start := time.Now()
+		recorder.Record(t.Context(), events.ExecutionEventTypeWorkerStarted)
+		if attempts != 1 || time.Since(start) != 0 {
+			t.Fatalf("attempts=%d elapsed=%v, want one attempt without backoff", attempts, time.Since(start))
+		}
+	})
+}
+
 func TestEventPOSTRetryExhaustsSixAttempts(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		var starts []time.Time

@@ -106,7 +106,7 @@ func NewHTTPEventRecorder(cfg HTTPEventRecorderConfig) EventRecorder {
 
 // Record implements EventRecorder. Failures are warning-only and never returned to callers.
 func (r *HTTPEventRecorder) Record(ctx context.Context, typ string, opts ...EventOption) {
-	if err := r.RecordStrict(ctx, typ, opts...); err != nil {
+	if err := r.record(ctx, typ, false, opts...); err != nil {
 		if ctx == nil {
 			ctx = context.Background()
 		}
@@ -117,6 +117,10 @@ func (r *HTTPEventRecorder) Record(ctx context.Context, typ string, opts ...Even
 // RecordStrict implements StrictEventRecorder by posting the event and returning
 // transport or non-2xx response errors.
 func (r *HTTPEventRecorder) RecordStrict(ctx context.Context, typ string, opts ...EventOption) error {
+	return r.record(ctx, typ, true, opts...)
+}
+
+func (r *HTTPEventRecorder) record(ctx context.Context, typ string, retry bool, opts ...EventOption) error {
 	if r == nil {
 		return fmt.Errorf("http execution event recorder is nil")
 	}
@@ -169,6 +173,10 @@ func (r *HTTPEventRecorder) RecordStrict(ctx context.Context, typ string, opts .
 		return fmt.Errorf("marshal execution event: %w", err)
 	}
 
+	if !retry {
+		err, _ := r.postEventAttempt(ctx, body)
+		return err
+	}
 	return r.postEvent(ctx, body)
 }
 
