@@ -15,6 +15,8 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"k8s.io/apimachinery/pkg/types"
+
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -764,6 +766,80 @@ func TestResolveRepoAndToken_LinkedAccountFirst(t *testing.T) {
 	}
 	if _, repo, _, _, err := resolveScopedReadRepoAndToken(ctx, k8sClient, "list_pull_requests", testMyTaskName, "", ""); err != nil || repo != "taskrepo" {
 		t.Fatalf("own task_name: repo=%q err=%v", repo, err)
+	}
+	// Outside a Task (chat and the proxies) only a Task this turn created
+	// for the same person may lend its repository scope to the link.
+	requester := &corev1alpha1.RequestedBy{Issuer: "https://issuer.example.test", Subject: "alice"}
+	outsideCtx := &ToolContext{Namespace: defaultNamespace, LinkedAccounts: linked, Requester: requester, CreatedTasks: NewCreatedTasks()}
+	outside := WithToolContext(context.Background(), outsideCtx)
+	if _, _, _, _, err := resolveScopedReadRepoAndToken(outside, k8sClient, "list_pull_requests", testMyTaskName, "", ""); err == nil || !strings.Contains(err.Error(), "created in this conversation") {
+		t.Fatalf("task_name outside a task err = %v", err)
+	}
+	// Naming no Task outside one is refused too: the readers that take an
+	// unscoped repo_url would otherwise point the link at any repository.
+	if _, _, _, _, err := resolveReadRepoAndToken(outside, k8sClient, "get_issue", "", "https://github.com/other/repo", ""); err == nil || !strings.Contains(err.Error(), "created in this conversation") {
+		t.Fatalf("unscoped repo_url outside a task err = %v", err)
+	}
+	// A Task this turn created in another namespace is resolved from the
+	// record (name alone is what the tool receives) and read from there.
+	elsewhere := task.DeepCopy()
+	elsewhere.Name, elsewhere.Namespace, elsewhere.UID, elsewhere.ResourceVersion = "elsewhere-task", "elsewhere", "other-uid", ""
+	elsewhere.Spec.RequestedBy = requester
+	elsewhere.Spec.Workspace.GitRepo = "https://github.com/elseorg/elserepo"
+	if err := k8sClient.Create(context.Background(), elsewhere); err != nil {
+		t.Fatal(err)
+	}
+	outsideCtx.RecordCreatedTask(elsewhere)
+	if _, repo, token, _, err := resolveScopedReadRepoAndToken(outside, k8sClient, "list_pull_requests", "elsewhere-task", "", ""); err != nil || repo != "elserepo" || token != "linked-token" {
+		t.Fatalf("other-namespace created task: repo=%q token=%q err=%v", repo, token, err)
+	}
+	// A workspace edited after creation no longer scopes the linked token.
+	drifted := &corev1alpha1.Task{}
+	if err := k8sClient.Get(context.Background(), types.NamespacedName{Name: "elsewhere-task", Namespace: "elsewhere"}, drifted); err != nil {
+		t.Fatal(err)
+	}
+	drifted.Spec.Workspace.GitRepo = "https://github.com/victim/repo"
+	if err := k8sClient.Update(context.Background(), drifted); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, _, _, err := resolveScopedReadRepoAndToken(outside, k8sClient, "list_pull_requests", "elsewhere-task", "", ""); err == nil || !strings.Contains(err.Error(), "workspace changed") {
+		t.Fatalf("drifted workspace err = %v", err)
+	}
+	drifted.Spec.Workspace.GitRepo = "https://github.com/elseorg/elserepo"
+	if err := k8sClient.Update(context.Background(), drifted); err != nil {
+		t.Fatal(err)
+	}
+	// The same name recorded in two namespaces is ambiguous and refused.
+	twin := elsewhere.DeepCopy()
+	twin.Namespace, twin.UID = "third", "third-uid"
+	outsideCtx.RecordCreatedTask(twin)
+	if _, _, _, _, err := resolveScopedReadRepoAndToken(outside, k8sClient, "list_pull_requests", "elsewhere-task", "", ""); err == nil || !strings.Contains(err.Error(), "created in this conversation") {
+		t.Fatalf("ambiguous created task err = %v", err)
+	}
+	// A recorded identity that no longer matches the live object is refused.
+	replaced := task.DeepCopy()
+	replaced.UID = "replaced-uid"
+	outsideCtx.RecordCreatedTask(replaced)
+	if _, _, _, _, err := resolveScopedReadRepoAndToken(outside, k8sClient, "list_pull_requests", testMyTaskName, "", ""); err == nil || !strings.Contains(err.Error(), "identity changed") {
+		t.Fatalf("replaced task err = %v", err)
+	}
+	// A Task created this turn but stamped for somebody else (or nobody) is refused.
+	outsideCtx.RecordCreatedTask(task)
+	if _, _, _, _, err := resolveScopedReadRepoAndToken(outside, k8sClient, "list_pull_requests", testMyTaskName, "", ""); err == nil || !strings.Contains(err.Error(), "not requested by the person") {
+		t.Fatalf("unstamped created task err = %v", err)
+	}
+	stamped := task.DeepCopy()
+	stamped.Spec.RequestedBy = requester
+	if err := k8sClient.Update(context.Background(), stamped); err != nil {
+		t.Fatal(err)
+	}
+	if _, repo, token, _, err := resolveScopedReadRepoAndToken(outside, k8sClient, "list_pull_requests", testMyTaskName, "", ""); err != nil || repo != "taskrepo" || token != "linked-token" {
+		t.Fatalf("created task scope: repo=%q token=%q err=%v", repo, token, err)
+	}
+	// No record set at all (a context the API did not build) never accepts one.
+	bare := WithToolContext(context.Background(), &ToolContext{Namespace: defaultNamespace, LinkedAccounts: linked, Requester: requester})
+	if _, _, _, _, err := resolveScopedReadRepoAndToken(bare, k8sClient, "list_pull_requests", testMyTaskName, "", ""); err == nil || !strings.Contains(err.Error(), "created in this conversation") {
+		t.Fatalf("bare context err = %v", err)
 	}
 }
 

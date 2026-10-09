@@ -162,7 +162,41 @@ The full example, with an Agent that uses these tools, is in
 
 ## 3. Link an account
 
-Each person links once. Signed in as themselves:
+Each person links once, signed in as themselves (an OIDC or context-token
+identity; a ServiceAccount token has no accounts to link). Three ways:
+
+**Dashboard.** Open **Settings › Connectors** (`/settings/connectors`). Every
+provider shows its read and write tools and whether you are linked. *Connect
+(read only)* or *Connect with writes* sends you to the provider's consent
+page; the callback brings you back and the page finishes the link. From the
+same page you can allow or limit writes, reconnect a link that lost its
+consent, and disconnect.
+
+**CLI.**
+
+```bash
+orka connect github --mode readWrite       # opens the consent page, waits until Ready
+orka connection list                       # your linked accounts
+orka connection get github-<digest>
+orka connection delete github-<digest>     # disconnect and delete the tokens
+orka connection providers                  # what an operator has made available
+```
+
+`orka connect` needs a personal token: your OIDC token with `--token` (or
+the token `orka config` stores), or a context token with `--txn-token` or
+`--txn-token-file` (it travels in the `Txn-Token` header; `--token` sends a
+bearer, which carries a context token only when the server opts in). It
+explains a `403`, whether from a ServiceAccount token or from a context
+token that lacks the connector scope. `--no-open` prints the consent URL instead of opening
+a browser, `--no-wait` returns as soon as consent has started. The provider
+sends the browser back to the dashboard, which finishes the link when it is
+signed in as you; when it is not, copy the value after `#completion=` from
+the address bar and run `orka connection complete <name> --namespace
+<namespace> --completion <value>` (the namespace the consent was started
+in; `orka connect` prints the exact command) so the CLI finishes it with
+your token instead.
+
+**API.**
 
 ```bash
 curl -sS -X POST "$ORKA_API_URL/api/v1/connections" \
@@ -218,6 +252,49 @@ the GitHub built-ins), the controller:
 The Task's workspace still scopes which repository the tools may touch; the
 link changes whose credential is used, not where.
 
+### Ask what is linked: `list_connections`
+
+Agents and chat have a read-only `list_connections` tool. It returns the
+signed-in person's (or the Task's verified requester's) linked accounts with
+their mode and readiness, the providers they could still link, and the
+settings path, never any token. A link whose provider was removed is still
+listed, marked `providerMissing` and never ready, until the person
+disconnects it. An agent that needs an account the person
+has not linked should say so and point them at **Settings › Connectors**
+rather than try another credential. The tool is available to chat, to the
+compatibility proxies' coordinator mode, and to ACP runtimes through the
+broker; a Task without a verified requester gets an explicit "no identity"
+result. The tool exists only while `--connectors-enabled` is set: without
+it chat, the proxies, and the broker neither offer nor run it. Under
+enforced context-token authorization it follows the same boundary as the
+connector routes: a delegated token without the connector-read scope
+(`orka:connectors:read` by default) is not offered the tool and is refused
+if it calls it anyway, and a Task created by such a token is refused the
+same way through the broker.
+
+### Chat and the compatibility proxies
+
+The GitHub read tools the compatibility proxies offer in coordinator mode
+(for example `check_pull_request_ci`) run as the signed-in person when they
+hold a Ready link to a provider that declares the tool (the dashboard chat
+offers no GitHub tools, only `list_connections`):
+the Connection is read live at call time, since there is no dispatch to
+freeze it. These surfaces execute tools directly, with no approval gate,
+so a linked write tool such as `create_pull_request` is refused there once
+the person has a link; linked writes run only from a Task, where the write
+waits for approval. A linked call may name a Task in `task_name` only
+when this conversation's tools created that Task for the same person
+(the API stamps it with their identity), so the person's token is scoped
+by a repository they chose themselves; any other `task_name` is refused,
+because there is no current Task whose repository scope could bound it.
+Without a link those tools keep the Task-Secret path they always had; a
+link that exists but cannot be used (pending, expired, revoked, or being
+deleted) fails the call rather than falling back. Under enforced
+context-token authorization, a delegated token without the connector-read
+scope (`orka:connectors:read` by default) uses no linked account on these
+surfaces: its tools keep the Task-Secret path, as for a person with no
+link. Audit mode uses the link and records the missing scope.
+
 ### What runs where
 
 | Path | GitHub credential |
@@ -254,6 +331,13 @@ additive.
 - **`Ready=False` with `ConsentRequired`**: the provider or the mode now
   needs scopes the last consent did not grant. `POST
   /api/v1/connections/<name>/authorize` starts consent again.
+- **A link in state `Ready` is reported as not ready** (the dashboard shows
+  *Reconnect needed*): the provider's client, endpoints, tools, or required
+  scopes changed since the person consented, and credential resolution
+  refuses the old grant before the Connection's conditions catch up.
+  Reconnect the link. *Duplicate links* means the person holds more than one
+  link to the provider; every one is unusable until the extras are
+  disconnected.
 - **The agent does not see the GitHub tools**: check that the Task was
   created through the API by a signed-in person, that the Connection is
   `Ready`, and that the Agent's allowed tools include them. Write tools also

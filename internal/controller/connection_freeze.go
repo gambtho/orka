@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -663,14 +664,43 @@ func requesterConnection(ctx context.Context, reader client.Reader, task *corev1
 	if !verified {
 		return nil, nil
 	}
-	connection := &corev1alpha1.Connection{}
-	name := connectors.ConnectionName(provider, requester.Issuer, requester.Subject)
-	if err := reader.Get(ctx, client.ObjectKey{Namespace: task.Namespace, Name: name}, connection); err != nil {
-		if apierrors.IsNotFound(err) {
-			return nil, nil
+	// The person's links to provider under any name: the API creates the
+	// canonical name, but the reconciler adopts Connections created outside
+	// it. Exactly one link binds; several are ambiguous and bind nothing,
+	// as the live resolver and list_connections also refuse them.
+	owned, err := connectors.ListSubjectConnectionsAuthoritative(ctx, reader, task.Namespace, requester)
+	if err != nil {
+		return nil, fmt.Errorf("list the requester's connections: %w", err)
+	}
+	var matching []corev1alpha1.Connection
+	for i := range owned {
+		if owned[i].Spec.ProviderRef.Name == provider {
+			matching = append(matching, owned[i])
 		}
+	}
+	// A cached listing can trail a Connection the API just created, always
+	// under the canonical name: read that name fresh so informer lag never
+	// hides it. An object there that is not the person's link is ignored
+	// rather than allowed to hide the link they do hold.
+	name := connectors.ConnectionName(provider, requester.Issuer, requester.Subject)
+	fresh := &corev1alpha1.Connection{}
+	switch err := reader.Get(ctx, client.ObjectKey{Namespace: task.Namespace, Name: name}, fresh); {
+	case err == nil:
+		if fresh.Spec.Subject.Issuer == requester.Issuer && fresh.Spec.Subject.Subject == requester.Subject && fresh.Spec.ProviderRef.Name == provider {
+			listed := slices.IndexFunc(matching, func(c corev1alpha1.Connection) bool { return c.Name == name })
+			if listed < 0 {
+				matching = append(matching, *fresh)
+			} else {
+				matching[listed] = *fresh
+			}
+		}
+	case !apierrors.IsNotFound(err):
 		return nil, fmt.Errorf("load connection %q: %w", name, err)
 	}
+	if len(matching) != 1 {
+		return nil, nil
+	}
+	connection := &matching[0]
 	if !connectionReadyFor(connection, requester, provider) {
 		return nil, nil
 	}
@@ -1144,7 +1174,7 @@ func FrozenConnectionsFromTaskStatus(task *corev1alpha1.Task) map[string]outboun
 		// The provider travels with the binding, so a policy retargeted to
 		// another provider after dispatch is refused on this path too.
 		frozen[binding.PolicyName] = outboundaccess.FrozenConnection{
-			UID: binding.UID, Generation: binding.Generation, GrantSequence: binding.GrantSequence, Provider: binding.Provider,
+			Name: binding.ConnectionName, UID: binding.UID, Generation: binding.Generation, GrantSequence: binding.GrantSequence, Provider: binding.Provider,
 			PolicyUID: binding.PolicyUID, PolicyGeneration: binding.PolicyGeneration,
 		}
 	}
@@ -1244,7 +1274,7 @@ func frozenConnectionsFromSnapshot(body agentExecutionSnapshotBody) map[string]o
 	frozen := make(map[string]outboundaccess.FrozenConnection, len(body.Connections))
 	for _, connection := range body.Connections {
 		frozen[connection.PolicyName] = outboundaccess.FrozenConnection{
-			UID: connection.UID, Generation: connection.Generation, GrantSequence: connection.GrantSequence,
+			Name: connection.ConnectionName, UID: connection.UID, Generation: connection.Generation, GrantSequence: connection.GrantSequence,
 			PolicyUID: connection.PolicyUID, PolicyGeneration: connection.PolicyGeneration, Provider: connection.Provider,
 		}
 	}

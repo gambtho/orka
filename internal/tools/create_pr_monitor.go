@@ -209,8 +209,8 @@ func (t *CreatePRMonitorTool) Execute(ctx context.Context, argsJSON json.RawMess
 		return classifyChatK8sErr(err)
 	}
 	sealTaskCreate(ctx, tc, task)
-
 	tc.IncrementTasks()
+	tc.RecordCreatedTask(task)
 	return ChatToolSuccess(map[string]any{
 		nameField:      task.Name,
 		"monitor_name": monitorName,

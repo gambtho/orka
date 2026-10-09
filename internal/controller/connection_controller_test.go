@@ -334,6 +334,41 @@ func TestConnectionReconcilerProviderResolution(t *testing.T) {
 	}
 }
 
+func TestConnectionReconcilerRepairsIndexLabels(t *testing.T) {
+	scheme := connectorTestScheme(t)
+	connection := testConnection("tenant", "github-alice", "github")
+	provider := acceptedConnectorProvider()
+	connection.Labels = map[string]string{"orka.ai/connection-subject": "stale"} // stripped provider label, wrong subject digest
+	connection.Spec.ProviderRef.Name = strings.Repeat("p", 80)                   // longer than a label value may be
+	provider.Name = connection.Spec.ProviderRef.Name
+	c := ctrlfake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(connection, provider).WithStatusSubresource(&corev1alpha1.Connection{}).Build()
+	reconciler := &ConnectionReconciler{Client: c, Scheme: scheme}
+	key := types.NamespacedName{Namespace: "tenant", Name: "github-alice"}
+	if _, err := reconciler.Reconcile(context.Background(), ctrl.Request{NamespacedName: key}); err != nil {
+		t.Fatal(err)
+	}
+	repaired := &corev1alpha1.Connection{}
+	if err := c.Get(context.Background(), key, repaired); err != nil {
+		t.Fatal(err)
+	}
+	want := connectors.ConnectionLabels(repaired)
+	for key, value := range want {
+		if repaired.Labels[key] != value {
+			t.Fatalf("label %s = %q, want %q (labels %v)", key, repaired.Labels[key], value, repaired.Labels)
+		}
+	}
+	if value := repaired.Labels[connectors.ConnectionProviderLabel]; len(value) > 63 || !strings.HasPrefix(value, "sha256-") {
+		t.Fatalf("a long provider name must be label-encoded, got %q", value)
+	}
+	// The repaired object is now found by a label-indexed listing.
+	owned := &corev1alpha1.ConnectionList{}
+	if err := c.List(context.Background(), owned, ctrlclient.InNamespace("tenant"), ctrlclient.MatchingLabels{
+		connectors.ConnectionSubjectLabel: connectors.ConnectionSubjectLabelValue(repaired.Spec.Subject.Issuer, repaired.Spec.Subject.Subject),
+	}); err != nil || len(owned.Items) != 1 {
+		t.Fatalf("owned = %d err = %v", len(owned.Items), err)
+	}
+}
+
 func TestConnectionReconcilerSteadyStateAndErrors(t *testing.T) {
 	scheme := connectorTestScheme(t)
 	connection := testConnection("tenant", "github-alice", "github")

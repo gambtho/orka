@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -122,6 +123,10 @@ type RegistryACPMCPToolExecutor struct {
 	// authenticated Task's transaction authority; this flag gates only its
 	// Secret-credential authorization.
 	EnforceTransactionCredentialAuth bool
+	// ConnectorReadScopes lists the transaction scopes that let a Task
+	// created by a delegated context token describe its requester's linked
+	// accounts (list_connections), matching the API's connector routes.
+	ConnectorReadScopes []string
 	// TransactionCredentialReadScopes lists the transaction scopes that
 	// authorize Secret-backed outbound credentials, matching the scopes the
 	// controller stamps into worker Jobs.
@@ -155,7 +160,7 @@ func (e RegistryACPMCPToolExecutor) ConnectionDigest(ctx context.Context, reques
 		if _, linked := connectors.BuiltinConnectorToolClass(descriptor.Name); !linked {
 			return "", nil
 		}
-		_, frozen, err := e.taskConnectionAuthority(ctx, request)
+		_, frozen, _, err := e.taskConnectionAuthority(ctx, request)
 		if err != nil {
 			return "", err
 		}
@@ -202,36 +207,75 @@ func (e RegistryACPMCPToolExecutor) ConnectionDigest(ctx context.Context, reques
 // taskFrozenConnections loads the frozen Connection bindings of the
 // authenticated ACP Task behind request.
 func (e RegistryACPMCPToolExecutor) taskFrozenConnections(ctx context.Context, request harnessv2.MCPBrokerCallRequest) (map[string]outboundaccess.FrozenConnection, error) {
-	_, frozen, err := e.taskConnectionAuthority(ctx, request)
+	_, frozen, _, err := e.taskConnectionAuthority(ctx, request)
 	return frozen, err
+}
+
+// brokerConnectorReadAuthorizer applies the connector-read scope boundary
+// to a Task created by a delegated context token: under enforcement, a
+// transaction whose scopes lack every connector-read scope may not list
+// the requester's linked accounts. A Task without a transaction (a person
+// or ServiceAccount created it directly) is not narrowed.
+func brokerConnectorReadAuthorizer(transaction *corev1alpha1.TaskTransaction, readScopes []string, enforce bool) func() *tools.ChatToolError {
+	if !enforce || transaction == nil || len(readScopes) == 0 {
+		return nil
+	}
+	// Scopes falls back to the legacy space-separated Scope, as the
+	// transaction-authority binder reads it.
+	scopes := transaction.Scopes
+	if len(scopes) == 0 {
+		scopes = strings.Fields(transaction.Scope)
+	}
+	for _, scope := range scopes {
+		if slices.Contains(readScopes, scope) {
+			return nil
+		}
+	}
+	return func() *tools.ChatToolError {
+		return &tools.ChatToolError{
+			Type:       "unauthorized_tool",
+			Message:    fmt.Sprintf("the task's transaction lacks one of the scopes %q needed to read linked accounts", strings.Join(readScopes, ",")),
+			Suggestion: "Create the task with a token that carries the connector-read scope",
+		}
+	}
 }
 
 // taskConnectionAuthority loads the authenticated ACP Task behind request
 // and returns its requester together with the Connection bindings frozen
 // into its execution snapshot.
-func (e RegistryACPMCPToolExecutor) taskConnectionAuthority(ctx context.Context, request harnessv2.MCPBrokerCallRequest) (*corev1alpha1.RequestedBy, map[string]outboundaccess.FrozenConnection, error) {
+func (e RegistryACPMCPToolExecutor) taskConnectionAuthority(ctx context.Context, request harnessv2.MCPBrokerCallRequest) (*corev1alpha1.RequestedBy, map[string]outboundaccess.FrozenConnection, *corev1alpha1.TaskTransaction, error) {
 	if e.AgentExecutionSnapshots == nil {
-		return nil, nil, errors.New("connector digest resolution requires execution snapshots")
+		return nil, nil, nil, errors.New("connector digest resolution requires execution snapshots")
 	}
 	if e.Reader == nil {
-		return nil, nil, errors.New("connector binding resolution requires a reader")
+		return nil, nil, nil, errors.New("connector binding resolution requires a reader")
 	}
 	authenticated, ok := ACPMCPAuthenticatedTaskFromContext(ctx)
 	if !ok || authenticated.Namespace != request.Namespace || authenticated.UID != string(request.Metadata.TaskUID) {
-		return nil, nil, errors.New("authenticated ACP MCP task authority is unavailable")
+		return nil, nil, nil, errors.New("authenticated ACP MCP task authority is unavailable")
 	}
 	task := &corev1alpha1.Task{}
 	if err := e.Reader.Get(ctx, client.ObjectKey{Namespace: authenticated.Namespace, Name: authenticated.Name}, task); err != nil {
-		return nil, nil, fmt.Errorf("load authenticated task for connector digest: %w", err)
+		return nil, nil, nil, fmt.Errorf("load authenticated task for connector digest: %w", err)
 	}
 	if string(task.UID) != authenticated.UID {
-		return nil, nil, errors.New("authenticated ACP MCP task identity changed")
+		return nil, nil, nil, errors.New("authenticated ACP MCP task identity changed")
 	}
 	executor := workerexecutor.NewToolExecutorForNamespace(request.Namespace, nil, nil)
 	if err := bindFrozenConnections(ctx, e.AgentExecutionSnapshots, task, executor); err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
-	return executor.Requester(), executor.FrozenConnections(), nil
+	// Only a requester the controller key sealed for this Task is handed
+	// to tools; an unverified spec.requestedBy is nobody.
+	verified, err := requesterProvenanceVerified(ctx, e.Reader, task)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	var requester *corev1alpha1.RequestedBy
+	if verified {
+		requester = task.Spec.RequestedBy.DeepCopy()
+	}
+	return requester, executor.FrozenConnections(), task.Spec.Transaction.DeepCopy(), nil
 }
 
 // refuseConnectorClassificationDrift returns an error when the named Tool's
@@ -357,6 +401,9 @@ func (e RegistryACPMCPToolExecutor) prepareACPMCPTool(
 			return nil, fmt.Errorf("MCP tool %q is not registered", descriptor.Name)
 		}
 		_, linkedBuiltin := connectors.BuiltinConnectorToolClass(descriptor.Name)
+		// Tools that act for or describe the person need the Task's verified
+		// requester; the catalog built-ins also need the frozen binding.
+		needsRequester := linkedBuiltin || descriptor.Name == tools.ListConnectionsToolName
 		var toolContext *tools.ToolContext
 		if e.ContextFactory != nil {
 			var contextErr error
@@ -378,22 +425,29 @@ func (e RegistryACPMCPToolExecutor) prepareACPMCPTool(
 				// read here, before the call, so a snapshot that cannot be
 				// loaded is a preparation failure and never a silent run
 				// on the Task's own credentials.
-				if linkedBuiltin {
-					requester, frozen, err := e.taskConnectionAuthority(ctx, request)
+				if needsRequester {
+					requester, frozen, transaction, err := e.taskConnectionAuthority(ctx, request)
 					if err != nil {
 						return nil, err
 					}
-					// The linked token is scoped by the current Task's
-					// workspace, so the Task is the authenticated one, never
-					// whatever name (or none) the factory supplied: without
-					// it no Task scope would be checked at all.
-					authenticated, _ := ACPMCPAuthenticatedTaskFromContext(ctx)
-					if copy.TaskID != "" && copy.TaskID != authenticated.Name {
-						return nil, fmt.Errorf("built-in tool %q: the tool context names task %q, not the authenticated task", descriptor.Name, copy.TaskID)
+					copy.Requester = requester
+					if descriptor.Name == tools.ListConnectionsToolName {
+						copy.AuthorizeConnectorRead = brokerConnectorReadAuthorizer(transaction, e.ConnectorReadScopes, e.EnforceTransactionCredentialAuth)
 					}
-					copy.TaskID = authenticated.Name
-					copy.LinkedAccounts = linkedBuiltinAccounts{
-						source: e.Connections, namespace: request.Namespace, requester: requester, frozen: frozen, required: true,
+					if linkedBuiltin {
+						// The linked token is scoped by the current Task's
+						// workspace, so the Task is the authenticated one,
+						// never whatever name (or none) the factory
+						// supplied: without it no Task scope would be
+						// checked at all.
+						authenticated, _ := ACPMCPAuthenticatedTaskFromContext(ctx)
+						if copy.TaskID != "" && copy.TaskID != authenticated.Name {
+							return nil, fmt.Errorf("built-in tool %q: the tool context names task %q, not the authenticated task", descriptor.Name, copy.TaskID)
+						}
+						copy.TaskID = authenticated.Name
+						copy.LinkedAccounts = linkedBuiltinAccounts{
+							source: e.Connections, namespace: request.Namespace, requester: requester, frozen: frozen, required: true,
+						}
 					}
 				}
 				toolContext = &copy
@@ -547,6 +601,9 @@ func (e RegistryACPMCPToolExecutor) bindTaskTransactionAuthority(
 }
 
 type ACPMCPBrokerDependencies struct {
+	// ConnectorReadScopes mirrors the API's connector-read scope list for
+	// list_connections on Tasks created by delegated context tokens.
+	ConnectorReadScopes     []string
 	Reader                  client.Reader
 	Epochs                  *ControllerEpochManager
 	ControlStore            store.DurableControlStore
@@ -594,6 +651,7 @@ func NewProductionACPMCPBroker(dependencies ACPMCPBrokerDependencies) (*ACPMCPBr
 			HTTPClient: dependencies.HTTPClient, OutboundAccess: dependencies.OutboundAccess,
 			TransactionExchange: dependencies.TransactionExchange, ContextFactory: dependencies.ContextFactory,
 			Connections:                      dependencies.Connections,
+			ConnectorReadScopes:              append([]string(nil), dependencies.ConnectorReadScopes...),
 			EnforceTransactionCredentialAuth: dependencies.EnforceTransactionCredentialAuth,
 			TransactionCredentialReadScopes: append(
 				[]string(nil),

@@ -48,8 +48,10 @@ const (
 )
 
 type connectorTestHarness struct {
-	t        *testing.T
-	app      *fiber.App
+	t   *testing.T
+	app *fiber.App
+	// handlers lets a test replace the uncached reader to model informer lag.
+	handlers *Handlers
 	client   client.Client
 	store    *sqlite.Store
 	identity *UserInfo
@@ -266,6 +268,7 @@ func buildConnectorTestHarness(t *testing.T, authz ContextTokenAuthorizationConf
 			},
 		},
 	})
+	h.handlers = handlers
 	h.identity = &UserInfo{AuthType: AuthTypeOIDC, Username: "alice", Subject: "alice", Issuer: connectorTestIssuer, Namespace: connectorTestNamespace}
 	app := fiber.New()
 	app.Use(func(c fiber.Ctx) error {
@@ -400,7 +403,7 @@ func TestConnectionConsentFlow(t *testing.T) {
 	// The browser half: the callback parks the tokens and hands back a
 	// completion token in the fragment; nothing is committed yet.
 	location := h.callback(url.Values{"code": {"good-code"}, "state": {query.Get("state")}})
-	if !strings.HasPrefix(location, connectorCallbackBase+"/settings/connectors?") || !strings.Contains(location, "status=pending") || !strings.Contains(location, "connection="+created.Connection.Name) {
+	if !strings.HasPrefix(location, connectorCallbackBase+"/settings/connectors?") || !strings.Contains(location, "status=pending") || !strings.Contains(location, "connection="+created.Connection.Name) || !strings.Contains(location, "namespace="+created.Connection.Namespace) {
 		t.Fatalf("location = %q", location)
 	}
 	if strings.Contains(location, "gho_") || strings.Contains(location, "good-code") {
@@ -1810,6 +1813,97 @@ func TestConnectionRevocationIdentityBoundAtConsentStart(t *testing.T) {
 	}
 }
 
+// TestConnectionViewsRevalidateAgainstCurrentProvider covers the window in
+// which a provider has changed but the Connection's own conditions still
+// say Ready: the API views apply the checks credential resolution applies,
+// so the dashboard and CLI never advertise a link it would refuse.
+func TestConnectionViewsRevalidateAgainstCurrentProvider(t *testing.T) {
+	h := newConnectorTestHarness(t, acceptedTestProvider())
+	created := h.create("readOnly")
+	h.link(created)
+	name := created.Connection.Name
+	views := func() (ConnectionResponse, ConnectionResponse) {
+		t.Helper()
+		var got ConnectionResponse
+		resp, raw := h.do(http.MethodGet, "/api/v1/connections/"+name, nil)
+		if resp.StatusCode != http.StatusOK || json.Unmarshal(raw, &got) != nil {
+			t.Fatalf("get = %d %s", resp.StatusCode, raw)
+		}
+		var list struct {
+			Items []ConnectionResponse `json:"items"`
+		}
+		resp, raw = h.do(http.MethodGet, "/api/v1/connections", nil)
+		if resp.StatusCode != http.StatusOK || json.Unmarshal(raw, &list) != nil || len(list.Items) != 1 {
+			t.Fatalf("list = %d %s", resp.StatusCode, raw)
+		}
+		return got, list.Items[0]
+	}
+	if got, listed := views(); !got.Ready || !listed.Ready {
+		t.Fatalf("linked: get = %+v list = %+v, want ready", got, listed)
+	}
+	updateProvider := func(mutate func(*corev1alpha1.ConnectorProvider)) {
+		t.Helper()
+		provider := &corev1alpha1.ConnectorProvider{}
+		if err := h.client.Get(context.Background(), types.NamespacedName{Namespace: connectorTestNamespace, Name: "github"}, provider); err != nil {
+			t.Fatal(err)
+		}
+		mutate(provider)
+		if err := h.client.Update(context.Background(), provider); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// A new OAuth client: the recorded consent no longer matches.
+	updateProvider(func(p *corev1alpha1.ConnectorProvider) { p.Spec.OAuth.ClientID = "rotated-client" })
+	for _, view := range func() []ConnectionResponse { g, l := views(); return []ConnectionResponse{g, l} }() {
+		if view.Ready || view.State != corev1alpha1.ConnectionStateReady || !strings.Contains(view.Message, "changed since you consented") {
+			t.Fatalf("rotated client: view = %+v, want not ready with a relink message", view)
+		}
+	}
+
+	// The same client, but a read scope the grant lacks.
+	updateProvider(func(p *corev1alpha1.ConnectorProvider) {
+		p.Spec.OAuth.ClientID = "client-id"
+		p.Spec.OAuth.Scopes.Read = append(p.Spec.OAuth.Scopes.Read, "read:org")
+	})
+	for _, view := range func() []ConnectionResponse { g, l := views(); return []ConnectionResponse{g, l} }() {
+		if view.Ready || !strings.Contains(view.Message, "requires scopes") {
+			t.Fatalf("widened scopes: view = %+v, want not ready with a scope message", view)
+		}
+	}
+
+	// The original configuration, but no longer accepted (its references
+	// broke or its generation moved on): resolution refuses the link.
+	updateProvider(func(p *corev1alpha1.ConnectorProvider) { p.Spec.OAuth.Scopes.Read = []string{"read:user"} })
+	unaccepted := &corev1alpha1.ConnectorProvider{}
+	if err := h.client.Get(context.Background(), types.NamespacedName{Namespace: connectorTestNamespace, Name: "github"}, unaccepted); err != nil {
+		t.Fatal(err)
+	}
+	unaccepted.Status.Conditions = nil
+	if err := h.client.Status().Update(context.Background(), unaccepted); err != nil {
+		t.Fatal(err)
+	}
+	for _, view := range func() []ConnectionResponse { g, l := views(); return []ConnectionResponse{g, l} }() {
+		if view.Ready || !strings.Contains(view.Message, "not accepted") {
+			t.Fatalf("unaccepted provider: view = %+v, want not ready", view)
+		}
+	}
+
+	// The provider is deleted: the link keeps its tokens but is unusable.
+	provider := &corev1alpha1.ConnectorProvider{}
+	if err := h.client.Get(context.Background(), types.NamespacedName{Namespace: connectorTestNamespace, Name: "github"}, provider); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.client.Delete(context.Background(), provider); err != nil {
+		t.Fatal(err)
+	}
+	for _, view := range func() []ConnectionResponse { g, l := views(); return []ConnectionResponse{g, l} }() {
+		if view.Ready || !strings.Contains(view.Message, "no longer configured") {
+			t.Fatalf("deleted provider: view = %+v, want not ready", view)
+		}
+	}
+}
+
 // TestConnectionCallbackRefusesModeChangeBeforeExchange covers a mode change
 // while the person is at the provider: the callback refuses before any code
 // exchange, so no token is issued that completion would only discard.
@@ -1852,5 +1946,68 @@ func TestConnectionListIncludesUnlabeledOwnedConnections(t *testing.T) {
 	resp, raw := h.do(http.MethodGet, "/api/v1/connections", nil)
 	if resp.StatusCode != http.StatusOK || !strings.Contains(string(raw), created.Connection.Name) {
 		t.Fatalf("list = %d %s, want the unlabeled owned Connection", resp.StatusCode, raw)
+	}
+}
+
+// TestConnectionViewsReadProvidersUncached covers informer lag after a
+// provider change: the views judge the provider as the API server holds it,
+// as credential resolution does, not as the cache last saw it.
+func TestConnectionViewsReadProvidersUncached(t *testing.T) {
+	h := newConnectorTestHarness(t, acceptedTestProvider())
+	created := h.create("readOnly")
+	h.link(created)
+	current := acceptedTestProvider()
+	current.Spec.OAuth.ClientID = "rotated-client"
+	scheme := runtime.NewScheme()
+	_ = corev1alpha1.AddToScheme(scheme)
+	h.handlers.apiReader = fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(current).Build()
+	for _, path := range []string{"/api/v1/connections/" + created.Connection.Name, "/api/v1/connections"} {
+		resp, raw := h.do(http.MethodGet, path, nil)
+		if resp.StatusCode != http.StatusOK || !strings.Contains(string(raw), `"ready":false`) || !strings.Contains(string(raw), "changed since you consented") {
+			t.Fatalf("GET %s = %d %s, want the uncached provider's verdict", path, resp.StatusCode, raw)
+		}
+	}
+}
+
+// TestConnectionViewsMarkDuplicateLinksUnready covers a person holding two
+// links to one provider: resolution refuses both as ambiguous, so neither
+// view advertises a usable link.
+func TestConnectionViewsMarkDuplicateLinksUnready(t *testing.T) {
+	h := newConnectorTestHarness(t, acceptedTestProvider())
+	created := h.create("readOnly")
+	h.link(created)
+	stored := &corev1alpha1.Connection{}
+	if err := h.client.Get(context.Background(), types.NamespacedName{Namespace: connectorTestNamespace, Name: created.Connection.Name}, stored); err != nil {
+		t.Fatal(err)
+	}
+	extra := &corev1alpha1.Connection{
+		ObjectMeta: metav1.ObjectMeta{Name: "github-extra", Namespace: connectorTestNamespace},
+		Spec:       stored.Spec,
+	}
+	if err := h.client.Create(context.Background(), extra); err != nil {
+		t.Fatal(err)
+	}
+	extra.Status = stored.Status
+	if err := h.client.Status().Update(context.Background(), extra); err != nil {
+		t.Fatal(err)
+	}
+	var list struct {
+		Items []ConnectionResponse `json:"items"`
+	}
+	resp, raw := h.do(http.MethodGet, "/api/v1/connections", nil)
+	if resp.StatusCode != http.StatusOK || json.Unmarshal(raw, &list) != nil || len(list.Items) != 2 {
+		t.Fatalf("list = %d %s", resp.StatusCode, raw)
+	}
+	for _, item := range list.Items {
+		if item.Ready || !strings.Contains(item.Message, "several links") {
+			t.Fatalf("listed %s = %+v, want unready as a duplicate", item.Name, item)
+		}
+	}
+	for _, name := range []string{created.Connection.Name, extra.Name} {
+		var got ConnectionResponse
+		resp, raw := h.do(http.MethodGet, "/api/v1/connections/"+name, nil)
+		if resp.StatusCode != http.StatusOK || json.Unmarshal(raw, &got) != nil || got.Ready || !strings.Contains(got.Message, "several links") {
+			t.Fatalf("get %s = %d %s, want unready as a duplicate", name, resp.StatusCode, raw)
+		}
 	}
 }

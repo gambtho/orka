@@ -108,9 +108,15 @@ func resolveRepoAndTokenWithPolicy(
 	var linkedChild *githubTaskContext
 	if linked != "" {
 		scopeReader = linkedScopeReader(ctx, k8sClient)
-		linkedChild, err = linkedTaskScopeAllowed(ctx, scopeReader, taskName)
+		var scopeNamespace string
+		linkedChild, scopeNamespace, err = linkedTaskScopeAllowed(ctx, scopeReader, taskName)
 		if err != nil {
 			return "", "", "", "", err
+		}
+		if scopeNamespace != "" && scopeNamespace != githubTaskNamespace(ctx) {
+			// The Task this turn created lives where its creation tool was
+			// told; the scope lookup below reads it from there.
+			ctx = withGitHubTaskNamespace(ctx, scopeNamespace)
 		}
 	}
 
@@ -126,6 +132,12 @@ func resolveRepoAndTokenWithPolicy(
 	requireTaskCredentials := false
 	if tc := GetToolContext(ctx); tc != nil {
 		requireTaskCredentials = tc.RequireGitHubTaskCredentials
+	}
+	if linked != "" && scopeTaskName == "" {
+		// Outside a Task only a Task this turn created may scope the
+		// person's token; naming none would let repo_url reach any
+		// repository the person can.
+		return "", "", "", "", fmt.Errorf("task_name must name a task created in this conversation when acting through a linked account outside a task")
 	}
 	if requireTaskCredentials && scopeTaskName == "" && token == "" {
 		return "", "", "", "", fmt.Errorf("task_name or current Task context is required for external GitHub access")
@@ -266,44 +278,112 @@ func linkedScopeReader(ctx context.Context, k8sClient client.Client) client.Read
 
 // linkedTaskScopeAllowed reports whether taskName may supply the repository
 // scope for a call made through a linked account: it must be the current
-// Task or a Task the current Task controller-owns. For a child it returns
-// the scope read from the same object whose ownership it validated, so the
-// caller never reloads a name that may by then be another Task.
-func linkedTaskScopeAllowed(ctx context.Context, reader client.Reader, taskName string) (*githubTaskContext, error) {
+// Task, a Task the current Task controller-owns, or (outside a Task) a Task
+// this turn created for the same person. For a named Task it returns the
+// scope read from the same object it validated, so the caller never reloads
+// a name that may by then be another Task, and the namespace that Task lives
+// in when it differs from the call's ("" means the call's own namespace).
+func linkedTaskScopeAllowed(ctx context.Context, reader client.Reader, taskName string) (*githubTaskContext, string, error) {
 	tc := GetToolContext(ctx)
 	taskName = strings.TrimSpace(taskName)
-	if tc == nil || strings.TrimSpace(tc.TaskID) == "" || taskName == "" || taskName == strings.TrimSpace(tc.TaskID) {
-		return nil, nil
+	if taskName == "" {
+		return nil, "", nil
+	}
+	// Outside a Task (chat and the compatibility proxies) there is no
+	// current Task whose scope a named Task could be checked against, so
+	// the only Tasks that may lend their workspace to the person's token
+	// are the ones this turn's tools created for that same person.
+	if tc == nil || strings.TrimSpace(tc.TaskID) == "" {
+		return linkedCreatedTaskScopeAllowed(ctx, reader, tc, taskName)
+	}
+	if taskName == strings.TrimSpace(tc.TaskID) {
+		return nil, "", nil
 	}
 	if strings.TrimSpace(tc.TaskUID) == "" || reader == nil {
-		return nil, fmt.Errorf("task_name %q must name the current task when acting through a linked account", taskName)
+		return nil, "", fmt.Errorf("task_name %q must name the current task when acting through a linked account", taskName)
 	}
 	var task corev1alpha1.Task
 	if err := reader.Get(ctx, types.NamespacedName{Name: taskName, Namespace: githubTaskNamespace(ctx)}, &task); err != nil {
-		return nil, fmt.Errorf("failed to get task %s: %w", taskName, err)
+		return nil, "", fmt.Errorf("failed to get task %s: %w", taskName, err)
 	}
 	owner := metav1.GetControllerOf(&task)
 	if owner == nil || string(owner.UID) != strings.TrimSpace(tc.TaskUID) || owner.Kind != taskKindString || owner.APIVersion != corev1alpha1.GroupVersion.String() {
-		return nil, fmt.Errorf("task_name %q must name the current task or one of its own child tasks when acting through a linked account", taskName)
+		return nil, "", fmt.Errorf("task_name %q must name the current task or one of its own child tasks when acting through a linked account", taskName)
 	}
 	// Ownership alone is not repository authority: a coordinator can create
 	// a child naming any repository, so the child's workspace may only
 	// point the linked token at repositories the current Task itself holds.
 	parent, err := loadGitHubTaskScopes(ctx, reader, strings.TrimSpace(tc.TaskID), true)
 	if err != nil {
-		return nil, fmt.Errorf("resolve the current task's repository scope: %w", err)
+		return nil, "", fmt.Errorf("resolve the current task's repository scope: %w", err)
 	}
 	child, err := githubTaskScopesOf(&task, taskName, true)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	for _, scope := range child.scopes {
 		if !githubRepoAllowed(scope.owner, scope.repo, parent.scopes) {
-			return nil, fmt.Errorf("child task %q names repository %s/%s, which is outside the current task's repository scope %s",
+			return nil, "", fmt.Errorf("child task %q names repository %s/%s, which is outside the current task's repository scope %s",
 				taskName, scope.owner, scope.repo, formatGitHubRepoScopes(parent.scopes))
 		}
 	}
-	return &child, nil
+	return &child, "", nil
+}
+
+// linkedCreatedTaskScopeAllowed accepts taskName outside a Task only when
+// this turn created it and it is stamped with the same requester the
+// linked account belongs to: the person chose that repository themselves.
+func linkedCreatedTaskScopeAllowed(ctx context.Context, reader client.Reader, tc *ToolContext, taskName string) (*githubTaskContext, string, error) {
+	// The GitHub tools name a Task without a namespace, so the record this
+	// turn kept (namespace, name, UID at creation) resolves it: the call's
+	// namespace first, otherwise the one unambiguous entry with that name.
+	namespace, uid := githubTaskNamespace(ctx), ""
+	if tc != nil {
+		if uid = tc.CreatedTaskUID(namespace, taskName); uid == "" {
+			if ns, recorded, ok := tc.CreatedTaskByName(taskName); ok {
+				namespace, uid = ns, recorded
+			}
+		}
+	}
+	if uid == "" {
+		return nil, "", fmt.Errorf("task_name %q must name a task created in this conversation when acting through a linked account outside a task", taskName)
+	}
+	if reader == nil || tc.Requester == nil {
+		return nil, "", fmt.Errorf("task_name %q cannot be verified for the linked account", taskName)
+	}
+	var task corev1alpha1.Task
+	if err := reader.Get(ctx, types.NamespacedName{Name: taskName, Namespace: namespace}, &task); err != nil {
+		return nil, "", fmt.Errorf("failed to get task %s: %w", taskName, err)
+	}
+	if string(task.UID) != uid {
+		return nil, "", fmt.Errorf("task_name %q is not the task this conversation created (identity changed)", taskName)
+	}
+	// The repository scope is the one this turn chose at creation: a
+	// workspace edited since then may not redirect the person's token.
+	if WorkspaceDigest(&task) != tc.CreatedTaskWorkspaceDigest(namespace, taskName) {
+		return nil, "", fmt.Errorf("task_name %q: its workspace changed after this conversation created it, so it cannot scope the linked account", taskName)
+	}
+	requested := task.Spec.RequestedBy
+	if requested == nil || requested.Issuer != tc.Requester.Issuer || requested.Subject != tc.Requester.Subject {
+		return nil, "", fmt.Errorf("task_name %q was not requested by the person whose linked account this call uses", taskName)
+	}
+	scoped, err := githubTaskScopesOf(&task, taskName, true)
+	if err != nil {
+		return nil, "", err
+	}
+	return &scoped, namespace, nil
+}
+
+// withGitHubTaskNamespace returns ctx with a ToolContext copy whose
+// Namespace is namespace, so the Task-scope lookups read from there.
+func withGitHubTaskNamespace(ctx context.Context, namespace string) context.Context {
+	tc := GetToolContext(ctx)
+	if tc == nil {
+		return ctx
+	}
+	scoped := *tc
+	scoped.Namespace = namespace
+	return WithToolContext(ctx, &scoped)
 }
 
 func loadGitHubTaskContext(ctx context.Context, k8sClient client.Client, taskName string) (githubTaskContext, error) {

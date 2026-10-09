@@ -36,15 +36,14 @@ import (
 const (
 	// ConnectionSubjectDigestLabel indexes Connections by owner without
 	// exposing the raw subject as a label value.
-	ConnectionSubjectDigestLabel = "orka.ai/connection-subject"
+	ConnectionSubjectDigestLabel = connectors.ConnectionSubjectLabel
 	// ConnectionProviderLabel indexes Connections by provider.
-	ConnectionProviderLabel = "orka.ai/connector-provider"
+	ConnectionProviderLabel = connectors.ConnectionProviderLabel
 
-	connectorSettingsPath        = "/settings/connectors"
-	connectorSchemeHTTPS         = "https"
-	connectorSchemeHTTP          = "http"
-	connectionSubjectLabelLength = 32
-	maxConnectionRequestBytes    = 4 << 10
+	connectorSettingsPath     = "/settings/connectors"
+	connectorSchemeHTTPS      = "https"
+	connectorSchemeHTTP       = "http"
+	maxConnectionRequestBytes = 4 << 10
 )
 
 // completionLocks serializes completion per Connection UID so a stalled
@@ -189,6 +188,12 @@ type ConnectionResponse struct {
 	LastRefreshTime *metav1.Time `json:"lastRefreshTime,omitempty"`
 	Ready           bool         `json:"ready"`
 	Message         string       `json:"message,omitempty"`
+	// Deleting marks a Connection whose disconnect is still finishing
+	// (the finalizer revokes tokens first).
+	Deleting bool `json:"deleting,omitempty"`
+	// GrantSequence advances on every completed consent, so a client can
+	// tell a new grant from the one it started with.
+	GrantSequence int64 `json:"grantSequence"`
 }
 
 // ConnectionAuthorizeResponse returns the consent URL alongside the Connection.
@@ -248,6 +253,8 @@ func connectionResponse(connection *corev1alpha1.Connection) ConnectionResponse 
 		LinkedAt:        connection.Status.LinkedAt,
 		ExpiresAt:       connection.Status.ExpiresAt,
 		LastRefreshTime: connection.Status.LastRefreshTime,
+		Deleting:        !connection.DeletionTimestamp.IsZero(),
+		GrantSequence:   connection.Status.GrantSequence,
 	}
 	if ready := meta.FindStatusCondition(connection.Status.Conditions, corev1alpha1.ConnectionConditionReady); ready != nil {
 		response.Ready = connectors.ConnectionLinked(connection)
@@ -261,6 +268,35 @@ func connectionResponse(connection *corev1alpha1.Connection) ConnectionResponse 
 		response.Message = resolved.Message
 	}
 	return response
+}
+
+// revalidateConnectionView applies the checks credential resolution makes
+// against the current provider to a Ready view: a provider that is gone or
+// not accepted, one changed since consent, or one that now requires scopes
+// the grant lacks refuses the token at once, before the Connection's own
+// conditions catch up. The
+// dashboard and CLI only see this view, so it must not advertise a link
+// that resolution refuses.
+func revalidateConnectionView(view *ConnectionResponse, connection *corev1alpha1.Connection, provider *corev1alpha1.ConnectorProvider) {
+	if view == nil || !view.Ready || connection == nil {
+		return
+	}
+	switch {
+	case provider == nil:
+		// The Connection keeps its tokens until disconnected, but nothing
+		// resolves a link whose provider is gone.
+		view.Ready = false
+		view.Message = "the provider is no longer configured; this link cannot be used and should be disconnected"
+	case !connectors.ProviderAccepted(provider):
+		view.Ready = false
+		view.Message = "the provider is not accepted right now, so this link cannot be used"
+	case !connectors.ConsentMatchesProvider(connection, provider):
+		view.Ready = false
+		view.Message = "the provider changed since you consented; reconnect this link before its tools can run"
+	case !connectors.ScopesCover(connection.Status.GrantedScopes, connectors.ScopesForMode(provider, view.Mode)):
+		view.Ready = false
+		view.Message = "the provider now requires scopes this link was not granted; reconnect it before its tools can run"
+	}
 }
 
 // connectorIdentity returns the verified human identity behind a request.
@@ -386,10 +422,29 @@ func (h *Handlers) ListConnections(c fiber.Ctx) error {
 	if err := h.client.List(c.Context(), list, client.InNamespace(namespace)); err != nil {
 		return fiber.NewError(fiber.StatusInternalServerError, "failed to list connections")
 	}
+	// Providers are read uncached, as credential resolution reads them, so
+	// informer lag never advertises a link resolution already refuses.
+	providers := &corev1alpha1.ConnectorProviderList{}
+	if err := h.providerReader().List(c.Context(), providers, client.InNamespace(namespace)); err != nil {
+		return fiber.NewError(fiber.StatusInternalServerError, "failed to list connector providers")
+	}
+	byName := make(map[string]*corev1alpha1.ConnectorProvider, len(providers.Items))
+	for i := range providers.Items {
+		byName[providers.Items[i].Name] = &providers.Items[i]
+	}
+	links := map[string]int{}
+	for i := range list.Items {
+		if connectionOwnedBy(&list.Items[i], ui) {
+			links[list.Items[i].Spec.ProviderRef.Name]++
+		}
+	}
 	items := make([]ConnectionResponse, 0, len(list.Items))
 	for i := range list.Items {
 		if connectionOwnedBy(&list.Items[i], ui) {
-			items = append(items, connectionResponse(&list.Items[i]))
+			view := connectionResponse(&list.Items[i])
+			revalidateConnectionView(&view, &list.Items[i], byName[list.Items[i].Spec.ProviderRef.Name])
+			markDuplicateLink(&view, links[list.Items[i].Spec.ProviderRef.Name])
+			items = append(items, view)
 		}
 	}
 	return c.JSON(fiber.Map{"items": items})
@@ -405,7 +460,39 @@ func (h *Handlers) GetConnection(c fiber.Ctx) error {
 	if err != nil {
 		return err
 	}
-	return c.JSON(connectionResponse(connection))
+	view := connectionResponse(connection)
+	provider := &corev1alpha1.ConnectorProvider{}
+	switch err := h.providerReader().Get(c.Context(), types.NamespacedName{Namespace: connection.Namespace, Name: connection.Spec.ProviderRef.Name}, provider); {
+	case err == nil:
+		revalidateConnectionView(&view, connection, provider)
+	case apierrors.IsNotFound(err):
+		revalidateConnectionView(&view, connection, nil)
+	default:
+		return fiber.NewError(fiber.StatusInternalServerError, "failed to read connector provider")
+	}
+	owned := &corev1alpha1.ConnectionList{}
+	if err := h.client.List(c.Context(), owned, client.InNamespace(connection.Namespace)); err != nil {
+		return fiber.NewError(fiber.StatusInternalServerError, "failed to list connections")
+	}
+	links := 0
+	for i := range owned.Items {
+		if connectionOwnedBy(&owned.Items[i], ui) && owned.Items[i].Spec.ProviderRef.Name == connection.Spec.ProviderRef.Name {
+			links++
+		}
+	}
+	markDuplicateLink(&view, links)
+	return c.JSON(view)
+}
+
+// markDuplicateLink marks a link unusable when the person holds more than
+// one link to its provider: credential resolution refuses every one of them
+// as ambiguous, so none may be advertised as ready.
+func markDuplicateLink(view *ConnectionResponse, links int) {
+	if view == nil || links <= 1 {
+		return
+	}
+	view.Ready = false
+	view.Message = "you hold several links to this provider; disconnect the extra ones before its tools can run"
 }
 
 // CreateConnection creates (or reuses) the caller's Connection to a provider
@@ -449,7 +536,7 @@ func (h *Handlers) CreateConnection(c fiber.Ctx) error {
 				Finalizers: []string{controller.ConnectionCustodyFinalizer},
 				Labels: map[string]string{
 					ConnectionSubjectDigestLabel: connectionSubjectLabel(ui),
-					ConnectionProviderLabel:      provider.Name,
+					ConnectionProviderLabel:      connectors.ConnectionProviderLabelValue(provider.Name),
 				},
 			},
 			Spec: corev1alpha1.ConnectionSpec{
@@ -488,7 +575,7 @@ func (h *Handlers) CreateConnection(c fiber.Ctx) error {
 		// A reused object may lack the ownership labels the list route
 		// selects by (created through Kubernetes, or labels stripped);
 		// restore them from the authoritative spec before consent.
-		wantLabels := map[string]string{ConnectionSubjectDigestLabel: connectionSubjectLabel(ui), ConnectionProviderLabel: provider.Name}
+		wantLabels := map[string]string{ConnectionSubjectDigestLabel: connectionSubjectLabel(ui), ConnectionProviderLabel: connectors.ConnectionProviderLabelValue(provider.Name)}
 		changed := connection.Spec.Mode != mode
 		for key, value := range wantLabels {
 			if connection.Labels[key] != value {
@@ -681,7 +768,10 @@ func (h *Handlers) loadReadyConnectorProvider(ctx context.Context, namespace, na
 		return nil, fiber.NewError(fiber.StatusInternalServerError, "failed to read connector provider")
 	}
 	if !connectors.ProviderAccepted(provider) {
-		return nil, fiber.NewError(fiber.StatusConflict, "connector provider is not ready")
+		// Retryable: the completion row is kept while the provider's
+		// conditions catch up. Every retryable conflict says "retry" so a
+		// client can tell it from a consent that can never be finished.
+		return nil, fiber.NewError(fiber.StatusConflict, "connector provider is not ready; retry shortly")
 	}
 	return provider, nil
 }
@@ -704,7 +794,7 @@ func (h *Handlers) providerOAuthConfig(ctx context.Context, provider *corev1alph
 }
 
 func connectionSubjectLabel(ui *UserInfo) string {
-	return connectors.SubjectDigest(ui.Issuer, ui.Subject)[:connectionSubjectLabelLength]
+	return connectors.ConnectionSubjectLabelValue(ui.Issuer, ui.Subject)
 }
 
 // startConnectorConsent records a pending consent and returns the provider
@@ -789,49 +879,49 @@ func (h *Handlers) ConnectionCallback(c fiber.Ctx) error {
 		if providerError != "access_denied" {
 			reason = "provider_rejected"
 		}
-		return h.connectorCallbackRedirect(c, consent.Name, reason, "")
+		return h.connectorCallbackRedirectTo(c, consent.Namespace, consent.Name, reason, "")
 	}
 	code := c.Query("code")
 	if strings.TrimSpace(code) == "" {
-		return h.connectorCallbackRedirect(c, consent.Name, "missing_code", "")
+		return h.connectorCallbackRedirectTo(c, consent.Namespace, consent.Name, "missing_code", "")
 	}
 	// Read uncached: the fences below decide whether a code is exchanged
 	// at all, so they judge the Connection as it is now.
 	connection := &corev1alpha1.Connection{}
 	if err := h.providerReader().Get(ctx, types.NamespacedName{Namespace: consent.Namespace, Name: consent.Name}, connection); err != nil {
-		return h.connectorCallbackRedirect(c, consent.Name, "connection_missing", "")
+		return h.connectorCallbackRedirectTo(c, consent.Namespace, consent.Name, "connection_missing", "")
 	}
 	if !connectionCustodyProtected(connection) {
-		return h.connectorCallbackRedirect(c, consent.Name, "connection_unprotected", "")
+		return h.connectorCallbackRedirectTo(c, consent.Namespace, consent.Name, "connection_unprotected", "")
 	}
 	if string(connection.UID) != consent.ConnectionUID || !connection.DeletionTimestamp.IsZero() ||
 		connectors.SubjectDigest(connection.Spec.Subject.Issuer, connection.Spec.Subject.Subject) != consent.SubjectDigest ||
 		connection.Spec.ProviderRef.Name != consent.Provider {
-		return h.connectorCallbackRedirect(c, consent.Name, "connection_mismatch", "")
+		return h.connectorCallbackRedirectTo(c, consent.Namespace, consent.Name, "connection_mismatch", "")
 	}
 	// The mode changed while the person was at the provider: completion
 	// would refuse the result, so no code is exchanged and no token issued.
 	if currentMode, err := normalizeConnectionMode(connection.Spec.Mode); err != nil || currentMode != consent.Mode {
-		return h.connectorCallbackRedirect(c, consent.Name, "mode_changed", "")
+		return h.connectorCallbackRedirectTo(c, consent.Namespace, consent.Name, "mode_changed", "")
 	}
 	provider := &corev1alpha1.ConnectorProvider{}
 	if err := h.providerReader().Get(ctx, types.NamespacedName{Namespace: consent.Namespace, Name: consent.Provider}, provider); err != nil || !connectors.ProviderAccepted(provider) {
-		return h.connectorCallbackRedirect(c, consent.Name, "provider_unavailable", "")
+		return h.connectorCallbackRedirectTo(c, consent.Namespace, consent.Name, "provider_unavailable", "")
 	}
 	// The provider was replaced or its OAuth client changed while the person
 	// was at the provider: the code belongs to the old client and must not be
 	// exchanged with the new endpoints.
 	if consent.AuthorityDigest != connectors.ProviderAuthorityDigest(provider) {
-		return h.connectorCallbackRedirect(c, consent.Name, "provider_changed", "")
+		return h.connectorCallbackRedirectTo(c, consent.Namespace, consent.Name, "provider_changed", "")
 	}
 	cfg, err := h.providerOAuthConfig(ctx, provider)
 	if err != nil {
-		return h.connectorCallbackRedirect(c, consent.Name, "provider_unavailable", "")
+		return h.connectorCallbackRedirectTo(c, consent.Namespace, consent.Name, "provider_unavailable", "")
 	}
 	token, err := h.connectors.OAuth.ExchangeCode(ctx, cfg, code, consent.CodeVerifier, h.connectors.redirectURI())
 	if err != nil {
 		log.Info("connector code exchange failed", "connection", consent.Name, "provider", consent.Provider, "reason", oauthFailureReason(err))
-		return h.connectorCallbackRedirect(c, consent.Name, "exchange_failed", "")
+		return h.connectorCallbackRedirectTo(c, consent.Namespace, consent.Name, "exchange_failed", "")
 	}
 	// A provider may grant fewer scopes than requested (the person declined
 	// the write permission, say). A partial grant would let a readWrite link
@@ -851,7 +941,7 @@ func (h *Handlers) ConnectionCallback(c fiber.Ctx) error {
 		// The issued material is dropped, never revoked: Orka cannot prove
 		// whose grant a token nobody committed belongs to, and a shared or
 		// re-issued token could be another person's live credential.
-		return h.connectorCallbackRedirect(c, consent.Name, "scopes_denied", "")
+		return h.connectorCallbackRedirectTo(c, consent.Namespace, consent.Name, "scopes_denied", "")
 	}
 	// Park the material until the verified owner commits it. This is what
 	// stops a forwarded consent link from binding a victim's account to the
@@ -859,11 +949,11 @@ func (h *Handlers) ConnectionCallback(c fiber.Ctx) error {
 	// one-time completion token, and only the Connection's owner may spend it.
 	completionNonce, err := connectors.GenerateStateNonce()
 	if err != nil {
-		return h.connectorCallbackRedirect(c, consent.Name, "storage_failed", "")
+		return h.connectorCallbackRedirectTo(c, consent.Namespace, consent.Name, "storage_failed", "")
 	}
 	completionToken, err := connectors.SignState(h.connectors.StateKey, completionNonce)
 	if err != nil {
-		return h.connectorCallbackRedirect(c, consent.Name, "storage_failed", "")
+		return h.connectorCallbackRedirectTo(c, consent.Namespace, consent.Name, "storage_failed", "")
 	}
 	if err := h.connectors.Consents.CreateConnectorCompletion(ctx, store.ConnectorCompletion{
 		Nonce:         completionNonce,
@@ -894,17 +984,17 @@ func (h *Handlers) ConnectionCallback(c fiber.Ctx) error {
 		if errors.Is(err, store.ErrConnectorCustodyTombstoned) {
 			// The link was disconnected while the code was being exchanged.
 			// The material is dropped and left to expire, never revoked.
-			return h.connectorCallbackRedirect(c, consent.Name, "disconnected", "")
+			return h.connectorCallbackRedirectTo(c, consent.Namespace, consent.Name, "disconnected", "")
 		}
 		if errors.Is(err, store.ErrConnectorConsentSuperseded) {
 			// A newer consent for this Connection already parked or
 			// committed its tokens; this older one is dropped.
-			return h.connectorCallbackRedirect(c, consent.Name, "consent_superseded", "")
+			return h.connectorCallbackRedirectTo(c, consent.Namespace, consent.Name, "consent_superseded", "")
 		}
 		log.Error(err, "connector completion could not be sealed", "connection", consent.Name)
-		return h.connectorCallbackRedirect(c, consent.Name, "storage_failed", "")
+		return h.connectorCallbackRedirectTo(c, consent.Namespace, consent.Name, "storage_failed", "")
 	}
-	return h.connectorCallbackRedirect(c, consent.Name, "", completionToken)
+	return h.connectorCallbackRedirectTo(c, consent.Namespace, consent.Name, "", completionToken)
 }
 
 // CompleteConnection commits parked token material. The caller must own the
@@ -1118,6 +1208,13 @@ func (h *Handlers) applyConnectionLinked(ctx context.Context, connection *corev1
 // one-time completion token travels in the URL fragment, which browsers keep
 // out of requests, referrers, and server logs.
 func (h *Handlers) connectorCallbackRedirect(c fiber.Ctx, connectionName, reason, completionToken string) error {
+	return h.connectorCallbackRedirectTo(c, "", connectionName, reason, completionToken)
+}
+
+// connectorCallbackRedirectTo is connectorCallbackRedirect with the
+// namespace the consent was sealed in, so the page completes the link where
+// it was started rather than in whatever namespace it currently shows.
+func (h *Handlers) connectorCallbackRedirectTo(c fiber.Ctx, namespace, connectionName, reason, completionToken string) error {
 	target, err := url.Parse(strings.TrimRight(h.connectors.CallbackBaseURL, "/") + connectorSettingsPath)
 	if err != nil {
 		return fiber.NewError(fiber.StatusInternalServerError, "connector callback base URL is invalid")
@@ -1131,6 +1228,9 @@ func (h *Handlers) connectorCallbackRedirect(c fiber.Ctx, connectionName, reason
 	}
 	if connectionName != "" {
 		query.Set("connection", connectionName)
+	}
+	if strings.TrimSpace(namespace) != "" {
+		query.Set("namespace", namespace)
 	}
 	target.RawQuery = query.Encode()
 	if completionToken != "" {
