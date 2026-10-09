@@ -1,6 +1,8 @@
 module github.com/orka-agents/orka
 
-go 1.26.9
+go 1.26.2
+
+toolchain go1.27.2
 
 require (
 	github.com/anthropics/anthropic-sdk-go v1.61.0

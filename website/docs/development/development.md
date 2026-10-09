@@ -9,7 +9,7 @@ description: "Building, running, and regenerating Orka locally."
 
 | Tool | Version | Notes |
 | --- | --- | --- |
-| Go | 1.26.2 or newer | `go.mod` sets `go 1.26.2` and pins `toolchain go1.27.0`, so Go downloads 1.27.0 for you. CI builds on 1.27. |
+| Go | 1.26.2 or newer | `go.mod` keeps `go 1.26.2` and prefers `toolchain go1.27.2`. With automatic toolchain selection, Go downloads 1.27.2 when needed. CI builds on 1.27. |
 | Bun | current | Builds the React dashboard, which is embedded into the controller binary. Bun 1.4.2 has a [known Windows/WSL setup issue](#windows-bsod-during-ui-dependency-installation); use 1.3.13 there. |
 | Docker | with BuildKit | The Dockerfiles use BuildKit syntax. Docker Desktop and any modern Docker Engine have it on by default. |
 | kubectl | matching your cluster | |
