@@ -646,6 +646,11 @@ func validateToolParameters(name string, parameters *apiextensionsv1.JSON) *Issu
 	if _, err := full.Resolve(nil); err != nil {
 		return invalid(fmt.Sprintf("HTTP tool %q parameters must be a resolvable JSON Schema with only local references", name))
 	}
+	// Execution refuses a schema whose numbers a float64 cannot hold
+	// exactly, so such a provider would accept no call at all.
+	if numbersExactlyRepresentable(parameters.Raw) != nil {
+		return invalid(fmt.Sprintf("HTTP tool %q parameters must use only numbers a float64 holds exactly", name))
+	}
 	return nil
 }
 
@@ -833,7 +838,7 @@ func ProviderAuthorityDigest(provider *corev1alpha1.ConnectorProvider) string {
 	}
 	slices.SortFunc(tools, func(a, b corev1alpha1.ConnectorTool) int { return strings.Compare(a.Name, b.Name) })
 	for _, tool := range tools {
-		parts = append(parts, "tool", tool.Name, string(tool.Class), tool.HTTP.URL, tool.HTTP.Method)
+		parts = append(parts, "tool", tool.Name, string(tool.Class), tool.HTTP.URL, tool.HTTP.Method, "parameters", canonicalSchema(tool.Parameters))
 		headerNames := make([]string, 0, len(tool.HTTP.Headers))
 		for name := range tool.HTTP.Headers {
 			headerNames = append(headerNames, name)
@@ -912,6 +917,24 @@ func providerConsentParts(provider *corev1alpha1.ConnectorProvider) []string {
 		parts = append(parts, "param", key, oauth.AdditionalAuthorizeParameters[key])
 	}
 	return parts
+}
+
+// canonicalSchema renders a declared parameter schema in canonical JSON, so
+// a broadened or narrowed request constraint moves the consent fence; an
+// absent or unreadable schema renders as empty.
+func canonicalSchema(schema *apiextensionsv1.JSON) string {
+	if schema == nil || len(schema.Raw) == 0 {
+		return ""
+	}
+	var value any
+	if err := json.Unmarshal(schema.Raw, &value); err != nil {
+		return ""
+	}
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		return ""
+	}
+	return string(encoded)
 }
 
 // lengthPrefixedDigest hashes parts with an injective length-prefixed

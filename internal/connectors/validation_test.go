@@ -254,6 +254,9 @@ func TestValidateProviderSpec(t *testing.T) {
 		{name: "parameters unresolvable ref", mutate: func(p *corev1alpha1.ConnectorProvider) {
 			p.Spec.Tools[2].Parameters = &apiextensionsv1.JSON{Raw: []byte(`{"type":"object","properties":{"q":{"$ref":"#/$defs/missing"}}}`)}
 		}, want: "resolvable JSON Schema"},
+		{name: "parameters lossy numeric constraint", mutate: func(p *corev1alpha1.ConnectorProvider) {
+			p.Spec.Tools[2].Parameters = &apiextensionsv1.JSON{Raw: []byte(`{"type":"object","properties":{"n":{"type":"integer","maximum":9007199254740993}}}`)}
+		}, want: "numbers a float64 holds exactly"},
 		{name: "parameters nested ok", mutate: func(p *corev1alpha1.ConnectorProvider) {
 			p.Spec.Tools[2].Parameters = &apiextensionsv1.JSON{Raw: []byte(`{"type":"object","properties":{"q":{"type":"string","minLength":1},"tags":{"type":"array","items":{"type":"string"}}},"required":["q"]}`)}
 		}},
@@ -719,6 +722,13 @@ func TestProviderAuthorityDigestAndConsent(t *testing.T) {
 	noPKCE.Spec.OAuth.PKCE = &off
 	if ProviderAuthorityDigest(noPKCE) == ProviderAuthorityDigest(provider) || ProviderIssuerDigest(noPKCE) != ProviderIssuerDigest(provider) {
 		t.Fatal("the PKCE setting must move the authority digest but not the issuer digest")
+	}
+	// A broadened parameter schema on a declared tool moves the consent
+	// fence: the constraint the person consented under is gone.
+	widened := provider.DeepCopy()
+	widened.Spec.Tools[2].Parameters = &apiextensionsv1.JSON{Raw: []byte(`{"type":"object"}`)}
+	if ProviderAuthorityDigest(widened) == ProviderAuthorityDigest(provider) || ProviderIssuerDigest(widened) != ProviderIssuerDigest(provider) {
+		t.Fatal("a tool's parameter schema must move the authority digest but not the issuer digest")
 	}
 	// Built-in declarations do not carry a destination and do not move the digest.
 	builtinOnly := provider.DeepCopy()

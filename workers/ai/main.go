@@ -331,6 +331,10 @@ func run(transcriptPath string) (err error) {
 			workerEnv.TransactionCredentialReadScopes,
 		),
 		RequireSecretReadAuthorization: workerEnv.EnforceTransactionCredentialAuth,
+		// Children this worker creates inherit the requester's connector
+		// authority only when the controller seals them on this worker's
+		// authenticated request.
+		SealTaskCreate: sealChildTaskViaController,
 	}
 
 	baseToolCtx.GatewayReplySender, err = newNativeGatewayReplySender(
@@ -1824,4 +1828,82 @@ func loadSkillsFromVolume() string {
 		fmt.Printf("Loaded %d skill file(s) from %s\n", loaded, skillsDir)
 	}
 	return sb.String()
+}
+
+// sealChildTaskViaController asks the controller to seal the requester stamp
+// onto a child Task this worker just created. The controller authenticates
+// this Pod as the parent Task's worker and checks the child's ownership and
+// requester before sealing; a failure leaves the child unverified for
+// connector use and is not an error for the creating tool.
+func sealChildTaskViaController(ctx context.Context, _ client.Client, task *corev1alpha1.Task) error {
+	controllerURL := strings.TrimRight(strings.TrimSpace(os.Getenv(workerenv.ControllerURL)), "/")
+	namespace := strings.TrimSpace(os.Getenv(workerenv.TaskNamespace))
+	parent := strings.TrimSpace(os.Getenv(workerenv.TaskName))
+	if task == nil || controllerURL == "" || namespace == "" || parent == "" || task.Spec.RequestedBy == nil {
+		return nil
+	}
+	endpoint := fmt.Sprintf("%s/internal/v1/tasks/%s/%s/children/%s/requester-stamp",
+		controllerURL, url.PathEscape(namespace), url.PathEscape(parent), url.PathEscape(task.Name))
+	callCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	token := workerServiceAccountToken()
+	// Nothing repairs a seal later, so a failure that may clear is retried
+	// briefly: a 409 (the child changed between the controller's read and
+	// its fenced seal), a 429 or 5xx, or a transport error. Any other
+	// response is final.
+	backoff := sealConflictBackoff
+	var last string
+	for attempt := range 4 {
+		if attempt > 0 {
+			select {
+			case <-callCtx.Done():
+				fmt.Printf("Warning: child task %q could not be sealed for connector use: %s\n", task.Name, last)
+				return nil
+			case <-time.After(backoff):
+			}
+			backoff *= 2
+		}
+		req, err := http.NewRequestWithContext(callCtx, http.MethodPost, endpoint, nil)
+		if err != nil {
+			return nil
+		}
+		if token != "" {
+			req.Header.Set("Authorization", "Bearer "+token)
+		}
+		resp, err := sealHTTPClient().Do(req)
+		if err != nil {
+			last = err.Error()
+			continue
+		}
+		status := resp.StatusCode
+		_ = resp.Body.Close()
+		if status >= 200 && status < 300 {
+			return nil
+		}
+		last = fmt.Sprintf("controller returned %d", status)
+		if status != http.StatusConflict && status != http.StatusTooManyRequests && status < http.StatusInternalServerError {
+			break
+		}
+	}
+	fmt.Printf("Warning: child task %q could not be sealed for connector use: %s\n", task.Name, last)
+	return nil
+}
+
+// sealConflictBackoff is the first wait before a seal is retried; each
+// retry doubles it.
+var sealConflictBackoff = 250 * time.Millisecond
+
+// sealHTTPClient is the client used to reach the controller for sealing;
+// tests replace it with a fixture client.
+// It carries the worker's ServiceAccount token, so it neither honors proxy
+// environment variables nor follows redirects: the token reaches the
+// controller and nothing else.
+var sealHTTPClient = func() *http.Client {
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.Proxy = nil
+	return &http.Client{
+		Timeout:       15 * time.Second,
+		Transport:     transport,
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+	}
 }

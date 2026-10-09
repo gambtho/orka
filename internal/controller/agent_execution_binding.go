@@ -95,6 +95,30 @@ type agentExecutionSnapshotBody struct {
 	// ExecutionWorkspace freezes the resolved execution-workspace binding for
 	// workspace-provider-backed RuntimePools. It is absent for plain pools.
 	ExecutionWorkspace *agentExecutionSnapshotWorkspaceBinding `json:"executionWorkspace,omitempty"`
+	// Connections freezes, per connection-mode OutboundAccessPolicy reachable
+	// from the frozen tool policy, the identity of the requester's Connection
+	// at dispatch. Call-time resolution fails closed unless the live
+	// Connection still matches. No token material is ever recorded.
+	Connections []agentExecutionSnapshotConnection `json:"connections,omitempty"`
+}
+
+// agentExecutionSnapshotConnection is one frozen person-to-provider link.
+type agentExecutionSnapshotConnection struct {
+	PolicyName     string `json:"policyName"`
+	Provider       string `json:"provider"`
+	ConnectionName string `json:"connectionName"`
+	UID            string `json:"uid"`
+	Generation     int64  `json:"generation"`
+	// GrantSequence is the consent count the Connection carried when
+	// frozen; a later re-link of the same object raises it and invalidates
+	// this snapshot's authority to use the account.
+	GrantSequence int64  `json:"grantSequence"`
+	Mode          string `json:"mode"`
+	// PolicyUID and PolicyGeneration pin the connection-mode policy the
+	// Connection was frozen under: its credential output semantics are part
+	// of what the Task was dispatched with.
+	PolicyUID        string `json:"policyUID,omitempty"`
+	PolicyGeneration int64  `json:"policyGeneration,omitempty"`
 }
 
 // agentExecutionSnapshotExternalRuntime freezes the non-secret registration
@@ -374,6 +398,10 @@ func (r *TaskReconciler) resolveAgentExecutionCandidateWithWorkspaceSessionUID(
 	if err != nil {
 		return nil, fmt.Errorf("resolve frozen ACP MCP configuration: %w", err)
 	}
+	frozenConnections, err := freezeRequesterConnections(ctx, reader, task, mcpConfiguration)
+	if err != nil {
+		return nil, fmt.Errorf("freeze requester connections: %w", err)
+	}
 
 	namespace := &corev1.Namespace{}
 	if err := reader.Get(ctx, types.NamespacedName{Name: task.Namespace}, namespace); err != nil {
@@ -410,6 +438,7 @@ func (r *TaskReconciler) resolveAgentExecutionCandidateWithWorkspaceSessionUID(
 		SessionRef:       task.Spec.SessionRef.DeepCopy(),
 		Workspace:        task.Spec.Workspace.DeepCopy(),
 		RuntimeOverride:  task.Spec.AgentRuntime.DeepCopy(),
+		Connections:      frozenConnections,
 	}
 	if task.Spec.Timeout != nil {
 		body.Timeout = task.Spec.Timeout.Duration.String()
@@ -516,9 +545,24 @@ func (r *TaskReconciler) resolveExternalAgentExecutionCandidate(
 	if err != nil {
 		return nil, err
 	}
+	// An external runtime's snapshot freezes no Connections: its MCP policy
+	// is fixed by its registered profile and per-requester links cannot be
+	// applied to it. Connector-backed tools therefore fail closed here, with
+	// a definitive reason, rather than being advertised as tools whose every
+	// call would fail for want of a frozen Connection.
+	var runtimeDisallowed []string
+	if runtime.Spec.Capabilities.MCPPolicy != nil {
+		runtimeDisallowed = runtime.Spec.Capabilities.MCPPolicy.DisallowedTools
+	}
 	registry := r.MCPRegistry
 	if registry == nil {
 		registry = tools.DefaultRegistry
+	}
+	candidates := brokeredCustomCandidates(connectorCandidateTools(task, agent, runtimeDisallowed), profile.ProviderKind, registry)
+	if connectorTools, err := connectorToolsFor(ctx, reader, task.Namespace, candidates); err != nil {
+		return nil, err
+	} else if len(connectorTools) > 0 {
+		return nil, permanentACPAgentConfiguration(errors.New("connector-backed tools are not supported on external v2 AgentRuntimes"))
 	}
 	mcpConfiguration, err := buildExternalRuntimeSessionMCPConfigurationWithRegistry(
 		ctx, reader, task, agent, runtime, profile, registry,
@@ -1463,4 +1507,25 @@ func (r *TaskReconciler) ensureAgentExecutionBinding(
 		return result, handleErr, true
 	}
 	return ctrl.Result{}, nil, false
+}
+
+// brokeredCustomCandidates keeps the names that would resolve to brokered
+// custom Tools, mirroring buildCanonicalMCPToolDescriptors: a registered
+// built-in or a provider-native tool takes precedence over a same-named Tool
+// CR, which is then never exposed and cannot make a Task connector-backed.
+func brokeredCustomCandidates(names []string, providerKind string, registry *tools.Registry) []string {
+	native := providerNativeTools[strings.ToLower(providerKind)]
+	kept := make([]string, 0, len(names))
+	for _, name := range names {
+		if registry != nil {
+			if _, builtin := registry.Get(name); builtin {
+				continue
+			}
+		}
+		if _, isNative := native[strings.ToLower(name)]; isNative {
+			continue
+		}
+		kept = append(kept, name)
+	}
+	return kept
 }
