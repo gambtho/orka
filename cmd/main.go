@@ -1332,6 +1332,15 @@ func main() {
 			setupLog.Error(err, "unable to register ACP MCP broker coordination tools")
 			os.Exit(1)
 		}
+		if connectorsEnabled {
+			// GitHub built-ins reach ACP runtimes only through the
+			// requester's linked account; without connectors there is no
+			// such account and the tools are not offered at all.
+			if err := tools.RegisterBrokeredGitHubTools(acpMCPRegistry, mgr.GetClient()); err != nil {
+				setupLog.Error(err, "unable to register ACP MCP broker GitHub tools")
+				os.Exit(1)
+			}
+		}
 		if err := tools.RegisterBrokeredDelegateTaskTool(
 			acpMCPRegistry,
 			mgr.GetClient(),
@@ -2286,6 +2295,7 @@ func main() {
 			PromptLeases:            acpPromptLeases,
 			KubeClient:              kubeClient, Registry: acpMCPRegistry,
 			OutboundAccess: outboundAccessResolver, TransactionExchange: brokeredTransactionExchange,
+			Connections:                      outboundAccessResolver.Connections,
 			EnforceTransactionCredentialAuth: contextTokenAuthzConfig.Mode == api.ContextTokenAuthorizationModeEnforce,
 			TransactionCredentialReadScopes:  contextTokenAuthzConfig.SecretCredentialReadScopes(),
 			ContextFactory: func(ctx context.Context, request harnessv2.MCPBrokerCallRequest) (*tools.ToolContext, error) {

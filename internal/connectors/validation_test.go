@@ -66,6 +66,15 @@ func TestValidateProviderSpec(t *testing.T) {
 		{name: "whitespace url", mutate: func(p *corev1alpha1.ConnectorProvider) { p.Spec.OAuth.TokenURL = " https://github.com/token" }, want: "surrounding whitespace"},
 		{name: "loopback ip", mutate: func(p *corev1alpha1.ConnectorProvider) { p.Spec.OAuth.TokenURL = "https://127.0.0.1/token" }, want: "must not target private"},
 		{name: "private ip", mutate: func(p *corev1alpha1.ConnectorProvider) { p.Spec.OAuth.AuthorizeURL = "https://10.0.0.5/authorize" }, want: "must not target private"},
+		{name: "revocation on another host", mutate: func(p *corev1alpha1.ConnectorProvider) {
+			p.Spec.OAuth.RevocationURL = "https://collector.example.com/revoke"
+		}, want: "must be on the token endpoint's host"},
+		{name: "revocation on another port", mutate: func(p *corev1alpha1.ConnectorProvider) {
+			p.Spec.OAuth.RevocationURL = "https://github.com:8443/revoke"
+		}, want: "must be on the token endpoint's host"},
+		{name: "revocation on the token host ok", mutate: func(p *corev1alpha1.ConnectorProvider) {
+			p.Spec.OAuth.RevocationURL = "https://GitHub.com:443/revoke"
+		}},
 		{name: "metadata host", mutate: func(p *corev1alpha1.ConnectorProvider) {
 			p.Spec.OAuth.RevocationURL = "https://metadata.google.internal/revoke"
 		}, want: "revocationURL host is not allowed"},
@@ -96,10 +105,16 @@ func TestValidateProviderSpec(t *testing.T) {
 		{name: "http tool cluster-local", mutate: func(p *corev1alpha1.ConnectorProvider) {
 			p.Spec.Tools[2].HTTP.URL = "https://api.default.svc.cluster.local/x"
 		}, want: "host is not allowed"},
-		{name: "public host with local label", mutate: func(p *corev1alpha1.ConnectorProvider) { p.Spec.OAuth.TokenURL = "https://local.example.com/token" }},
+		{name: "public host with local label", mutate: func(p *corev1alpha1.ConnectorProvider) {
+			p.Spec.OAuth.TokenURL = "https://local.example.com/token"
+			p.Spec.Tools = p.Spec.Tools[2:]
+		}},
 		{name: "port too large", mutate: func(p *corev1alpha1.ConnectorProvider) { p.Spec.OAuth.TokenURL = "https://example.com:99999/token" }, want: "port must be between"},
 		{name: "port zero", mutate: func(p *corev1alpha1.ConnectorProvider) { p.Spec.OAuth.AuthorizeURL = "https://example.com:0/authorize" }, want: "port must be between"},
-		{name: "explicit port ok", mutate: func(p *corev1alpha1.ConnectorProvider) { p.Spec.OAuth.TokenURL = "https://example.com:8443/token" }},
+		{name: "explicit port ok", mutate: func(p *corev1alpha1.ConnectorProvider) {
+			p.Spec.OAuth.TokenURL = "https://example.com:8443/token"
+			p.Spec.Tools = p.Spec.Tools[2:]
+		}},
 		{name: "http tool bad port", mutate: func(p *corev1alpha1.ConnectorProvider) { p.Spec.Tools[2].HTTP.URL = "https://api.github.com:70000/x" }, want: "port must be between"},
 		{name: "parameters not an object", mutate: func(p *corev1alpha1.ConnectorProvider) {
 			p.Spec.Tools[2].Parameters = &apiextensionsv1.JSON{Raw: []byte(`"string"`)}
@@ -168,6 +183,7 @@ func TestValidateProviderSpec(t *testing.T) {
 		}, want: "must not preset reserved"},
 		{name: "authorize url benign query ok", mutate: func(p *corev1alpha1.ConnectorProvider) {
 			p.Spec.OAuth.AuthorizeURL = "https://example.com/authorize?audience=api"
+			p.Spec.Tools = p.Spec.Tools[2:]
 		}},
 		{name: "token url credential query", mutate: func(p *corev1alpha1.ConnectorProvider) {
 			p.Spec.OAuth.TokenURL = "https://example.com/token?client_secret=abc"
@@ -240,8 +256,14 @@ func TestValidateProviderSpec(t *testing.T) {
 		{name: "unicode tool host", mutate: func(p *corev1alpha1.ConnectorProvider) {
 			p.Spec.Tools[2].HTTP.URL = "https://127%E3%80%820%E3%80%820%E3%80%821/x"
 		}, want: "host must be ASCII"},
-		{name: "punycode hostname ok", mutate: func(p *corev1alpha1.ConnectorProvider) { p.Spec.OAuth.TokenURL = "https://xn--bcher-kva.example/token" }},
-		{name: "hexish hostname ok", mutate: func(p *corev1alpha1.ConnectorProvider) { p.Spec.OAuth.TokenURL = "https://ab12.cafe.example.com/token" }},
+		{name: "punycode hostname ok", mutate: func(p *corev1alpha1.ConnectorProvider) {
+			p.Spec.OAuth.TokenURL = "https://xn--bcher-kva.example/token"
+			p.Spec.Tools = p.Spec.Tools[2:]
+		}},
+		{name: "hexish hostname ok", mutate: func(p *corev1alpha1.ConnectorProvider) {
+			p.Spec.OAuth.TokenURL = "https://ab12.cafe.example.com/token"
+			p.Spec.Tools = p.Spec.Tools[2:]
+		}},
 		{name: "http tool credential query", mutate: func(p *corev1alpha1.ConnectorProvider) {
 			p.Spec.Tools[2].HTTP.URL = "https://api.github.com/x?token=abc"
 		}, want: "must not carry credentials"},
@@ -730,11 +752,18 @@ func TestProviderAuthorityDigestAndConsent(t *testing.T) {
 	if ProviderAuthorityDigest(widened) == ProviderAuthorityDigest(provider) || ProviderIssuerDigest(widened) != ProviderIssuerDigest(provider) {
 		t.Fatal("a tool's parameter schema must move the authority digest but not the issuer digest")
 	}
-	// Built-in declarations do not carry a destination and do not move the digest.
-	builtinOnly := provider.DeepCopy()
-	builtinOnly.Spec.Tools = append(builtinOnly.Spec.Tools, corev1alpha1.ConnectorTool{Name: "list_issues", Class: corev1alpha1.ConnectorToolClassRead, Source: corev1alpha1.ConnectorToolSourceBuiltin})
-	if ProviderAuthorityDigest(builtinOnly) != digest {
-		t.Fatal("a new built-in declaration must not require consent again")
+	// A built-in declaration is a use of the token the person consented to:
+	// adding one, or changing its class, moves the authority digest but not
+	// the issuer digest.
+	builtinAdded := provider.DeepCopy()
+	builtinAdded.Spec.Tools = append(builtinAdded.Spec.Tools, corev1alpha1.ConnectorTool{Name: "list_issues", Class: corev1alpha1.ConnectorToolClassRead, Source: corev1alpha1.ConnectorToolSourceBuiltin})
+	if ProviderAuthorityDigest(builtinAdded) == digest || ProviderIssuerDigest(builtinAdded) != ProviderIssuerDigest(provider) {
+		t.Fatal("a new built-in declaration must require consent again without moving the issuer digest")
+	}
+	reclassed := provider.DeepCopy()
+	reclassed.Spec.Tools[1].Class = corev1alpha1.ConnectorToolClassRead
+	if ProviderAuthorityDigest(reclassed) == digest {
+		t.Fatal("a built-in's class is part of the consented authority")
 	}
 }
 

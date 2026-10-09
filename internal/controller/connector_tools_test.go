@@ -104,9 +104,47 @@ func (f connectorToolFixture) connection(mode string, ready bool) *corev1alpha1.
 	return connection
 }
 
+// reader serves the fixture objects plus extra. Without a "github"
+// provider among extra an accepted one is served, and every linked
+// Connection without a consent record carries the consent the flow records
+// against the provider it is read with, so a stale-consent case is built by
+// setting Status.Consent explicitly.
 func (f connectorToolFixture) reader(extra ...ctrlclient.Object) ctrlclient.Client {
-	objects := append([]ctrlclient.Object{f.policy, f.direct, f.readTool, f.writeTool, f.plainTool, f.directTool}, extra...)
+	providers := map[string]*corev1alpha1.ConnectorProvider{}
+	for _, object := range extra {
+		if provider, ok := object.(*corev1alpha1.ConnectorProvider); ok {
+			providers[provider.Name] = provider
+		}
+	}
+	objects := []ctrlclient.Object{f.policy, f.direct, f.readTool, f.writeTool, f.plainTool, f.directTool}
+	if _, ok := providers["github"]; !ok {
+		providers["github"] = acceptedBuiltinProvider("github")
+		objects = append(objects, providers["github"])
+	}
+	for _, object := range extra {
+		if connection, ok := object.(*corev1alpha1.Connection); ok {
+			object = consentedConnection(connection, providers[connection.Spec.ProviderRef.Name])
+		}
+		objects = append(objects, object)
+	}
 	return ctrlfake.NewClientBuilder().WithScheme(f.scheme).WithObjects(objects...).Build()
+}
+
+// consentedConnection returns a copy of a linked Connection carrying the
+// consent and granted scopes the consent flow records against provider,
+// unless it already has a consent record.
+func consentedConnection(connection *corev1alpha1.Connection, provider *corev1alpha1.ConnectorProvider) *corev1alpha1.Connection {
+	if connection == nil || provider == nil || connection.Status.GrantSequence == 0 || connection.Status.Consent != nil {
+		return connection
+	}
+	linked := connection.DeepCopy()
+	mode := linked.Spec.Mode
+	if mode == "" {
+		mode = corev1alpha1.ConnectionModeReadOnly
+	}
+	linked.Status.Consent = connectors.ConsentFor(provider)
+	linked.Status.GrantedScopes = connectors.ScopesForMode(provider, mode)
+	return linked
 }
 
 func TestFilterConnectorToolsForRequester(t *testing.T) {
@@ -155,7 +193,7 @@ func TestFilterConnectorToolsForRequester(t *testing.T) {
 func TestFreezeAndBindNativeConnections(t *testing.T) {
 	f := newConnectorToolFixture(t)
 	ctx := context.Background()
-	frozen, err := freezeRequesterConnectionsForTools(ctx, f.reader(f.connection(corev1alpha1.ConnectionModeReadWrite, true)), nil, f.task, []string{"gh_read", "gh_write", "plain", "direct_write"})
+	frozen, err := freezeRequesterConnectionsForTools(ctx, f.reader(f.connection(corev1alpha1.ConnectionModeReadWrite, true)), nil, f.task, []string{"gh_read", "gh_write", "plain", "direct_write"}, connectorScope{})
 	if err != nil || len(frozen) != 1 || frozen[0].PolicyName != "github-conn" || frozen[0].UID != "conn-uid" || frozen[0].Generation != 3 {
 		t.Fatalf("frozen = %+v err = %v", frozen, err)
 	}
@@ -175,8 +213,8 @@ func TestFreezeAndBindNativeConnections(t *testing.T) {
 	if executor.Requester() == nil || executor.Requester().Subject != "alice" {
 		t.Fatalf("requester = %+v", executor.Requester())
 	}
-	if got := executor.FrozenConnections()["github-conn"]; got.UID != "conn-uid" || got.Generation != 3 {
-		t.Fatalf("frozen map = %+v", executor.FrozenConnections())
+	if got := executor.FrozenConnections()["github-conn"]; got.UID != "conn-uid" || got.Generation != 3 || got.Provider != bindings[0].Provider || got.Provider == "" {
+		t.Fatalf("frozen map = %+v, want the binding's provider carried for the provider fence", executor.FrozenConnections())
 	}
 	if FrozenConnectionsFromTaskStatus(nil) != nil || FrozenConnectionsFromTaskStatus(f.task) != nil {
 		t.Fatal("tasks without bindings must yield nil")
@@ -386,6 +424,49 @@ func TestConnectorToolsSkipBuiltinNames(t *testing.T) {
 	visible, write, err = FilterConnectorToolsForRequester(context.Background(), reader, tools.NewRegistry(), f.task, names)
 	if err != nil || len(visible) != 0 || len(write) != 0 {
 		t.Fatalf("visible = %v write = %v err = %v, want the shadowed resource classified by the runtime registry", visible, write, err)
+	}
+}
+
+// TestRequesterConnectionRevalidatesAgainstCurrentProvider covers a Ready
+// Connection the Connection controller has not yet re-judged after a
+// provider change: a consent granted against another authority, granted
+// scopes that no longer cover the mode, or a provider that is no longer
+// accepted make the link unusable at dispatch, instead of freezing a grant
+// the credential source refuses on every call.
+func TestRequesterConnectionRevalidatesAgainstCurrentProvider(t *testing.T) {
+	f := newConnectorToolFixture(t)
+	ctx := context.Background()
+	provider := acceptedBuiltinProvider("github")
+	provider.Spec.OAuth.Scopes.Read = []string{"read:user"}
+	usable := consentedConnection(f.connection(corev1alpha1.ConnectionModeReadOnly, true), provider)
+	if connection, err := requesterConnection(ctx, f.reader(provider, usable), f.task, "github"); err != nil || connection == nil {
+		t.Fatalf("current consent: connection = %v err = %v, want usable", connection, err)
+	}
+	stale := usable.DeepCopy()
+	stale.Status.Consent.AuthorityDigest = "consented-before-the-provider-changed"
+	narrow := usable.DeepCopy()
+	narrow.Status.GrantedScopes = nil
+	unaccepted := provider.DeepCopy()
+	unaccepted.Status.Conditions = nil
+	for name, reader := range map[string]ctrlclient.Client{
+		"stale consent":       f.reader(provider, stale),
+		"scopes do not cover": f.reader(provider, narrow),
+		"provider unaccepted": f.reader(unaccepted, usable),
+	} {
+		if connection, err := requesterConnection(ctx, reader, f.task, "github"); err != nil || connection != nil {
+			t.Fatalf("%s: connection = %v err = %v, want no usable link", name, connection, err)
+		}
+	}
+	failing := ctrlfake.NewClientBuilder().WithScheme(f.scheme).WithObjects(provider, usable).WithInterceptorFuncs(interceptor.Funcs{
+		Get: func(ctx context.Context, c ctrlclient.WithWatch, key ctrlclient.ObjectKey, obj ctrlclient.Object, opts ...ctrlclient.GetOption) error {
+			if _, ok := obj.(*corev1alpha1.ConnectorProvider); ok {
+				return errors.New("apiserver unavailable")
+			}
+			return c.Get(ctx, key, obj, opts...)
+		},
+	}).Build()
+	if _, err := requesterConnection(ctx, failing, f.task, "github"); err == nil {
+		t.Fatal("a provider read failure must be retried, not treated as unlinked")
 	}
 }
 

@@ -2963,9 +2963,11 @@ func TestJobBuilder_buildEnvVars_ConnectorWriteToolsRequireApprovalAndHideOnRead
 	}
 	var toolReadFailure atomic.Bool
 	buildWith := func(connection *corev1alpha1.Connection) []corev1.EnvVar {
-		objects := []client.Object{policy, connectorTool("gh_read", corev1alpha1.AgentRuntimeBrokeredToolClassRead), connectorTool("gh_write", corev1alpha1.AgentRuntimeBrokeredToolClassWrite)}
+		provider := acceptedBuiltinProvider("github")
+		provider.Namespace = defaultNS
+		objects := []client.Object{policy, provider, connectorTool("gh_read", corev1alpha1.AgentRuntimeBrokeredToolClassRead), connectorTool("gh_write", corev1alpha1.AgentRuntimeBrokeredToolClassWrite)}
 		if connection != nil {
-			objects = append(objects, connection)
+			objects = append(objects, consentedConnection(connection, provider))
 		}
 		builder := setupJobBuilder()
 		builder.Client = fake.NewClientBuilder().WithScheme(scheme).WithObjects(objects...).
@@ -3660,7 +3662,7 @@ func TestJobBuilder_buildEnvVars_ConnectorDispatchUsesTheFreezeAndNativeRegistry
 	}
 	// The freeze's own per-tool classification, as createTaskJob hands it on.
 	freezeInfos, err := classifyConnectorTools(context.Background(), builder.Client, NativeWorkerToolRegistry(task, agent), defaultNS,
-		[]string{"gh_read", "gh_write", "delegate_task"}, true)
+		[]string{"gh_read", "gh_write", "delegate_task"}, connectorScope{strictPolicies: true})
 	if err != nil {
 		t.Fatal(err)
 	}
