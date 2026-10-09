@@ -24,6 +24,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -445,8 +446,14 @@ func (e *ToolExecutor) executePreparedToolRequest(ctx context.Context, prepared 
 
 	if prepared.direct && !e.skipDirectPublicValidation {
 		dialContext := tokenexchange.PublicEndpointDialContext
-		if prepared.trustedActorRoute {
+		switch {
+		case prepared.trustedActorRoute:
 			dialContext = exactEndpointDialContext(prepared.request.URL)
+		case prepared.connection && allowPrivateConnectionEndpoints.Load():
+			// The fixture allowance relaxes only where a linked-account
+			// request may go; the transport keeps its hardening (no proxy,
+			// verified TLS 1.2 or newer, no custom TLS dial).
+			dialContext = privateConnectionEndpointDialContext
 		}
 		httpClient, err = directCredentialHTTPClient(httpClient, dialContext)
 		if err != nil {
@@ -475,6 +482,11 @@ func (e *ToolExecutor) executePreparedToolRequest(ctx context.Context, prepared 
 
 	return string(respBody), nil
 }
+
+// privateConnectionEndpointDialContext dials private addresses for the
+// fixture-only allowance on linked-account requests, still refusing the
+// infrastructure addresses.
+var privateConnectionEndpointDialContext = connectors.PrivateEndpointDialContext
 
 func directCredentialHTTPClient(
 	base *http.Client,
@@ -527,6 +539,16 @@ func exactEndpointDialContext(endpoint *neturl.URL) func(context.Context, string
 		return dialer.DialContext(ctx, network, address)
 	}
 }
+
+// allowPrivateConnectionEndpoints lets connection-mode (linked-account)
+// requests reach private and cluster-local destinations. It exists for
+// local and CI fixtures only and is set once by the controller from its
+// dev-only flag; worker Pods never set it.
+var allowPrivateConnectionEndpoints atomic.Bool
+
+// SetAllowPrivateConnectionEndpoints turns the fixture allowance on or off
+// for this process. Never enable it in production.
+func SetAllowPrivateConnectionEndpoints(allowed bool) { allowPrivateConnectionEndpoints.Store(allowed) }
 
 func toolHTTPClient(base *http.Client, timeout *metav1.Duration, gatewayTLS tokenexchange.TLSConfig, gateway, connection bool) (*http.Client, error) {
 	if base == nil {

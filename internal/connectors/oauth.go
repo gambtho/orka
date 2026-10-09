@@ -120,10 +120,19 @@ func (e *OAuthError) IsInvalidGrant() bool {
 }
 
 // OAuthClient performs the authorization-code, refresh, and revocation calls
-// against public HTTPS endpoints only.
+// against public HTTPS endpoints. The one exception is the fixture-only
+// private-endpoint allowance (OAuthClientOptions.AllowPrivateEndpoints,
+// behind --connectors-allow-private-endpoints): it lets the client reach
+// private and cluster-local HTTPS endpoints through the hardened
+// PrivateEndpointDialContext, which still refuses infrastructure addresses.
+// Production configurations cannot enable it.
 type OAuthClient struct {
 	httpClient *http.Client
 	now        func() time.Time
+	// allowPrivate mirrors OAuthClientOptions.AllowPrivateEndpoints: when
+	// set, the public-address check on the token and revocation endpoints
+	// is skipped, because the dialer enforces the infrastructure block list.
+	allowPrivate bool
 }
 
 // OAuthClientOptions customizes an OAuthClient. Tests supply an HTTPClient
@@ -131,6 +140,9 @@ type OAuthClient struct {
 type OAuthClientOptions struct {
 	HTTPClient *http.Client
 	Now        func() time.Time
+	// AllowPrivateEndpoints dials private and cluster-local provider
+	// endpoints too. Fixture use only; see SetAllowPrivateEndpoints.
+	AllowPrivateEndpoints bool
 }
 
 // NewOAuthClient builds a client whose default transport dials only public
@@ -141,9 +153,13 @@ func NewOAuthClient(opts OAuthClientOptions) *OAuthClient {
 		// No proxy: through a CONNECT proxy the public-address dialer would only
 		// validate the proxy hop, so a hostname resolving to a private address
 		// could bypass the endpoint check. Providers are public; dial them directly.
+		dialContext := tokenexchange.PublicEndpointDialContext
+		if opts.AllowPrivateEndpoints {
+			dialContext = PrivateEndpointDialContext
+		}
 		transport := &http.Transport{
 			Proxy:               nil,
-			DialContext:         tokenexchange.PublicEndpointDialContext,
+			DialContext:         dialContext,
 			ForceAttemptHTTP2:   false,
 			TLSHandshakeTimeout: 10 * time.Second,
 			MaxIdleConns:        16,
@@ -161,7 +177,7 @@ func NewOAuthClient(opts OAuthClientOptions) *OAuthClient {
 	if now == nil {
 		now = time.Now
 	}
-	return &OAuthClient{httpClient: httpClient, now: now}
+	return &OAuthClient{httpClient: httpClient, now: now, allowPrivate: opts.AllowPrivateEndpoints}
 }
 
 // GeneratePKCE returns a fresh RFC 7636 verifier and its S256 challenge.
@@ -396,12 +412,16 @@ func (c *OAuthClient) post(ctx context.Context, cfg OAuthProviderConfig, endpoin
 	}
 	// The same host rules as provider validation: an endpoint stored before
 	// a rule existed, or that bypassed admission, is refused here too rather
-	// than left to DNS resolution alone.
-	if host := parsed.Hostname(); host == "" || strings.HasSuffix(host, ".") || strings.Contains(host, "%") || !asciiHost(host) ||
-		hostDenied(strings.ToLower(host)) || (net.ParseIP(host) == nil && nonCanonicalNumericHost(host)) {
+	// than left to DNS resolution alone. The fixture allowance relaxes only
+	// the general private and cluster-local names; infrastructure hosts stay
+	// denied.
+	host := parsed.Hostname()
+	if host == "" || strings.HasSuffix(host, ".") || strings.Contains(host, "%") || !asciiHost(host) ||
+		(net.ParseIP(host) == nil && nonCanonicalNumericHost(host)) || InfrastructureHostDenied(host) ||
+		(!c.allowPrivate && hostDenied(strings.ToLower(host))) {
 		return nil, errors.New("provider endpoint host is not allowed")
 	}
-	if ip := net.ParseIP(parsed.Hostname()); ip != nil && !tokenexchange.IsPublicAddress(ip) {
+	if ip := net.ParseIP(parsed.Hostname()); ip != nil && !tokenexchange.IsPublicAddress(ip) && !c.allowPrivate {
 		return nil, errors.New("provider endpoint host is not a public address")
 	}
 	switch cfg.ClientAuthentication {

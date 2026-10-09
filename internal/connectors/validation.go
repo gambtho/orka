@@ -19,10 +19,12 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"regexp"
 	"slices"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -110,6 +112,19 @@ var (
 	}
 )
 
+// allowPrivateEndpoints relaxes the public-host rules for provider and tool
+// endpoints. It exists for local and CI fixtures only: a controller that
+// sets it will hand a person's token to a cluster-local address.
+var allowPrivateEndpoints atomic.Bool
+
+// SetAllowPrivateEndpoints turns the private-endpoint allowance on or off
+// for this process. Never enable it in production.
+func SetAllowPrivateEndpoints(allowed bool) { allowPrivateEndpoints.Store(allowed) }
+
+// PrivateEndpointsAllowed reports whether private, loopback, and
+// cluster-local provider endpoints are accepted in this process.
+func PrivateEndpointsAllowed() bool { return allowPrivateEndpoints.Load() }
+
 // hostDenied reports whether host is a denied name, lies under one, extends
 // one with more labels (kubernetes.default.svc.example), carries a
 // cluster-local service label, or is a single-label name, which a Pod's DNS
@@ -131,6 +146,90 @@ func hostDenied(host string) bool {
 	}
 	// <service>.<namespace>.svc.<cluster-domain> under any cluster domain.
 	return strings.Contains(host, ".svc.")
+}
+
+// InfrastructureHostDenied reports the hosts no connector endpoint may
+// ever name, allowance or not: cloud metadata services and the Kubernetes
+// API service under any cluster domain. host is compared lowercased.
+func InfrastructureHostDenied(host string) bool {
+	host = strings.ToLower(host)
+	host = strings.TrimSuffix(host, ".")
+	for _, denied := range []string{"metadata.google.internal", "metadata", "kubernetes.default", "kubernetes.default.svc"} {
+		if host == denied || strings.HasPrefix(host, "kubernetes.default.svc.") {
+			return true
+		}
+	}
+	// The API server's own address as the Pod sees it, so an alias or a
+	// rebinding to the literal address is refused like the name.
+	if apiHost := strings.ToLower(strings.TrimSpace(os.Getenv("KUBERNETES_SERVICE_HOST"))); apiHost != "" && host == strings.Trim(apiHost, "[]") {
+		return true
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		return InfrastructureAddressDenied(ip)
+	}
+	return false
+}
+
+// InfrastructureAddressDenied reports the addresses no connector request
+// may be dialed to under the private-endpoint allowance: the cloud metadata
+// services and the Kubernetes API service address. The general private,
+// loopback, and link-local rules are applied separately, outside the
+// allowance.
+func InfrastructureAddressDenied(ip net.IP) bool {
+	if ip == nil {
+		return false
+	}
+	// The whole link-local range: cloud metadata and credential services
+	// (169.254.169.254, EKS Pod Identity at 169.254.170.23, and the like)
+	// live there, and no fixture needs it; plus the IPv6 metadata address.
+	if ip.IsLinkLocalUnicast() || ip.Equal(net.ParseIP("fd00:ec2::254")) {
+		return true
+	}
+	// Alibaba Cloud serves instance metadata from the shared address range
+	// rather than link-local, so the general private allowance would let it
+	// through.
+	if ip.Equal(net.ParseIP("100.100.100.200")) {
+		return true
+	}
+	if apiHost := net.ParseIP(strings.Trim(strings.TrimSpace(os.Getenv("KUBERNETES_SERVICE_HOST")), "[]")); apiHost != nil && ip.Equal(apiHost) {
+		return true
+	}
+	return false
+}
+
+// PrivateEndpointDialContext is the dialer for the fixture-only allowance:
+// it reaches private and cluster-local addresses, but never the
+// infrastructure addresses, whatever name resolved to them.
+func PrivateEndpointDialContext(ctx context.Context, network, address string) (net.Conn, error) {
+	host, port, err := net.SplitHostPort(address)
+	if err != nil {
+		return nil, err
+	}
+	if InfrastructureHostDenied(host) {
+		return nil, fmt.Errorf("refusing to dial infrastructure host %q", host)
+	}
+	addresses, err := net.DefaultResolver.LookupIPAddr(ctx, host)
+	if err != nil {
+		return nil, err
+	}
+	for _, candidate := range addresses {
+		if InfrastructureAddressDenied(candidate.IP) {
+			return nil, fmt.Errorf("refusing to dial %q: it resolves to the infrastructure address %s", host, candidate.IP)
+		}
+	}
+	dialer := &net.Dialer{Timeout: 10 * time.Second}
+	var lastErr error
+	for _, candidate := range addresses {
+		conn, err := dialer.DialContext(ctx, network, net.JoinHostPort(candidate.IP.String(), port))
+		if err == nil {
+			return conn, nil
+		}
+		lastErr = err
+	}
+	if lastErr == nil {
+		lastErr = fmt.Errorf("no addresses for %q", host)
+	}
+	return nil, lastErr
 }
 
 // validHeaderToken reports whether name is an RFC 9110 token, which is what
@@ -331,11 +430,20 @@ func validateURL(field, raw string, required, oauthEndpoint bool) *Issue {
 	if ip := net.ParseIP(host); ip == nil && nonCanonicalNumericHost(host) {
 		return invalid(fmt.Sprintf("oauth.%s host must be a hostname or a canonical IP address", field))
 	}
-	if hostDenied(strings.ToLower(host)) {
-		return invalid(fmt.Sprintf("oauth.%s host is not allowed", field))
+	if !PrivateEndpointsAllowed() {
+		if hostDenied(strings.ToLower(host)) {
+			return invalid(fmt.Sprintf("oauth.%s host is not allowed", field))
+		}
+		if ip := net.ParseIP(host); ip != nil && !tokenexchange.IsPublicAddress(ip) {
+			return invalid(fmt.Sprintf("oauth.%s must not target private, loopback, or link-local addresses", field))
+		}
 	}
-	if ip := net.ParseIP(host); ip != nil && !tokenexchange.IsPublicAddress(ip) {
-		return invalid(fmt.Sprintf("oauth.%s must not target private, loopback, or link-local addresses", field))
+	// The fixed infrastructure hosts (cloud metadata and credential services
+	// on the link-local range, the Kubernetes API) stay denied even under
+	// the fixture allowance, which relaxes only the general private,
+	// loopback, and cluster-local rules.
+	if InfrastructureHostDenied(host) {
+		return invalid(fmt.Sprintf("oauth.%s host is not allowed", field))
 	}
 	return validateEndpointQuery(field, parsed.RawQuery, oauthEndpoint)
 }
