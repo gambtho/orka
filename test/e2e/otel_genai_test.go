@@ -10,6 +10,7 @@ MIT License - see LICENSE file for details.
 package e2e
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os/exec"
@@ -296,7 +297,9 @@ with urllib.request.urlopen(sys.argv[1], timeout=2) as response:
     print(response.read().decode("utf-8"))
 `
 	Eventually(func(g Gomega) {
-		cmd := exec.Command("kubectl", "exec", "deployment/"+otelFakeOpenAIName,
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		cmd := exec.CommandContext(ctx, "kubectl", "exec", "deployment/"+otelFakeOpenAIName,
 			"-n", namespace, "-c", "fake-openai", "--", "python", "-c", probe, endpoint)
 		output, err := utils.Run(cmd)
 		g.Expect(err).NotTo(HaveOccurred(), "controller API Service is not ready from the task network")
