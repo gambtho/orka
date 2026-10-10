@@ -2,7 +2,11 @@ package acp
 
 import (
 	"bufio"
+	"context"
+	"encoding/json"
 	"errors"
+	"io"
+	"sync"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -170,6 +174,177 @@ func TestRuntimeSessionLeaseFiredTimerCannotRenewExpiredAuthority(t *testing.T) 
 			t.Fatalf("expired fired-timer renewal = %v, deadline = %v", err, active.leaseDeadline)
 		}
 	})
+}
+
+// A session/cancel notification has no prompt identity. Even after the old
+// result is published, replacement admission must wait for a delayed write.
+func TestRuntimeSessionLeasePendingCancelFencesReplacement(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		session, peer := newLeaseTestRuntimeSession(t)
+		client := session.process.Client()
+		gate := &leaseTestCancelWriter{Writer: client.writer, entered: make(chan struct{}), release: make(chan struct{})}
+		client.writer = gate
+		released := false
+		defer func() {
+			if !released {
+				close(gate.release)
+			}
+		}()
+		deadline := time.Now().UTC().Add(time.Second)
+		run, err := session.StartPromptWithLeaseDeadline(t.Context(), "old", "sha256:old", []ContentBlock{Text("wait")}, deadline)
+		if err != nil {
+			t.Fatal(err)
+		}
+		reader := bufio.NewReader(peer)
+		request, err := readTestMessage(reader)
+		if err != nil {
+			t.Fatal(err)
+		}
+		<-run.Events
+
+		// Delay the real courtesy write before bytes reach the peer. Its
+		// writeMu remains held; the independent read loop can still settle.
+		time.Sleep(time.Second)
+		<-gate.entered
+		synctest.Wait()
+		session.mu.Lock()
+		decided := session.active.cancelRequested
+		session.mu.Unlock()
+		if !decided {
+			t.Fatal("expiry did not commit cancellation")
+		}
+		if err := writeTestMessage(peer, map[string]any{
+			"jsonrpc": "2.0", "id": request.ID,
+			"result": map[string]any{"stopReason": StopReasonEndTurn},
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if result := <-run.Result; result.Outcome != PromptOutcomeCancelled || !result.Accepted {
+			t.Fatalf("old prompt settlement = %#v, want accepted cancellation", result)
+		}
+		synctest.Wait()
+		// The expiry caller's two-grace context ends while the writer is
+		// still blocked. Caller cancellation must not release admission.
+		time.Sleep(2 * session.config.CancelGrace)
+		synctest.Wait()
+		if _, err := session.StartPromptWithLeaseDeadline(t.Context(), "new", "sha256:new", []ContentBlock{Text("replacement")}, time.Now().Add(time.Minute)); err == nil {
+			t.Fatal("replacement admitted while old session/cancel write was pending")
+		} else if err.Error() != "runtime session has a pending prompt cancellation write" {
+			t.Fatalf("replacement rejected for an unrelated reason: %v", err)
+		}
+		close(gate.release)
+		released = true
+		cancelMessage, err := readTestMessage(reader)
+		if err != nil || cancelMessage.Method != MethodSessionCancel {
+			t.Fatalf("old courtesy notification = %#v, error = %v", cancelMessage, err)
+		}
+		synctest.Wait() // The full courtesy write has completed.
+		replacement, err := session.StartPromptWithLeaseDeadline(t.Context(), "new", "sha256:new", []ContentBlock{Text("replacement")}, time.Now().Add(time.Minute))
+		if err != nil {
+			t.Fatalf("replacement rejected after old cancel finished: %v", err)
+		}
+		newRequest, err := readTestMessage(reader)
+		if err != nil || newRequest.Method != MethodSessionPrompt {
+			t.Fatalf("replacement request = %#v, error = %v", newRequest, err)
+		}
+		<-replacement.Events
+		// A subsequent real notification is an ordered wire barrier: any
+		// leftover old cancellation would be observed before this message.
+		barrierDone := make(chan error, 1)
+		go func() { barrierDone <- client.Notify(context.Background(), "test/barrier", nil) }()
+		message, err := readTestMessage(reader)
+		if err != nil || message.Method != "test/barrier" {
+			t.Fatalf("old cancel reached replacement: message = %#v, error = %v", message, err)
+		}
+		if err := <-barrierDone; err != nil {
+			t.Fatal(err)
+		}
+		if err := writeTestMessage(peer, map[string]any{
+			"jsonrpc": "2.0", "id": newRequest.ID,
+			"result": map[string]any{"stopReason": StopReasonEndTurn},
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if result := <-replacement.Result; result.Outcome != PromptOutcomeCompleted || result.StopReason != StopReasonEndTurn {
+			t.Fatalf("replacement settlement = %#v, want completed", result)
+		}
+	})
+}
+
+func TestRuntimeSessionLeaseBlockedCancelKeepsGraceBounded(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		session, peer := newLeaseTestRuntimeSession(t)
+		client := session.process.Client()
+		gate := &leaseTestCancelWriter{Writer: client.writer, entered: make(chan struct{}), release: make(chan struct{})}
+		client.writer = gate
+		defer close(gate.release)
+		run, err := session.StartPromptWithLeaseDeadline(t.Context(), "blocked", "sha256:blocked", []ContentBlock{Text("wait")}, time.Now().Add(time.Minute))
+		if err != nil {
+			t.Fatal(err)
+		}
+		request, err := readTestMessage(bufio.NewReader(peer))
+		if err != nil {
+			t.Fatal(err)
+		}
+		<-run.Events
+		started := time.Now()
+		ctx, cancel := context.WithTimeout(t.Context(), 2*session.config.CancelGrace)
+		defer cancel()
+		cancelled := make(chan error, 1)
+		go func() {
+			_, err := session.CancelPrompt(ctx, "blocked")
+			cancelled <- err
+		}()
+		<-gate.entered
+		synctest.Wait()
+		time.Sleep(session.config.CancelGrace)
+		synctest.Wait() // The nil-process fixture's Stop returns without settlement.
+		select {
+		case err := <-cancelled:
+			t.Fatalf("cancellation returned before its context bound: %v", err)
+		default:
+		}
+		time.Sleep(session.config.CancelGrace)
+		synctest.Wait()
+		select {
+		case err := <-cancelled:
+			if !errors.Is(err, context.DeadlineExceeded) || time.Since(started) != 2*session.config.CancelGrace {
+				t.Fatalf("bounded cancellation = %v at %v", err, time.Since(started))
+			}
+		default:
+			t.Fatal("blocked courtesy write prevented bounded cancellation return")
+		}
+		// A response still settles normally while the write is blocked, so
+		// neither grace escalation nor transport waiting holds the session lock.
+		if err := writeTestMessage(peer, map[string]any{
+			"jsonrpc": "2.0", "id": request.ID,
+			"result": map[string]any{"stopReason": StopReasonEndTurn},
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if result := <-run.Result; result.Outcome != PromptOutcomeCompleted {
+			t.Fatalf("blocked-write settlement = %#v, want completed", result)
+		}
+	})
+}
+
+type leaseTestCancelWriter struct {
+	io.Writer
+	entered chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (w *leaseTestCancelWriter) Write(data []byte) (int, error) {
+	var message rpcMessage
+	if err := json.Unmarshal(data, &message); err != nil {
+		return 0, err
+	}
+	if message.Method == MethodSessionCancel {
+		w.once.Do(func() { close(w.entered) })
+		<-w.release
+	}
+	return w.Writer.Write(data)
 }
 
 // Captures the callback's authority when the timer is armed.

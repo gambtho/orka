@@ -50,11 +50,12 @@ type RuntimeSession struct {
 	process           *Process
 	config            RuntimeSessionConfig
 
-	mu         sync.Mutex
-	active     *activePrompt
-	tombstones map[string]PromptTombstone
-	deleted    bool
-	deletion   *runtimeSessionDeletion
+	mu                  sync.Mutex
+	active              *activePrompt
+	pendingCancelWrites int
+	tombstones          map[string]PromptTombstone
+	deleted             bool
+	deletion            *runtimeSessionDeletion
 }
 
 type runtimeSessionDeletion struct {
@@ -150,23 +151,24 @@ func (e *StalePromptError) Error() string {
 }
 
 type activePrompt struct {
-	id              string
-	requestDigest   string
-	request         PromptRequest
-	events          chan PromptEvent
-	result          chan PromptResult
-	done            chan struct{}
-	seq             int64
-	accepted        bool
-	settled         bool
-	overflowed      bool
-	bufferedBytes   int
-	cancelRequested bool
-	lease           *time.Timer
-	leaseDeadline   time.Time
-	leaseVersion    uint64
-	permissions     map[string]*pendingPermission
-	preAccepted     []PromptEvent
+	id                    string
+	requestDigest         string
+	request               PromptRequest
+	events                chan PromptEvent
+	result                chan PromptResult
+	done                  chan struct{}
+	seq                   int64
+	accepted              bool
+	settled               bool
+	overflowed            bool
+	bufferedBytes         int
+	cancelRequested       bool
+	courtesyCancelStarted bool
+	lease                 *time.Timer
+	leaseDeadline         time.Time
+	leaseVersion          uint64
+	permissions           map[string]*pendingPermission
+	preAccepted           []PromptEvent
 }
 
 type pendingPermission struct {
@@ -317,6 +319,12 @@ func (s *RuntimeSession) StartPromptWithLeaseDeadline(ctx context.Context, promp
 		s.mu.Unlock()
 		return PromptRun{}, &DuplicatePromptError{PromptID: promptID, Result: &result}
 	}
+	// session/cancel identifies only the provider session, so settlement
+	// alone cannot allow a new prompt while an old cancel can still arrive.
+	if s.pendingCancelWrites != 0 {
+		s.mu.Unlock()
+		return PromptRun{}, fmt.Errorf("runtime session has a pending prompt cancellation write")
+	}
 	active := &activePrompt{
 		id:            promptID,
 		requestDigest: requestDigest,
@@ -407,25 +415,38 @@ func (s *RuntimeSession) CancelPrompt(ctx context.Context, promptID string) (Pro
 		}
 		return PromptResult{}, &StalePromptError{PromptID: promptID}
 	}
-	active.cancelRequested = true
-	cancelPendingPermissions(active)
+	s.startPromptCancellationLocked(active)
 	s.mu.Unlock()
 	return s.cancelPrompt(ctx, active)
 }
 
-// cancelPrompt acts on the exact prompt whose cancellation was decided under
-// s.mu. Lease expiry must not look up renewable authority again after unlocking.
+// startPromptCancellationLocked commits cancellation and reserves the admission
+// fence before unlocking, even if settlement beats the courtesy goroutine.
+func (s *RuntimeSession) startPromptCancellationLocked(active *activePrompt) {
+	active.cancelRequested = true
+	cancelPendingPermissions(active)
+	if active.courtesyCancelStarted {
+		return
+	}
+	active.courtesyCancelStarted = true
+	s.pendingCancelWrites++
+	go func() {
+		// Notify may return on caller-context expiry with its write still
+		// queued. Keep the fence until the write ends (or the client closes),
+		// independently of the bounded grace/stop path. Process exit closes
+		// stdin and unblocks a wedged write. Never hold s.mu across transport I/O.
+		_ = s.process.Client().Cancel(context.Background(), s.providerSessionID)
+		s.mu.Lock()
+		s.pendingCancelWrites--
+		s.mu.Unlock()
+	}()
+}
+
+// cancelPrompt joins the exact prompt whose cancellation was started under s.mu.
+// Its grace/stop escalation must not wait for a blocked courtesy write.
 func (s *RuntimeSession) cancelPrompt(ctx context.Context, active *activePrompt) (PromptResult, error) {
 	promptID := active.id
 	done := active.done
-	// Best-effort courtesy cancel: the notification write can block when the
-	// adapter stops reading stdin, and cancellation must reach the bounded
-	// grace/stop escalation below regardless. A healthy adapter settles the
-	// prompt (closing done); a dead or wedged transport is escalated to the
-	// bounded process stop after the grace window.
-	go func() {
-		_ = s.process.Client().Cancel(ctx, s.providerSessionID)
-	}()
 	timer := time.NewTimer(s.config.CancelGrace)
 	defer timer.Stop()
 	select {
@@ -766,9 +787,8 @@ func (s *RuntimeSession) expirePrompt(active *activePrompt, version uint64) {
 		s.mu.Unlock()
 		return
 	}
-	// Commit expiry under the same lock as renewal before doing blocking I/O.
-	active.cancelRequested = true
-	cancelPendingPermissions(active)
+	// Commit expiry and fence replacement under the same lock as renewal.
+	s.startPromptCancellationLocked(active)
 	s.mu.Unlock()
 	ctx, cancel := context.WithTimeout(context.Background(), s.config.CancelGrace*2)
 	defer cancel()
