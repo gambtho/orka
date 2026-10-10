@@ -164,6 +164,7 @@ type activePrompt struct {
 	cancelRequested bool
 	lease           *time.Timer
 	leaseDeadline   time.Time
+	leaseVersion    uint64
 	permissions     map[string]*pendingPermission
 	preAccepted     []PromptEvent
 }
@@ -326,7 +327,7 @@ func (s *RuntimeSession) StartPromptWithLeaseDeadline(ctx context.Context, promp
 		leaseDeadline: leaseDeadline,
 		permissions:   make(map[string]*pendingPermission),
 	}
-	active.lease = time.AfterFunc(time.Until(leaseDeadline), func() { s.expirePrompt(promptID) })
+	s.resetPromptLeaseLocked(active)
 	s.active = active
 	s.mu.Unlock()
 
@@ -359,14 +360,17 @@ func (s *RuntimeSession) RenewPromptLeaseUntil(promptID string, leaseDeadline ti
 	if !leaseDeadline.After(now) {
 		return fmt.Errorf("prompt lease deadline must be in the future")
 	}
-	if s.active == nil || s.active.id != promptID || s.active.settled {
+	if s.active == nil || s.active.id != promptID || s.active.settled || s.active.cancelRequested {
 		return &StalePromptError{PromptID: promptID}
 	}
-	if !s.active.leaseDeadline.After(now) || !s.active.lease.Stop() {
+	if !s.active.leaseDeadline.After(now) {
 		return &StalePromptError{PromptID: promptID}
 	}
+	// A relative timer may already have fired after a backward wall-clock
+	// step. Only the absolute deadline or a locked cancellation decision
+	// ends renewal authority; fence any queued callback with a new version.
 	s.active.leaseDeadline = leaseDeadline
-	s.active.lease.Reset(time.Until(leaseDeadline))
+	s.resetPromptLeaseLocked(s.active)
 	return nil
 }
 
@@ -405,9 +409,15 @@ func (s *RuntimeSession) CancelPrompt(ctx context.Context, promptID string) (Pro
 	}
 	active.cancelRequested = true
 	cancelPendingPermissions(active)
-	done := active.done
 	s.mu.Unlock()
+	return s.cancelPrompt(ctx, active)
+}
 
+// cancelPrompt acts on the exact prompt whose cancellation was decided under
+// s.mu. Lease expiry must not look up renewable authority again after unlocking.
+func (s *RuntimeSession) cancelPrompt(ctx context.Context, active *activePrompt) (PromptResult, error) {
+	promptID := active.id
+	done := active.done
 	// Best-effort courtesy cancel: the notification write can block when the
 	// adapter stops reading stdin, and cancellation must reach the bounded
 	// grace/stop escalation below regardless. A healthy adapter settles the
@@ -733,10 +743,36 @@ func (s *RuntimeSession) markOverflowedLocked(active *activePrompt) {
 	}(active.id)
 }
 
-func (s *RuntimeSession) expirePrompt(promptID string) {
+func (s *RuntimeSession) resetPromptLeaseLocked(active *activePrompt) {
+	if active.lease != nil {
+		active.lease.Stop()
+	}
+	active.leaseVersion++
+	version := active.leaseVersion
+	active.lease = time.AfterFunc(time.Until(active.leaseDeadline), func() { s.expirePrompt(active, version) })
+}
+
+func (s *RuntimeSession) expirePrompt(active *activePrompt, version uint64) {
+	s.mu.Lock()
+	if s.active != active || active.settled || active.cancelRequested || active.leaseVersion != version {
+		s.mu.Unlock()
+		return
+	}
+	// Timers wait a relative duration, but controller wire deadlines are
+	// absolute. A backward wall-clock step can leave authority live when the
+	// timer fires. Preserve monotonic comparisons for local deadlines too.
+	if remaining := time.Until(active.leaseDeadline); remaining > 0 {
+		active.lease.Reset(remaining)
+		s.mu.Unlock()
+		return
+	}
+	// Commit expiry under the same lock as renewal before doing blocking I/O.
+	active.cancelRequested = true
+	cancelPendingPermissions(active)
+	s.mu.Unlock()
 	ctx, cancel := context.WithTimeout(context.Background(), s.config.CancelGrace*2)
 	defer cancel()
-	_, _ = s.CancelPrompt(ctx, promptID)
+	_, _ = s.cancelPrompt(ctx, active)
 }
 
 func (s *RuntimeSession) removePermission(requestID string, pending *pendingPermission) {
