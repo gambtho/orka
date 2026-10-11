@@ -1204,6 +1204,9 @@ func (b *JobBuilder) addAIEnvVars(ctx context.Context, //nolint:gocyclo
 			envVars = append(envVars, envVar)
 		}
 	}
+	// Reserve the deployment even when omitted, so Task env and Agent Secret
+	// EnvFrom cannot override Provider routing or the logical model default.
+	envVars = setControllerEnvValue(envVars, workerenv.AIAzureDeploymentName, cfg.azureDeploymentName)
 
 	cfg.tools = aitools.ResolveWithGatewayReply(task, agent, opts.GatewayReplyEligible)
 	coordinationConfigured := agent != nil && agent.Spec.Coordination != nil && agent.Spec.Coordination.Enabled
@@ -1275,6 +1278,9 @@ func (b *JobBuilder) addAIEnvVars(ctx context.Context, //nolint:gocyclo
 			Value: fmt.Sprintf("%d", len(agent.Spec.Model.Fallbacks)),
 		})
 		for i, fb := range agent.Spec.Model.Fallbacks {
+			// Unresolvable configured slots must not retain a spoofed deployment.
+			deploymentKey := workerenv.FallbackAzureDeploymentNameKey(i)
+			envVars = setControllerEnvValue(envVars, deploymentKey, "")
 			// Resolve the fallback Provider CRD
 			fbProvider := &corev1alpha1.Provider{}
 			if err := b.Get(ctx, client.ObjectKey{
@@ -1293,7 +1299,7 @@ func (b *JobBuilder) addAIEnvVars(ctx context.Context, //nolint:gocyclo
 				fallbackEnv.AzureDeploymentName = fbProvider.Spec.Azure.DeploymentName
 			}
 			envVars = append(envVars, fallbackEnv.EnvVars(i)...)
-
+			envVars = setControllerEnvValue(envVars, deploymentKey, fallbackEnv.AzureDeploymentName)
 		}
 	}
 
