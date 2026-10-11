@@ -1048,15 +1048,16 @@ func setTransactionCredentialAuthorizationEnv(
 
 // aiConfig holds resolved AI configuration from provider, agent, and task.
 type aiConfig struct {
-	providerType    string
-	model           string
-	temperature     string
-	maxTokens       string
-	prompt          string
-	systemPrompt    string
-	baseURL         string
-	azureAPIVersion string
-	tools           []string
+	providerType        string
+	model               string
+	temperature         string
+	maxTokens           string
+	prompt              string
+	systemPrompt        string
+	baseURL             string
+	azureAPIVersion     string
+	azureDeploymentName string
+	tools               []string
 }
 
 // resolveAIConfig merges AI configuration from provider, agent, and task (in priority order).
@@ -1070,6 +1071,7 @@ func resolveAIConfig(task *corev1alpha1.Task, agent *corev1alpha1.Agent, provide
 		cfg.baseURL = providerCRD.Spec.BaseURL
 		if providerCRD.Spec.Azure != nil {
 			cfg.azureAPIVersion = providerCRD.Spec.Azure.APIVersion
+			cfg.azureDeploymentName = providerCRD.Spec.Azure.DeploymentName
 		}
 	}
 
@@ -1182,15 +1184,16 @@ func (b *JobBuilder) addAIEnvVars(ctx context.Context, //nolint:gocyclo
 	}
 
 	for _, envVar := range (workerenv.AIWorkerEnv{
-		Provider:        cfg.providerType,
-		Model:           cfg.model,
-		Temperature:     cfg.temperature,
-		MaxTokens:       cfg.maxTokens,
-		Prompt:          cfg.prompt,
-		SystemPrompt:    cfg.systemPrompt,
-		BaseURL:         cfg.baseURL,
-		AzureAPIVersion: cfg.azureAPIVersion,
-		ControllerMode:  string(b.ControllerMode),
+		Provider:            cfg.providerType,
+		Model:               cfg.model,
+		Temperature:         cfg.temperature,
+		MaxTokens:           cfg.maxTokens,
+		Prompt:              cfg.prompt,
+		SystemPrompt:        cfg.systemPrompt,
+		BaseURL:             cfg.baseURL,
+		AzureAPIVersion:     cfg.azureAPIVersion,
+		AzureDeploymentName: cfg.azureDeploymentName,
+		ControllerMode:      string(b.ControllerMode),
 	}).EnvVars() {
 		switch envVar.Name {
 		case workerenv.AITemperature, workerenv.AIMaxTokens:
@@ -1287,6 +1290,7 @@ func (b *JobBuilder) addAIEnvVars(ctx context.Context, //nolint:gocyclo
 			}
 			if fbProvider.Spec.Azure != nil {
 				fallbackEnv.AzureAPIVersion = fbProvider.Spec.Azure.APIVersion
+				fallbackEnv.AzureDeploymentName = fbProvider.Spec.Azure.DeploymentName
 			}
 			envVars = append(envVars, fallbackEnv.EnvVars(i)...)
 
