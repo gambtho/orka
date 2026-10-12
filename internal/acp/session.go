@@ -19,6 +19,14 @@ const (
 	DefaultInitializeTimeout  = 60 * time.Second
 )
 
+// ErrPromptCancellationPending rejects admission until an earlier session-scoped
+// cancellation write finishes. The prompt has not been accepted and may be retried.
+var ErrPromptCancellationPending = errors.New("runtime session has a pending prompt cancellation write")
+
+// ErrPromptCancellationTimedOut closes admission after an unresponsive
+// cancellation transport forces retirement; its queued write cannot be reused.
+var ErrPromptCancellationTimedOut = errors.New("runtime session cancellation transport timed out")
+
 type RuntimeSessionConfig struct {
 	ID             string
 	Generation     int64
@@ -53,6 +61,7 @@ type RuntimeSession struct {
 	mu                  sync.Mutex
 	active              *activePrompt
 	pendingCancelWrites int
+	cancelWriteTimedOut bool
 	tombstones          map[string]PromptTombstone
 	deleted             bool
 	deletion            *runtimeSessionDeletion
@@ -284,6 +293,14 @@ func (s *RuntimeSession) StartPrompt(ctx context.Context, promptID, requestDiges
 // StartPromptWithLeaseDeadline preserves the controller's absolute lease bound
 // across capability activation and admission delays.
 func (s *RuntimeSession) StartPromptWithLeaseDeadline(ctx context.Context, promptID, requestDigest string, prompt []ContentBlock, leaseDeadline time.Time) (PromptRun, error) {
+	return s.StartPromptWithLeaseDeadlineAndActivation(ctx, promptID, requestDigest, prompt, leaseDeadline, nil)
+}
+
+// StartPromptWithLeaseDeadlineAndActivation checks admission before activating
+// prompt capabilities, so a pending cancellation cannot create remote authority.
+// activate runs under the session lock: it must not perform transport I/O or call
+// another RuntimeSession method. An activation error leaves the prompt unaccepted.
+func (s *RuntimeSession) StartPromptWithLeaseDeadlineAndActivation(ctx context.Context, promptID, requestDigest string, prompt []ContentBlock, leaseDeadline time.Time, activate func() error) (PromptRun, error) {
 	promptID = strings.TrimSpace(promptID)
 	requestDigest = strings.TrimSpace(requestDigest)
 	if promptID == "" || requestDigest == "" || len(prompt) == 0 {
@@ -297,6 +314,10 @@ func (s *RuntimeSession) StartPromptWithLeaseDeadline(ctx context.Context, promp
 	if s.deleted {
 		s.mu.Unlock()
 		return PromptRun{}, fmt.Errorf("runtime session is deleted")
+	}
+	if s.cancelWriteTimedOut {
+		s.mu.Unlock()
+		return PromptRun{}, ErrPromptCancellationTimedOut
 	}
 	if active := s.active; active != nil {
 		if active.id != promptID {
@@ -323,7 +344,20 @@ func (s *RuntimeSession) StartPromptWithLeaseDeadline(ctx context.Context, promp
 	// alone cannot allow a new prompt while an old cancel can still arrive.
 	if s.pendingCancelWrites != 0 {
 		s.mu.Unlock()
-		return PromptRun{}, fmt.Errorf("runtime session has a pending prompt cancellation write")
+		return PromptRun{}, ErrPromptCancellationPending
+	}
+	if activate != nil {
+		if err := activate(); err != nil {
+			s.mu.Unlock()
+			return PromptRun{}, err
+		}
+	}
+	// Local capability locks can consume the remaining lease. Never dispatch
+	// behind an already-due asynchronous watchdog; the caller rolls back
+	// activated authority on this still-unaccepted error.
+	if !leaseDeadline.After(time.Now()) {
+		s.mu.Unlock()
+		return PromptRun{}, fmt.Errorf("prompt lease deadline expired during capability activation")
 	}
 	active := &activePrompt{
 		id:            promptID,
@@ -431,11 +465,24 @@ func (s *RuntimeSession) startPromptCancellationLocked(active *activePrompt) {
 	active.courtesyCancelStarted = true
 	s.pendingCancelWrites++
 	go func() {
-		// Notify may return on caller-context expiry with its write still
-		// queued. Keep the fence until the write ends (or the client closes),
-		// independently of the bounded grace/stop path. Process exit closes
-		// stdin and unblocks a wedged write. Never hold s.mu across transport I/O.
-		_ = s.process.Client().Cancel(context.Background(), s.providerSessionID)
+		// Settlement can stop every prompt watchdog while this write is still
+		// queued. Bound it independently of caller contexts and settlement.
+		writeCtx, cancelWrite := context.WithTimeout(context.Background(), 2*s.config.CancelGrace)
+		err := s.process.Client().Cancel(writeCtx, s.providerSessionID)
+		cancelWrite()
+		if errors.Is(err, context.DeadlineExceeded) {
+			// Notify can time out with its write still queued. Permanently close
+			// admission before stopping the transport, so a late old cancellation
+			// cannot reach a replacement prompt, even if cleanup is unproven.
+			s.mu.Lock()
+			s.cancelWriteTimedOut = true
+			s.mu.Unlock()
+			stopCtx, cancelStop := context.WithTimeout(context.Background(), 2*s.config.CancelGrace)
+			_, _ = s.process.Stop(stopCtx, s.config.CancelGrace)
+			cancelStop()
+		}
+		// The admission fence outlives any committed stop. Never hold s.mu
+		// across transport I/O or release a timed-out session for reuse.
 		s.mu.Lock()
 		s.pendingCancelWrites--
 		s.mu.Unlock()
@@ -775,7 +822,7 @@ func (s *RuntimeSession) resetPromptLeaseLocked(active *activePrompt) {
 
 func (s *RuntimeSession) expirePrompt(active *activePrompt, version uint64) {
 	s.mu.Lock()
-	if s.active != active || active.settled || active.cancelRequested || active.leaseVersion != version {
+	if s.active != active || active.settled || active.leaseVersion != version {
 		s.mu.Unlock()
 		return
 	}
@@ -788,6 +835,9 @@ func (s *RuntimeSession) expirePrompt(active *activePrompt, version uint64) {
 		return
 	}
 	// Commit expiry and fence replacement under the same lock as renewal.
+	// A prior cancellation caller may have exited before grace escalation;
+	// the lease watchdog must still stop an unresponsive prompt. The courtesy
+	// write remains idempotent through startPromptCancellationLocked.
 	s.startPromptCancellationLocked(active)
 	s.mu.Unlock()
 	ctx, cancel := context.WithTimeout(context.Background(), s.config.CancelGrace*2)

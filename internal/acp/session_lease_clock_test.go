@@ -223,14 +223,22 @@ func TestRuntimeSessionLeasePendingCancelFencesReplacement(t *testing.T) {
 			t.Fatalf("old prompt settlement = %#v, want accepted cancellation", result)
 		}
 		synctest.Wait()
-		// The expiry caller's two-grace context ends while the writer is
-		// still blocked. Caller cancellation must not release admission.
-		time.Sleep(2 * session.config.CancelGrace)
+		// Settlement has already ended the caller's wait. Within the independent
+		// write bound, its pending notification must still fence replacement.
+		time.Sleep(session.config.CancelGrace)
 		synctest.Wait()
-		if _, err := session.StartPromptWithLeaseDeadline(t.Context(), "new", "sha256:new", []ContentBlock{Text("replacement")}, time.Now().Add(time.Minute)); err == nil {
+		activations := 0
+		activate := func() error {
+			activations++
+			return nil
+		}
+		if _, err := session.StartPromptWithLeaseDeadlineAndActivation(t.Context(), "new", "sha256:new", []ContentBlock{Text("replacement")}, time.Now().Add(time.Minute), activate); err == nil {
 			t.Fatal("replacement admitted while old session/cancel write was pending")
-		} else if err.Error() != "runtime session has a pending prompt cancellation write" {
+		} else if !errors.Is(err, ErrPromptCancellationPending) {
 			t.Fatalf("replacement rejected for an unrelated reason: %v", err)
+		}
+		if activations != 0 {
+			t.Fatal("pending cancellation activated never-accepted prompt capabilities")
 		}
 		close(gate.release)
 		released = true
@@ -239,9 +247,12 @@ func TestRuntimeSessionLeasePendingCancelFencesReplacement(t *testing.T) {
 			t.Fatalf("old courtesy notification = %#v, error = %v", cancelMessage, err)
 		}
 		synctest.Wait() // The full courtesy write has completed.
-		replacement, err := session.StartPromptWithLeaseDeadline(t.Context(), "new", "sha256:new", []ContentBlock{Text("replacement")}, time.Now().Add(time.Minute))
+		replacement, err := session.StartPromptWithLeaseDeadlineAndActivation(t.Context(), "new", "sha256:new", []ContentBlock{Text("replacement")}, time.Now().Add(time.Minute), activate)
 		if err != nil {
 			t.Fatalf("replacement rejected after old cancel finished: %v", err)
+		}
+		if activations != 1 {
+			t.Fatalf("retry activated capabilities %d times, want once", activations)
 		}
 		newRequest, err := readTestMessage(reader)
 		if err != nil || newRequest.Method != MethodSessionPrompt {
@@ -326,6 +337,189 @@ func TestRuntimeSessionLeaseBlockedCancelKeepsGraceBounded(t *testing.T) {
 			t.Fatalf("blocked-write settlement = %#v, want completed", result)
 		}
 	})
+}
+
+func TestRuntimeSessionSettledCancellationWriteHasIndependentBound(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		session, peer := newLeaseTestRuntimeSession(t)
+		client := session.process.Client()
+		gate := &leaseTestCancelWriter{Writer: client.writer, entered: make(chan struct{}), release: make(chan struct{})}
+		client.writer = gate
+		defer close(gate.release)
+		run, err := session.StartPromptWithLeaseDeadline(t.Context(), "completed", "sha256:completed", []ContentBlock{Text("wait")}, time.Now().Add(time.Minute))
+		if err != nil {
+			t.Fatal(err)
+		}
+		request, err := readTestMessage(bufio.NewReader(peer))
+		if err != nil {
+			t.Fatal(err)
+		}
+		<-run.Events
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		if _, err := session.CancelPrompt(ctx, "completed"); !errors.Is(err, context.Canceled) {
+			t.Fatalf("short cancellation = %v", err)
+		}
+		<-gate.entered
+		if err := writeTestMessage(peer, map[string]any{
+			"jsonrpc": "2.0", "id": request.ID, "result": map[string]any{"stopReason": StopReasonEndTurn},
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if result := <-run.Result; result.Outcome != PromptOutcomeCompleted {
+			t.Fatalf("settlement = %s, want completed", result.Outcome)
+		}
+		activations := 0
+		admit := func() error {
+			_, err := session.StartPromptWithLeaseDeadlineAndActivation(t.Context(), "next", "sha256:next", []ContentBlock{Text("next")}, time.Now().Add(time.Minute), func() error {
+				activations++
+				return nil
+			})
+			return err
+		}
+		time.Sleep(2*session.config.CancelGrace - time.Nanosecond)
+		synctest.Wait()
+		if err := admit(); !errors.Is(err, ErrPromptCancellationPending) {
+			t.Fatalf("live write-bound rejection = %v", err)
+		}
+		time.Sleep(time.Nanosecond)
+		synctest.Wait()
+		if err := admit(); !errors.Is(err, ErrPromptCancellationTimedOut) {
+			t.Fatalf("expired write-bound rejection = %v", err)
+		}
+		if activations != 0 {
+			t.Fatal("timed-out cancellation activated replacement authority")
+		}
+	})
+}
+
+func TestRuntimeSessionSettledBlockedCancellationStopsRealAdapter(t *testing.T) {
+	session := newTestRuntimeSession(t, "delayed-complete")
+	session.config.CancelGrace = time.Second
+	client := session.process.Client()
+	gate := &leaseTestCancelWriter{Writer: client.writer, entered: make(chan struct{}), release: make(chan struct{})}
+	client.writeMu.Lock()
+	client.writer = gate
+	client.writeMu.Unlock()
+	defer close(gate.release)
+	run, err := session.StartPromptWithLeaseDeadline(context.Background(), "completed", "sha256:completed", []ContentBlock{Text("wait")}, time.Now().Add(time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	<-run.Events
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := session.CancelPrompt(ctx, "completed"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("short cancellation = %v", err)
+	}
+	<-gate.entered
+	if result := <-run.Result; result.Outcome != PromptOutcomeCompleted {
+		t.Fatalf("settlement = %s, want completed", result.Outcome)
+	}
+	select {
+	case <-session.process.Done():
+	case <-time.After(2*session.config.CancelGrace + 2*time.Second):
+		t.Fatal("settled prompt left its adapter alive behind a blocked cancellation write")
+	}
+	_, err = session.StartPromptWithLeaseDeadline(t.Context(), "next", "sha256:next", []ContentBlock{Text("next")}, time.Now().Add(time.Minute))
+	if !errors.Is(err, ErrPromptCancellationTimedOut) {
+		t.Fatalf("stopped adapter admission = %v, want terminal cancellation timeout", err)
+	}
+}
+
+func TestRuntimeSessionActivationCannotOutliveAbsoluteLease(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		session, _ := newLeaseTestRuntimeSession(t)
+		deadline := time.Now().UTC().Add(time.Second)
+		activated := false
+		_, err := session.StartPromptWithLeaseDeadlineAndActivation(t.Context(), "expired-activation", "sha256:expired-activation", []ContentBlock{Text("wait")}, deadline, func() error {
+			activated = true
+			time.Sleep(2 * time.Second)
+			return nil
+		})
+		if !activated || err == nil {
+			t.Fatalf("expired activation admission = %v, activated = %t", err, activated)
+		}
+		session.mu.Lock()
+		unaccepted := session.active == nil && len(session.tombstones) == 0
+		session.mu.Unlock()
+		if !unaccepted || session.process.Client().nextID.Load() != 0 {
+			t.Fatal("capability activation dispatched a prompt after its absolute lease expired")
+		}
+	})
+}
+
+func TestRuntimeSessionActivationFailureLeavesPromptRetryable(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		session, peer := newLeaseTestRuntimeSession(t)
+		activationErr := errors.New("test activation failure")
+		_, err := session.StartPromptWithLeaseDeadlineAndActivation(t.Context(), "activation", "sha256:activation", []ContentBlock{Text("wait")}, time.Now().Add(time.Minute), func() error {
+			return activationErr
+		})
+		if !errors.Is(err, activationErr) {
+			t.Fatalf("activation failure = %v", err)
+		}
+		session.mu.Lock()
+		unaccepted := session.active == nil && len(session.tombstones) == 0
+		session.mu.Unlock()
+		if !unaccepted || session.process.Client().nextID.Load() != 0 {
+			t.Fatal("activation failure accepted or wrote a prompt")
+		}
+		run, err := session.StartPromptWithLeaseDeadline(t.Context(), "activation", "sha256:activation", []ContentBlock{Text("retry")}, time.Now().Add(time.Minute))
+		if err != nil {
+			t.Fatal(err)
+		}
+		request, err := readTestMessage(bufio.NewReader(peer))
+		if err != nil || request.Method != MethodSessionPrompt {
+			t.Fatalf("retry request = %#v, error = %v", request, err)
+		}
+		<-run.Events
+		if err := writeTestMessage(peer, map[string]any{
+			"jsonrpc": "2.0", "id": request.ID, "result": map[string]any{"stopReason": StopReasonEndTurn},
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if result := <-run.Result; result.Outcome != PromptOutcomeCompleted {
+			t.Fatalf("retry settlement = %#v, want completed", result)
+		}
+	})
+}
+
+// An HTTP cancellation caller can disconnect before its grace window ends.
+// The absolute lease must still stop a real adapter that ignores cancellation.
+func TestRuntimeSessionLeaseEscalatesAfterCancellationCallerExits(t *testing.T) {
+	session := newTestRuntimeSession(t, "ignore-cancel")
+	session.config.CancelGrace = 100 * time.Millisecond
+	deadline := time.Now().Add(500 * time.Millisecond)
+	run, err := session.StartPromptWithLeaseDeadline(
+		context.Background(), "short-cancel", "sha256:short-cancel", []ContentBlock{Text("wait")}, deadline,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if event := <-run.Events; event.Type != PromptEventAccepted {
+		t.Fatalf("first event = %q, want accepted", event.Type)
+	}
+	cancelCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := session.CancelPrompt(cancelCtx, "short-cancel"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("short cancellation = %v, want context cancellation", err)
+	}
+	bound := time.NewTimer(time.Until(deadline.Add(2 * time.Second)))
+	defer bound.Stop()
+	select {
+	case result := <-run.Result:
+		if !result.Accepted || (result.Outcome != PromptOutcomeCancelled && result.Outcome != PromptOutcomeOutcomeUnknown) {
+			t.Fatalf("lease settlement = %#v, want accepted terminal cancellation", result)
+		}
+	case <-bound.C:
+		t.Fatal("short-lived cancellation caller disabled lease settlement")
+	}
+	select {
+	case <-session.process.Done():
+	case <-bound.C:
+		t.Fatal("lease settlement did not stop the unresponsive adapter")
+	}
 }
 
 type leaseTestCancelWriter struct {
