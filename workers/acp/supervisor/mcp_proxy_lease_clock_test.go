@@ -102,3 +102,69 @@ func TestMCPProxyRearmedCallbackCannotRevokeRenewal(t *testing.T) {
 		}
 	})
 }
+
+func TestMCPProxyRenewRequiresLiveCurrentAuthority(t *testing.T) {
+	for _, bound := range []string{"authorization", "equal"} {
+		for _, offset := range []struct {
+			name         string
+			delta        time.Duration
+			wantRejected bool
+		}{
+			{name: "before", delta: -time.Nanosecond},
+			{name: "at", wantRejected: true},
+			{name: "after", delta: time.Nanosecond, wantRejected: true},
+		} {
+			t.Run(bound+"/"+offset.name, func(t *testing.T) {
+				synctest.Test(t, func(t *testing.T) {
+					now := time.Now().UTC()
+					fence := harnessv2.Fence{RuntimeSessionUID: "session-uid", RuntimeSessionGeneration: 3}
+					auth, lease := testMCPAuthorization(t, fence, now, false)
+					if bound == "equal" {
+						auth.ExpiresAt = lease.ExpiresAt
+					}
+					session := &mcpProxySession{fence: fence, configuration: auth.Configuration(), state: harnessv2.RuntimeSessionStateIdle}
+					if err := session.activate(t.Context(), auth, lease, now); err != nil {
+						t.Fatal(err)
+					}
+					if err := session.markRunning(auth.PromptID, now); err != nil {
+						t.Fatal(err)
+					}
+					defer session.revoke(harnessv2.RuntimeSessionStateIdle)
+					session.mu.Lock()
+					// A renewal can acquire the lock after expiry but before the
+					// timer callback. Suppress the callback to exercise that order.
+					session.leaseTimer.Stop()
+					priorAuthorization, priorVersion := session.authorization, session.leaseVersion
+					gate := session.gateContext
+					session.mu.Unlock()
+					renewalNow := auth.ExpiresAt.Add(offset.delta)
+					renewedLease := lease
+					renewedLease.Generation++
+					renewedLease.IssuedAt = renewalNow
+					renewedLease.ExpiresAt = lease.ExpiresAt.Add(time.Minute)
+					renewedAuth := auth
+					renewedAuth.LeaseGeneration = renewedLease.Generation
+					renewedAuth.ExpiresAt = renewedLease.ExpiresAt
+					err := session.renew(renewedAuth, renewedLease, renewalNow)
+					if offset.wantRejected {
+						if err == nil {
+							t.Fatal("renewal revived authority at or after its current absolute expiry")
+						}
+						session.mu.Lock()
+						defer session.mu.Unlock()
+						if session.authorization != priorAuthorization || session.lease != lease || session.leaseVersion != priorVersion {
+							t.Fatal("rejected renewal replaced authority or invalidated its expiry callback")
+						}
+					} else {
+						if err != nil {
+							t.Fatalf("live authority was not renewable: %v", err)
+						}
+						if gate.Err() != nil {
+							t.Fatal("live renewal cancelled the active gate")
+						}
+					}
+				})
+			})
+		}
+	}
+}

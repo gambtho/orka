@@ -10,7 +10,6 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
-	"os"
 	"path"
 	"reflect"
 	"slices"
@@ -1221,7 +1220,7 @@ func (s *Server) handleFinalizeSessionPublication(w http.ResponseWriter, r *http
 	recordSessionOperationLocked(state, request.Metadata, harnessv2.OperationPhaseApplied, "", now)
 	descriptor := state.descriptor
 	mcpProxy := state.mcpProxy
-	drainCleanup := s.drain.Requested && !state.drainCleanupScheduled
+	drainCleanup := s.drain.Requested && !state.drainCleanupScheduled && isDrainCleanupState(state)
 	if drainCleanup {
 		state.drainCleanupScheduled = true
 	}
@@ -1400,7 +1399,7 @@ func (s *Server) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
 		)
 		return
 	}
-	if err := os.RemoveAll(state.paths.Root); err != nil {
+	if err := s.removeSessionPrivateFiles(state); err != nil {
 		s.poisonPool("session_root_cleanup_unproven")
 		s.mu.Lock()
 		state.descriptor.State = harnessv2.RuntimeSessionStatePoisoned
@@ -1462,6 +1461,9 @@ func (s *Server) cancelPromptForDeletion(ctx context.Context, cancellation *prom
 // and an active prompt must settle through CancelPrompt before descendant
 // cleanup can be proven. The caller must hold s.mu.
 func prepareSessionDeletionLocked(state *sessionState, publicationFinalized bool, now time.Time) (bool, error) {
+	if state.nativeCapture != nil && !state.nativeCapture.finished {
+		return false, fmt.Errorf("native session capture must finish before deletion")
+	}
 	nextState := harnessv2.RuntimeSessionStateDeleting
 	if !publicationFinalized {
 		var err error
@@ -2036,7 +2038,7 @@ func (s *Server) handleWorkspaceDelta(w http.ResponseWriter, r *http.Request) {
 	}
 	state.descriptor.LastTransitionAt = time.Now().UTC()
 	mcpProxy := state.mcpProxy
-	sessionCleanup := (s.drain.Requested || state.descriptor.State == harnessv2.RuntimeSessionStatePoisoned) && !state.drainCleanupScheduled
+	sessionCleanup := (s.drain.Requested || state.descriptor.State == harnessv2.RuntimeSessionStatePoisoned) && !state.drainCleanupScheduled && isDrainCleanupState(state)
 	if sessionCleanup {
 		state.drainCleanupScheduled = true
 	}
