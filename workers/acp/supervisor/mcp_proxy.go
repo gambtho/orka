@@ -232,19 +232,19 @@ func (s *mcpProxySession) renew(auth harnessv2.PromptMCPAuthorization, lease har
 		OperationID: "mcp-renew", RequestDigestSchemaVersion: harnessv2.RequestDigestSchemaVersion,
 		RequestDigest: testlessRequestDigest(), ExpiresAt: auth.ExpiresAt,
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	// The caller can sample time before waiting for this lock. Never revive
-	// expired authority using that stale timestamp.
-	if lockedNow := time.Now(); now.Before(lockedNow) {
-		now = lockedNow
-	}
 	if err := auth.ValidateForAt(metadata, lease, now); err != nil {
 		return err
 	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	// Commit and schedule expiry against the clock observed under the lock.
+	// A backward clock step must not rewind a later caller timestamp.
+	if lockedNow := time.Now().UTC(); now.Before(lockedNow) {
+		now = lockedNow
+	}
 	if s.closed || s.authorization == nil || s.gateCancel == nil || s.state != harnessv2.RuntimeSessionStatePromptRunning ||
 		s.authorization.PromptID != auth.PromptID || lease.Generation != s.lease.Generation+1 ||
-		!now.Before(s.lease.ExpiresAt) || !now.Before(s.authorization.ExpiresAt) {
+		!now.Before(auth.ExpiresAt) || !now.Before(s.authorization.ExpiresAt) || !now.Before(s.lease.ExpiresAt) {
 		return fmt.Errorf("MCP prompt lease is no longer renewable")
 	}
 	if s.authorization.ToolPolicyDigest != auth.ToolPolicyDigest ||

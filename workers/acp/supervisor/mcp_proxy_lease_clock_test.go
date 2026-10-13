@@ -391,3 +391,87 @@ func TestMCPProxyRearmedCallbackCannotRevokeRenewal(t *testing.T) {
 		}
 	})
 }
+
+func TestMCPProxyRenewRequiresLiveCurrentAuthority(t *testing.T) {
+	for _, bound := range []string{"authorization", "equal", "incoming"} {
+		for _, offset := range []struct {
+			name         string
+			delta        time.Duration
+			wantRejected bool
+		}{
+			{name: "before", delta: -time.Nanosecond},
+			{name: "at", wantRejected: true},
+			{name: "after", delta: time.Nanosecond, wantRejected: true},
+		} {
+			t.Run(bound+"/"+offset.name, func(t *testing.T) {
+				synctest.Test(t, func(t *testing.T) {
+					now := time.Now().UTC()
+					fence := harnessv2.Fence{RuntimeSessionUID: "session-uid", RuntimeSessionGeneration: 3}
+					auth, lease := testMCPAuthorization(t, fence, now, false)
+					if bound == "equal" {
+						auth.ExpiresAt = lease.ExpiresAt
+					}
+					session := &mcpProxySession{fence: fence, configuration: auth.Configuration(), state: harnessv2.RuntimeSessionStateIdle}
+					if err := session.activate(t.Context(), auth, lease, now); err != nil {
+						t.Fatal(err)
+					}
+					if err := session.markRunning(auth.PromptID, now); err != nil {
+						t.Fatal(err)
+					}
+					defer session.revoke(harnessv2.RuntimeSessionStateIdle)
+					session.mu.Lock()
+					// Suppress the callback to model renewal committing first
+					// after a delay, including waiting for the session mutex.
+					session.leaseTimer.Stop()
+					priorAuthorization, priorVersion := session.authorization, session.leaseVersion
+					gate := session.gateContext
+					session.mu.Unlock()
+					renewedLease := lease
+					renewedLease.Generation++
+					renewedLease.ExpiresAt = lease.ExpiresAt.Add(time.Minute)
+					renewedAuth := auth
+					renewedAuth.LeaseGeneration = renewedLease.Generation
+					renewedAuth.ExpiresAt = renewedLease.ExpiresAt
+					deadline := auth.ExpiresAt
+					if bound == "incoming" {
+						renewedAuth.ExpiresAt = now.Add(30 * time.Second)
+						deadline = renewedAuth.ExpiresAt
+					}
+					renewalNow := deadline.Add(offset.delta)
+					renewedLease.IssuedAt = renewalNow
+					time.Sleep(renewalNow.Sub(now))
+					// Pass the request's stale timestamp; commit must use the
+					// actual clock for both expiry checks and timer scheduling.
+					err := session.renew(renewedAuth, renewedLease, now)
+					if offset.wantRejected {
+						if err == nil {
+							t.Fatal("renewal revived authority at or after its absolute expiry")
+						}
+						session.mu.Lock()
+						defer session.mu.Unlock()
+						if session.authorization != priorAuthorization || session.lease != lease || session.leaseVersion != priorVersion {
+							t.Fatal("rejected renewal replaced authority or invalidated its expiry callback")
+						}
+					} else {
+						if err != nil {
+							t.Fatalf("live authority was not renewable: %v", err)
+						}
+						if gate.Err() != nil {
+							t.Fatal("live renewal cancelled the active gate")
+						}
+						time.Sleep(time.Until(renewedAuth.ExpiresAt) - time.Nanosecond)
+						synctest.Wait()
+						if gate.Err() != nil {
+							t.Fatal("renewed authority expired before its absolute deadline")
+						}
+						time.Sleep(time.Nanosecond)
+						synctest.Wait()
+						if gate.Err() == nil {
+							t.Fatal("renewal scheduled expiry from the stale request timestamp")
+						}
+					}
+				})
+			})
+		}
+	}
+}
