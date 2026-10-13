@@ -107,6 +107,10 @@ func TestGatewayMeetingCapabilityProjectionAndRequirement(t *testing.T) {
 	if err := validateRequiredGatewayCapabilities(required, gatewayv1alpha1.GatewayCapabilities{}); err == nil {
 		t.Fatal("missing meetingDrafts accepted")
 	}
+	if err := validateRequiredGatewayCapabilities(required, observed.Capabilities); err == nil {
+		t.Fatal("meetingDrafts without interimDelivery accepted")
+	}
+	observed.Capabilities.InterimDelivery = true
 	if err := validateRequiredGatewayCapabilities(required, observed.Capabilities); err != nil {
 		t.Fatal(err)
 	}

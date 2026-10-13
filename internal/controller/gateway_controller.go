@@ -758,7 +758,7 @@ func validateRequiredGatewayCapabilities(required, observed gatewayv1alpha1.Gate
 		{"inboundText", required.InboundText, observed.InboundText},
 		{"outboundText", required.OutboundText, observed.OutboundText},
 		{"interimDelivery", required.InterimDelivery, observed.InterimDelivery},
-		{"meetingDrafts", required.MeetingDrafts, observed.MeetingDrafts},
+		{"meetingDrafts", required.MeetingDrafts, observed.MeetingDrafts && observed.InterimDelivery},
 		{"threads", required.Threads, observed.Threads},
 		{"senderIdentity", required.SenderIdentity, observed.SenderIdentity},
 		{"explicitSessions", required.ExplicitSessions, observed.ExplicitSessions},
