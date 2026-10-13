@@ -239,6 +239,36 @@ func TestPromptAdmissionRollbackIgnoresReplacedOwner(t *testing.T) {
 	}
 }
 
+func TestPromptLeaseExpiredRollbackAllowsFreshAdmission(t *testing.T) {
+	server, state, prompt := newPromptAdmissionRollbackState(t)
+	providerGate, mcpGate := promptAdmissionGates(state)
+	// Request cancellation may already have closed the unaccepted MCP gate.
+	server.revokePromptRequestCapabilities(state, prompt)
+	response := httptest.NewRecorder()
+	server.mu.Lock()
+	server.handlePromptStartFailureLocked(response, state, prompt, fmt.Errorf("admission: %w", acp.ErrPromptLeaseExpired))
+	var failure harnessv2.ErrorResponse
+	decodeResponse(t, response, &failure)
+	if response.Code != http.StatusGone || failure.Code != harnessv2.ErrorCodeExpired || failure.Retryable {
+		t.Errorf("pre-activation expiry = HTTP %d, code %s, retryable %t", response.Code, failure.Code, failure.Retryable)
+	}
+	assertUnacceptedPromptOperationRemoved(t, server, state, prompt)
+	server.mu.Lock()
+	idle := state.descriptor.State == harnessv2.RuntimeSessionStateIdle
+	server.mu.Unlock()
+	state.mcpProxy.mu.Lock()
+	mcpIdle := state.mcpProxy.state == harnessv2.RuntimeSessionStateIdle && state.mcpProxy.authorization == nil &&
+		state.mcpProxy.gateCancel == nil && state.mcpProxy.leaseTimer == nil
+	state.mcpProxy.mu.Unlock()
+	if !idle || !mcpIdle || providerGate.Err() == nil || mcpGate.Err() == nil {
+		t.Fatal("pre-activation expiry stranded admission or retained authority")
+	}
+	retry := stageUnacceptedPromptAdmission(t, server, state, prompt.request)
+	if err := state.mcpProxy.markRunning(retry.request.Metadata.PromptID, time.Now().UTC()); err != nil {
+		t.Fatalf("fresh admission after pre-activation expiry: %v", err)
+	}
+}
+
 func TestPromptStartOtherErrorsRemainFailClosed(t *testing.T) {
 	server, state, prompt := newPromptAdmissionRollbackState(t)
 	response := httptest.NewRecorder()
@@ -449,7 +479,7 @@ func TestPromptActivationFailurePoisonsAdmission(t *testing.T) {
 			if response.Code != http.StatusInternalServerError || failure.Code != harnessv2.ErrorCodeSessionPoisoned || failure.Retryable {
 				t.Fatalf("activation failure = HTTP %d, code %s, retryable %t", response.Code, failure.Code, failure.Retryable)
 			}
-			if scenario.err == acp.ErrPromptActivationExpired && failure.Message != scenario.err.Error() {
+			if failure.Message != scenario.err.Error() {
 				t.Fatalf("post-activation expiry message = %q", failure.Message)
 			}
 			assertUnacceptedPromptOperationRemoved(t, server, state, prompt)
