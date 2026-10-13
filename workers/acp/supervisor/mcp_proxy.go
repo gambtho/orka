@@ -230,9 +230,12 @@ func (s *mcpProxySession) renew(auth harnessv2.PromptMCPAuthorization, lease har
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	// The request timestamp can become stale while renewal waits for the lock.
+	// Commit and schedule expiry against the clock observed under the lock.
+	now = time.Now().UTC()
 	if s.closed || s.authorization == nil || s.gateCancel == nil || s.state != harnessv2.RuntimeSessionStatePromptRunning ||
 		s.authorization.PromptID != auth.PromptID || lease.Generation != s.lease.Generation+1 ||
-		!now.Before(s.authorization.ExpiresAt) || !now.Before(s.lease.ExpiresAt) {
+		!now.Before(auth.ExpiresAt) || !now.Before(s.authorization.ExpiresAt) || !now.Before(s.lease.ExpiresAt) {
 		return fmt.Errorf("MCP prompt lease is no longer renewable")
 	}
 	if s.authorization.ToolPolicyDigest != auth.ToolPolicyDigest ||

@@ -104,7 +104,7 @@ func TestMCPProxyRearmedCallbackCannotRevokeRenewal(t *testing.T) {
 }
 
 func TestMCPProxyRenewRequiresLiveCurrentAuthority(t *testing.T) {
-	for _, bound := range []string{"authorization", "equal"} {
+	for _, bound := range []string{"authorization", "equal", "incoming"} {
 		for _, offset := range []struct {
 			name         string
 			delta        time.Duration
@@ -131,24 +131,32 @@ func TestMCPProxyRenewRequiresLiveCurrentAuthority(t *testing.T) {
 					}
 					defer session.revoke(harnessv2.RuntimeSessionStateIdle)
 					session.mu.Lock()
-					// A renewal can acquire the lock after expiry but before the
-					// timer callback. Suppress the callback to exercise that order.
+					// Suppress the callback to model renewal committing first
+					// after a delay, including waiting for the session mutex.
 					session.leaseTimer.Stop()
 					priorAuthorization, priorVersion := session.authorization, session.leaseVersion
 					gate := session.gateContext
 					session.mu.Unlock()
-					renewalNow := auth.ExpiresAt.Add(offset.delta)
 					renewedLease := lease
 					renewedLease.Generation++
-					renewedLease.IssuedAt = renewalNow
 					renewedLease.ExpiresAt = lease.ExpiresAt.Add(time.Minute)
 					renewedAuth := auth
 					renewedAuth.LeaseGeneration = renewedLease.Generation
 					renewedAuth.ExpiresAt = renewedLease.ExpiresAt
-					err := session.renew(renewedAuth, renewedLease, renewalNow)
+					deadline := auth.ExpiresAt
+					if bound == "incoming" {
+						renewedAuth.ExpiresAt = now.Add(30 * time.Second)
+						deadline = renewedAuth.ExpiresAt
+					}
+					renewalNow := deadline.Add(offset.delta)
+					renewedLease.IssuedAt = renewalNow
+					time.Sleep(renewalNow.Sub(now))
+					// Pass the request's stale timestamp; commit must use the
+					// actual clock for both expiry checks and timer scheduling.
+					err := session.renew(renewedAuth, renewedLease, now)
 					if offset.wantRejected {
 						if err == nil {
-							t.Fatal("renewal revived authority at or after its current absolute expiry")
+							t.Fatal("renewal revived authority at or after its absolute expiry")
 						}
 						session.mu.Lock()
 						defer session.mu.Unlock()
@@ -161,6 +169,16 @@ func TestMCPProxyRenewRequiresLiveCurrentAuthority(t *testing.T) {
 						}
 						if gate.Err() != nil {
 							t.Fatal("live renewal cancelled the active gate")
+						}
+						time.Sleep(time.Until(renewedAuth.ExpiresAt) - time.Nanosecond)
+						synctest.Wait()
+						if gate.Err() != nil {
+							t.Fatal("renewed authority expired before its absolute deadline")
+						}
+						time.Sleep(time.Nanosecond)
+						synctest.Wait()
+						if gate.Err() == nil {
+							t.Fatal("renewal scheduled expiry from the stale request timestamp")
 						}
 					}
 				})
