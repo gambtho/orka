@@ -2630,7 +2630,7 @@ func (s *Server) handlePromptStartFailureLocked(w http.ResponseWriter, state *se
 	activationFailed := errors.Is(err, errPromptProviderActivation) || errors.Is(err, errPromptMCPActivation)
 	sessionCleanup := false
 	if s.sessions[state.id] == state && state.prompt == prompt {
-		if cancellationTimedOut && (state.descriptor.State == harnessv2.RuntimeSessionStateIdle || state.descriptor.State == harnessv2.RuntimeSessionStatePromptRunning) {
+		if (cancellationTimedOut || activationFailed) && (state.descriptor.State == harnessv2.RuntimeSessionStateIdle || state.descriptor.State == harnessv2.RuntimeSessionStatePromptRunning) {
 			state.descriptor.State = harnessv2.RuntimeSessionStatePoisoned
 			state.descriptor.LastTransitionAt = time.Now().UTC()
 		}

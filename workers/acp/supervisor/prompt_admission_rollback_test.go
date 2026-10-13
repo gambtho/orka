@@ -419,3 +419,84 @@ func TestCancellationWriteTimeoutPoisonsAdmission(t *testing.T) {
 		t.Fatal("unresponsive transport left session admission reusable")
 	}
 }
+
+func TestPromptActivationFailurePoisonsAdmission(t *testing.T) {
+	for _, scenario := range []struct {
+		name string
+		err  error
+	}{
+		{name: "provider", err: errPromptProviderActivation},
+		{name: "mcp", err: errPromptMCPActivation},
+	} {
+		t.Run(scenario.name, func(t *testing.T) {
+			server, state, prompt := newPromptAdmissionRollbackState(t)
+			providerGate, mcpGate := promptAdmissionGates(state)
+			response := httptest.NewRecorder()
+			server.mu.Lock()
+			server.handlePromptStartFailureLocked(response, state, prompt, fmt.Errorf("activation: %w", scenario.err))
+			var failure harnessv2.ErrorResponse
+			decodeResponse(t, response, &failure)
+			if response.Code != http.StatusInternalServerError || failure.Code != harnessv2.ErrorCodeSessionPoisoned || failure.Retryable {
+				t.Fatalf("activation failure = HTTP %d, code %s, retryable %t", response.Code, failure.Code, failure.Retryable)
+			}
+			assertUnacceptedPromptOperationRemoved(t, server, state, prompt)
+			server.mu.Lock()
+			poisoned := state.descriptor.State == harnessv2.RuntimeSessionStatePoisoned && !state.descriptor.LastTransitionAt.IsZero()
+			server.mu.Unlock()
+			state.mcpProxy.mu.Lock()
+			mcpPoisoned := state.mcpProxy.state == harnessv2.RuntimeSessionStatePoisoned
+			state.mcpProxy.mu.Unlock()
+			if !poisoned || !mcpPoisoned || providerGate.Err() == nil || mcpGate.Err() == nil {
+				t.Fatal("terminal activation failure left session admission reusable")
+			}
+		})
+	}
+}
+
+func TestPromptActivationFailureSchedulesCleanup(t *testing.T) {
+	for _, scenario := range []struct {
+		name string
+		err  error
+	}{
+		{name: "provider", err: errPromptProviderActivation},
+		{name: "mcp", err: errPromptMCPActivation},
+	} {
+		t.Run(scenario.name, func(t *testing.T) {
+			server, cfg, profile := newTestServer(t, "immediate")
+			create := testCreateSessionRequest(t, cfg, profile)
+			created := performMutation(t, server.Handler(), http.MethodPut, "/v2/runtime-sessions/session-1", create, cfg)
+			if created.Code != http.StatusCreated {
+				t.Fatalf("create status = %d", created.Code)
+			}
+			server.mu.Lock()
+			state := server.sessions[create.RuntimeSessionID]
+			server.mu.Unlock()
+			request := testStartPromptRequest(t, cfg, create.Metadata.Fence)
+			prompt := stageUnacceptedPromptAdmission(t, server, state, request)
+			response := httptest.NewRecorder()
+			server.mu.Lock()
+			server.handlePromptStartFailureLocked(response, state, prompt, scenario.err)
+			if response.Code != http.StatusInternalServerError {
+				t.Fatalf("activation failure status = %d", response.Code)
+			}
+			assertUnacceptedPromptOperationRemoved(t, server, state, prompt)
+			cleanupBound := time.Now().Add(5 * time.Second)
+			for {
+				server.mu.Lock()
+				resident := server.sessions[state.id] == state
+				_, retired := server.tombstones[create.Metadata.Fence.RuntimeSessionUID]
+				// Unproven native cleanup stays sealed and retained rather
+				// than falsely claiming retirement, including on macOS.
+				retained := resident && server.poisoned && state.descriptor.State == harnessv2.RuntimeSessionStatePoisoned && !state.drainCleanupScheduled
+				server.mu.Unlock()
+				if (!resident && retired) || retained {
+					break
+				}
+				if time.Now().After(cleanupBound) {
+					t.Fatal("terminal activation failure did not initiate automatic cleanup")
+				}
+				time.Sleep(10 * time.Millisecond)
+			}
+		})
+	}
+}
