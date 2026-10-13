@@ -85,6 +85,11 @@ spec:
                     description: InterimDelivery indicates support for bounded nonterminal
                       text messages.
                     type: boolean
+                  meetingDrafts:
+                    description: |-
+                      MeetingDrafts indicates support for structured, unscheduled meeting proposals.
+                      Has no effect without interim delivery; false is omitted for older adapters.
+                    type: boolean
                   outboundText:
                     description: OutboundText indicates support for final text and
                       sanitized error delivery.

@@ -40,6 +40,11 @@ type GatewayCapabilities struct {
 	// +optional
 	InterimDelivery bool `json:"interimDelivery,omitempty"`
 
+	// MeetingDrafts indicates support for structured, unscheduled meeting proposals.
+	// Has no effect without interim delivery; false is omitted for older adapters.
+	// +optional
+	MeetingDrafts bool `json:"meetingDrafts,omitempty"`
+
 	// Threads indicates that thread identity is preserved.
 	// +optional
 	Threads bool `json:"threads,omitempty"`

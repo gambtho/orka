@@ -87,6 +87,7 @@ type Capabilities struct {
 	ExplicitSessions   bool `json:"explicitSessions,omitempty"`
 	IdempotentDelivery bool `json:"idempotentDelivery"`
 	InterimDelivery    bool `json:"interimDelivery,omitempty"`
+	MeetingDrafts      bool `json:"meetingDrafts,omitempty"`
 }
 
 // HealthResponse is returned by GET /v1/health.

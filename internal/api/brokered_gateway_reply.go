@@ -8,6 +8,7 @@ import (
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/aitools"
 	gatewayruntime "github.com/orka-agents/orka/internal/gateway"
+	"github.com/orka-agents/orka/internal/gateway/protocol"
 	"github.com/orka-agents/orka/internal/tools"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
@@ -16,6 +17,8 @@ type brokeredGatewayReplySender struct {
 	access  brokeredTaskDataAccess
 	service *gatewayruntime.Service
 }
+
+var _ tools.GatewayMeetingDraftSender = (*brokeredGatewayReplySender)(nil)
 
 // NewBrokeredGatewayReplySender binds an ACP prompt guard and exact Task identity.
 // It grants no tool availability; the sealed descriptor policy does that. Each
@@ -56,6 +59,14 @@ func (s *brokeredGatewayReplySender) Budget(ctx context.Context, id string) (too
 }
 
 func (s *brokeredGatewayReplySender) Enqueue(ctx context.Context, id, content string) (tools.GatewayReplyReceipt, error) {
+	return s.enqueue(ctx, id, content, nil)
+}
+
+func (s *brokeredGatewayReplySender) EnqueueMeetingDraft(ctx context.Context, id, content string, draft protocol.MeetingDraft) (tools.GatewayReplyReceipt, error) {
+	return s.enqueue(ctx, id, content, &draft)
+}
+
+func (s *brokeredGatewayReplySender) enqueue(ctx context.Context, id, content string, draft *protocol.MeetingDraft) (tools.GatewayReplyReceipt, error) {
 	var result tools.GatewayReplyReceipt
 	if s.service == nil {
 		return result, errors.New("gateway reply service unavailable")
@@ -66,7 +77,11 @@ func (s *brokeredGatewayReplySender) Enqueue(ctx context.Context, id, content st
 			return err
 		}
 		var err error
-		prepared, err = s.service.PrepareTaskMessage(ctx, task.Namespace, task.Name, string(task.UID), id, content)
+		if draft != nil {
+			prepared, err = s.service.PrepareTaskMeetingDraft(ctx, task.Namespace, task.Name, string(task.UID), id, content, *draft)
+		} else {
+			prepared, err = s.service.PrepareTaskMessage(ctx, task.Namespace, task.Name, string(task.UID), id, content)
+		}
 		return err
 	}, func(ctx context.Context) error {
 		receipt, err := s.service.EnqueuePreparedTaskMessage(ctx, prepared)
@@ -86,6 +101,8 @@ func brokeredGatewayReplyError(err error) error {
 	code := ""
 	if errors.Is(err, gatewayruntime.ErrInterimDeliveryUnsupported) {
 		code = "interim_delivery_unsupported"
+	} else if errors.Is(err, gatewayruntime.ErrMeetingDraftsUnsupported) {
+		code = "meeting_drafts_unsupported"
 	} else if domain, ok := errors.AsType[*gatewayruntime.HTTPError](err); ok {
 		switch domain.Code {
 		case http.StatusBadRequest:

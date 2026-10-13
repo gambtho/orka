@@ -87,6 +87,38 @@ func TestGatewayReconcilerProbesReferenceAdapter(t *testing.T) {
 	}
 }
 
+func TestGatewayMeetingCapabilityProjectionAndRequirement(t *testing.T) {
+	var response protocol.CapabilitiesResponse
+	if err := json.Unmarshal([]byte(`{"capabilities":{"meetingDrafts":true}}`), &response); err != nil {
+		t.Fatal(err)
+	}
+	observed := observedGatewayCapabilities(&response)
+	encoded, err := json.Marshal(observed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(encoded), `"meetingDrafts":true`) {
+		t.Fatalf("lost capability %s", encoded)
+	}
+	var required gatewayv1alpha1.GatewayCapabilities
+	if err := json.Unmarshal([]byte(`{"meetingDrafts":true}`), &required); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateRequiredGatewayCapabilities(required, gatewayv1alpha1.GatewayCapabilities{}); err == nil {
+		t.Fatal("missing meetingDrafts accepted")
+	}
+	if err := validateRequiredGatewayCapabilities(required, observed.Capabilities); err != nil {
+		t.Fatal(err)
+	}
+	encoded, err = json.Marshal(gatewayv1alpha1.GatewayCapabilities{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(encoded), "meetingDrafts") {
+		t.Fatalf("false capability not omitted %s", encoded)
+	}
+}
+
 func TestGatewayInterimCapabilityProjectionAndRequirement(t *testing.T) {
 	var response protocol.CapabilitiesResponse
 	if err := json.Unmarshal([]byte(`{"capabilities":{"interimDelivery":true}}`), &response); err != nil {
