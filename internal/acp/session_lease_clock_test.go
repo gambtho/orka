@@ -427,6 +427,23 @@ func TestRuntimeSessionSettledBlockedCancellationStopsRealAdapter(t *testing.T) 
 	}
 }
 
+func TestRuntimeSessionExpiredLeaseDoesNotActivateCapabilities(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		session, _ := newLeaseTestRuntimeSession(t)
+		activated := false
+		_, err := session.StartPromptWithLeaseDeadlineAndActivation(t.Context(), "expired-before-activation", "sha256:expired-before-activation", []ContentBlock{Text("wait")}, time.Now().UTC().Add(-time.Nanosecond), func() error {
+			activated = true
+			return nil
+		})
+		if err == nil || errors.Is(err, ErrPromptActivationExpired) || activated {
+			t.Fatalf("pre-activation expiry = %v, activated = %t", err, activated)
+		}
+		if session.process.Client().nextID.Load() != 0 {
+			t.Fatal("pre-activation expiry wrote a prompt")
+		}
+	})
+}
+
 func TestRuntimeSessionActivationCannotOutliveAbsoluteLease(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		session, _ := newLeaseTestRuntimeSession(t)
@@ -437,7 +454,7 @@ func TestRuntimeSessionActivationCannotOutliveAbsoluteLease(t *testing.T) {
 			time.Sleep(2 * time.Second)
 			return nil
 		})
-		if !activated || err == nil {
+		if !activated || !errors.Is(err, ErrPromptActivationExpired) {
 			t.Fatalf("expired activation admission = %v, activated = %t", err, activated)
 		}
 		session.mu.Lock()

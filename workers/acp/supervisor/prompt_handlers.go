@@ -2627,7 +2627,7 @@ func (s *Server) revokePromptRequestCapabilities(state *sessionState, prompt *pr
 func (s *Server) handlePromptStartFailureLocked(w http.ResponseWriter, state *sessionState, prompt *promptState, err error) {
 	cancellationPending := errors.Is(err, acp.ErrPromptCancellationPending)
 	cancellationTimedOut := errors.Is(err, acp.ErrPromptCancellationTimedOut)
-	activationFailed := errors.Is(err, errPromptProviderActivation) || errors.Is(err, errPromptMCPActivation)
+	activationFailed := errors.Is(err, errPromptProviderActivation) || errors.Is(err, errPromptMCPActivation) || errors.Is(err, acp.ErrPromptActivationExpired)
 	sessionCleanup := false
 	if s.sessions[state.id] == state && state.prompt == prompt {
 		if (cancellationTimedOut || activationFailed) && (state.descriptor.State == harnessv2.RuntimeSessionStateIdle || state.descriptor.State == harnessv2.RuntimeSessionStatePromptRunning) {
@@ -2666,7 +2666,9 @@ func (s *Server) handlePromptStartFailureLocked(w http.ResponseWriter, state *se
 	}
 	if activationFailed {
 		message := errPromptProviderActivation.Error()
-		if errors.Is(err, errPromptMCPActivation) {
+		if errors.Is(err, acp.ErrPromptActivationExpired) {
+			message = acp.ErrPromptActivationExpired.Error()
+		} else if errors.Is(err, errPromptMCPActivation) {
 			message = errPromptMCPActivation.Error()
 		}
 		writeError(w, http.StatusInternalServerError, harnessv2.ErrorCodeSessionPoisoned, message, nil, false)

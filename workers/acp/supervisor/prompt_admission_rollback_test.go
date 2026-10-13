@@ -427,6 +427,7 @@ func TestPromptActivationFailurePoisonsAdmission(t *testing.T) {
 	}{
 		{name: "provider", err: errPromptProviderActivation},
 		{name: "mcp", err: errPromptMCPActivation},
+		{name: "expired-after-activation", err: acp.ErrPromptActivationExpired},
 	} {
 		t.Run(scenario.name, func(t *testing.T) {
 			server, state, prompt := newPromptAdmissionRollbackState(t)
@@ -438,6 +439,9 @@ func TestPromptActivationFailurePoisonsAdmission(t *testing.T) {
 			decodeResponse(t, response, &failure)
 			if response.Code != http.StatusInternalServerError || failure.Code != harnessv2.ErrorCodeSessionPoisoned || failure.Retryable {
 				t.Fatalf("activation failure = HTTP %d, code %s, retryable %t", response.Code, failure.Code, failure.Retryable)
+			}
+			if scenario.err == acp.ErrPromptActivationExpired && failure.Message != scenario.err.Error() {
+				t.Fatalf("post-activation expiry message = %q", failure.Message)
 			}
 			assertUnacceptedPromptOperationRemoved(t, server, state, prompt)
 			server.mu.Lock()
@@ -460,6 +464,7 @@ func TestPromptActivationFailureSchedulesCleanup(t *testing.T) {
 	}{
 		{name: "provider", err: errPromptProviderActivation},
 		{name: "mcp", err: errPromptMCPActivation},
+		{name: "expired-after-activation", err: acp.ErrPromptActivationExpired},
 	} {
 		t.Run(scenario.name, func(t *testing.T) {
 			server, cfg, profile := newTestServer(t, "immediate")
