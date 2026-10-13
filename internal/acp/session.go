@@ -27,6 +27,10 @@ var ErrPromptCancellationPending = errors.New("runtime session has a pending pro
 // cancellation transport forces retirement; its queued write cannot be reused.
 var ErrPromptCancellationTimedOut = errors.New("runtime session cancellation transport timed out")
 
+// ErrPromptLeaseExpired rejects admission before capabilities are activated.
+// No prompt has been accepted, so a new valid lease may reuse the session.
+var ErrPromptLeaseExpired = errors.New("prompt lease deadline must be in the future")
+
 // ErrPromptActivationExpired rejects an unaccepted prompt whose lease expired
 // after capability activation. The caller must retire or fully roll back those
 // capabilities before allowing another admission.
@@ -329,6 +333,7 @@ func (s *RuntimeSession) StartPromptWithLeaseDeadline(ctx context.Context, promp
 // prompt capabilities, so a pending cancellation cannot create remote authority.
 // activate runs under the session lock: it must not perform transport I/O or call
 // another RuntimeSession method. An activation error leaves the prompt unaccepted.
+// Expiry before activation returns ErrPromptLeaseExpired without invoking activate.
 // If the lease expires after activation succeeds, ErrPromptActivationExpired
 // requires the caller to retire or fully roll back the activated capabilities.
 func (s *RuntimeSession) StartPromptWithLeaseDeadlineAndActivation(ctx context.Context, promptID, requestDigest string, prompt []ContentBlock, leaseDeadline time.Time, activate func() error) (PromptRun, error) {
@@ -340,7 +345,7 @@ func (s *RuntimeSession) StartPromptWithLeaseDeadlineAndActivation(ctx context.C
 	s.mu.Lock()
 	if !leaseDeadline.After(time.Now()) {
 		s.mu.Unlock()
-		return PromptRun{}, fmt.Errorf("prompt lease deadline must be in the future")
+		return PromptRun{}, ErrPromptLeaseExpired
 	}
 	if s.deleted {
 		s.mu.Unlock()
@@ -391,7 +396,7 @@ func (s *RuntimeSession) StartPromptWithLeaseDeadlineAndActivation(ctx context.C
 		if activate != nil {
 			return PromptRun{}, ErrPromptActivationExpired
 		}
-		return PromptRun{}, fmt.Errorf("prompt lease deadline expired during capability activation")
+		return PromptRun{}, ErrPromptLeaseExpired
 	}
 	active := &activePrompt{
 		id:            promptID,

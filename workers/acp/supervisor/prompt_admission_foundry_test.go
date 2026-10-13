@@ -3,6 +3,7 @@ package supervisor
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -14,6 +15,16 @@ import (
 )
 
 func TestFoundryPendingCancellationAdmissionPreservesIdenticalRetry(t *testing.T) {
+	testFoundryPreActivationAdmissionRetry(t, acp.ErrPromptCancellationPending)
+}
+
+func TestFoundryExpiredLeaseAdmissionPreservesFreshRetry(t *testing.T) {
+	testFoundryPreActivationAdmissionRetry(t, acp.ErrPromptLeaseExpired)
+}
+
+func testFoundryPreActivationAdmissionRetry(t *testing.T, rejection error) {
+	t.Helper()
+	expired := errors.Is(rejection, acp.ErrPromptLeaseExpired)
 	var remoteMu sync.Mutex
 	var controlCalls int
 	var settlements []foundryBrokerContext
@@ -46,9 +57,20 @@ func TestFoundryPendingCancellationAdmissionPreservesIdenticalRetry(t *testing.T
 	}
 	request := testStartPromptRequest(t, cfg, create.Metadata.Fence)
 	now := time.Now().UTC()
+	if expired {
+		request.Lease.ExpiresAt = now.Add(-time.Nanosecond)
+		request.Lease.IssuedAt = request.Lease.ExpiresAt.Add(-time.Minute)
+		request.MCPAuthorization.ExpiresAt = request.Lease.ExpiresAt
+		request.Metadata.ExpiresAt = request.Lease.ExpiresAt
+		digest, err := harnessv2.CanonicalRequestDigest(request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		request.Metadata.RequestDigest = digest
+	}
 
 	// Install only the unaccepted supervisor journal entry. The runtime's
-	// pending-cancellation fence now precedes the non-I/O activation callback,
+	// pre-activation fences precede the non-I/O activation callback,
 	// so neither provider/MCP activation nor Foundry beginPrompt may have run.
 	// Rejection is exercised at the production failure helper, complemented
 	// by the ACP blocked-writer test of activation callback ordering; this is
@@ -66,10 +88,14 @@ func TestFoundryPendingCancellationAdmissionPreservesIdenticalRetry(t *testing.T
 
 	rejected := httptest.NewRecorder()
 	server.mu.Lock()
-	server.handlePromptStartFailureLocked(rejected, state, prompt, acp.ErrPromptCancellationPending)
+	server.handlePromptStartFailureLocked(rejected, state, prompt, rejection)
 	var failure harnessv2.ErrorResponse
 	decodeResponse(t, rejected, &failure)
-	if rejected.Code != http.StatusTooManyRequests || failure.Code != harnessv2.ErrorCodeRateLimited || !failure.Retryable {
+	wantStatus, wantCode, wantRetryable := http.StatusTooManyRequests, harnessv2.ErrorCodeRateLimited, true
+	if expired {
+		wantStatus, wantCode, wantRetryable = http.StatusGone, harnessv2.ErrorCodeExpired, false
+	}
+	if rejected.Code != wantStatus || failure.Code != wantCode || failure.Retryable != wantRetryable {
 		t.Fatalf("Foundry admission rejection = HTTP %d, code %s, retryable %t", rejected.Code, failure.Code, failure.Retryable)
 	}
 	server.mu.Lock()
@@ -92,15 +118,19 @@ func TestFoundryPendingCancellationAdmissionPreservesIdenticalRetry(t *testing.T
 		t.Fatalf("never-accepted Foundry identity caused %d remote control calls", callsBeforeRetry)
 	}
 
-	// Retry the exact same request, including prompt ID, operation ID and
-	// digest, through authenticated HTTP and the real native ACP subprocess.
+	// Pending cancellation permits an identical retry. An expired request
+	// needs a fresh lease, but may reuse its never-accepted prompt identity.
+	retryRequest := request
+	if expired {
+		retryRequest = testStartPromptRequest(t, cfg, create.Metadata.Fence)
+	}
 	retry := performMutation(t, server.Handler(), http.MethodPut,
-		"/v2/runtime-sessions/session-1/prompts/prompt-1", request, cfg)
+		"/v2/runtime-sessions/session-1/prompts/prompt-1", retryRequest, cfg)
 	if retry.Code != http.StatusOK {
 		t.Fatalf("identical Foundry retry status = %d", retry.Code)
 	}
 	decoder, err := harnessv2.NewEventDecoder(bytes.NewReader(retry.Body.Bytes()), eventLimits(cfg.Capabilities.Limits),
-		harnessv2.EventExpectationFromMetadata(request.Metadata))
+		harnessv2.EventExpectationFromMetadata(retryRequest.Metadata))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -115,7 +145,7 @@ func TestFoundryPendingCancellationAdmissionPreservesIdenticalRetry(t *testing.T
 	if callsAfterRetry != 1 || len(observed) != 1 {
 		t.Fatalf("Foundry retry control calls = %d, settlements = %d; want one settlement only", callsAfterRetry, len(observed))
 	}
-	assertFoundryPromptRetrySettlement(t, state, request, observed[0])
+	assertFoundryPromptRetrySettlement(t, state, retryRequest, observed[0])
 }
 
 func assertFoundryPromptRetrySettlement(t *testing.T, state *sessionState, request harnessv2.StartPromptRequest, value foundryBrokerContext) {

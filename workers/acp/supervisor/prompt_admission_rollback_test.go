@@ -158,12 +158,17 @@ func TestPendingCancellationRollbackPreservesClosedAdmission(t *testing.T) {
 		state      harnessv2.RuntimeSessionState
 		poolPoison bool
 		mcpClosed  bool
+		rejection  error
 		want       harnessv2.RuntimeSessionState
 	}{
 		{name: "deleting", state: harnessv2.RuntimeSessionStateDeleting, want: harnessv2.RuntimeSessionStateDeleting},
 		{name: "poisoned-session", state: harnessv2.RuntimeSessionStatePoisoned, want: harnessv2.RuntimeSessionStatePoisoned},
 		{name: "poisoned-pool", state: harnessv2.RuntimeSessionStateIdle, poolPoison: true, want: harnessv2.RuntimeSessionStatePoisoned},
 		{name: "closed-MCP", state: harnessv2.RuntimeSessionStateIdle, mcpClosed: true, want: harnessv2.RuntimeSessionStateDeleted},
+		{name: "expired-deleting", state: harnessv2.RuntimeSessionStateDeleting, rejection: acp.ErrPromptLeaseExpired, want: harnessv2.RuntimeSessionStateDeleting},
+		{name: "expired-poisoned-session", state: harnessv2.RuntimeSessionStatePoisoned, rejection: acp.ErrPromptLeaseExpired, want: harnessv2.RuntimeSessionStatePoisoned},
+		{name: "expired-poisoned-pool", state: harnessv2.RuntimeSessionStateIdle, poolPoison: true, rejection: acp.ErrPromptLeaseExpired, want: harnessv2.RuntimeSessionStatePoisoned},
+		{name: "expired-closed-MCP", state: harnessv2.RuntimeSessionStateIdle, mcpClosed: true, rejection: fmt.Errorf("admission: %w", acp.ErrPromptLeaseExpired), want: harnessv2.RuntimeSessionStateDeleted},
 	} {
 		t.Run(scenario.name, func(t *testing.T) {
 			server, state, prompt := newPromptAdmissionRollbackState(t)
@@ -178,8 +183,12 @@ func TestPendingCancellationRollbackPreservesClosedAdmission(t *testing.T) {
 				state.mcpProxy.mu.Unlock()
 			}
 			server.revokePromptRequestCapabilities(state, prompt)
+			rejection := scenario.rejection
+			if rejection == nil {
+				rejection = acp.ErrPromptCancellationPending
+			}
 			server.mu.Lock()
-			server.handlePromptStartFailureLocked(httptest.NewRecorder(), state, prompt, acp.ErrPromptCancellationPending)
+			server.handlePromptStartFailureLocked(httptest.NewRecorder(), state, prompt, rejection)
 			assertUnacceptedPromptOperationRemoved(t, server, state, prompt)
 			server.mu.Lock()
 			gotDescriptor := state.descriptor.State

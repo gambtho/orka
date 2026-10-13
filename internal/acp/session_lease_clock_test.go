@@ -435,7 +435,7 @@ func TestRuntimeSessionExpiredLeaseDoesNotActivateCapabilities(t *testing.T) {
 			activated = true
 			return nil
 		})
-		if err == nil || errors.Is(err, ErrPromptActivationExpired) || activated {
+		if !errors.Is(err, ErrPromptLeaseExpired) || errors.Is(err, ErrPromptActivationExpired) || activated {
 			t.Fatalf("pre-activation expiry = %v, activated = %t", err, activated)
 		}
 		if session.process.Client().nextID.Load() != 0 {

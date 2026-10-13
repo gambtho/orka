@@ -2626,6 +2626,8 @@ func (s *Server) revokePromptRequestCapabilities(state *sessionState, prompt *pr
 // before scheduling cleanup or writing the response. Other errors stay fail-closed.
 func (s *Server) handlePromptStartFailureLocked(w http.ResponseWriter, state *sessionState, prompt *promptState, err error) {
 	cancellationPending := errors.Is(err, acp.ErrPromptCancellationPending)
+	leaseExpired := errors.Is(err, acp.ErrPromptLeaseExpired)
+	preActivationRejected := cancellationPending || leaseExpired
 	cancellationTimedOut := errors.Is(err, acp.ErrPromptCancellationTimedOut)
 	activationFailed := errors.Is(err, errPromptProviderActivation) || errors.Is(err, errPromptMCPActivation) || errors.Is(err, acp.ErrPromptActivationExpired)
 	sessionCleanup := false
@@ -2635,7 +2637,7 @@ func (s *Server) handlePromptStartFailureLocked(w http.ResponseWriter, state *se
 			state.descriptor.LastTransitionAt = time.Now().UTC()
 		}
 		next := state.descriptor.State
-		if !cancellationPending && (next == harnessv2.RuntimeSessionStateIdle || next == harnessv2.RuntimeSessionStatePromptRunning) {
+		if !preActivationRejected && (next == harnessv2.RuntimeSessionStateIdle || next == harnessv2.RuntimeSessionStatePromptRunning) {
 			next = harnessv2.RuntimeSessionStateCancelling
 		}
 		if s.poisoned {
@@ -2649,7 +2651,7 @@ func (s *Server) handlePromptStartFailureLocked(w http.ResponseWriter, state *se
 		delete(state.operationReplays, operationID)
 		// Cleanup may have deferred to this never-accepted owner. There is no
 		// stream finisher to retry its retirement after rollback.
-		if (cancellationPending || cancellationTimedOut || activationFailed) && (s.drain.Requested || s.poisoned || state.descriptor.State == harnessv2.RuntimeSessionStatePoisoned) &&
+		if (preActivationRejected || cancellationTimedOut || activationFailed) && (s.drain.Requested || s.poisoned || state.descriptor.State == harnessv2.RuntimeSessionStatePoisoned) &&
 			!state.creating && state.runtime != nil && !state.drainCleanupScheduled && isDrainCleanupState(state) {
 			state.drainCleanupScheduled = true
 			sessionCleanup = true
@@ -2672,6 +2674,10 @@ func (s *Server) handlePromptStartFailureLocked(w http.ResponseWriter, state *se
 			message = errPromptMCPActivation.Error()
 		}
 		writeError(w, http.StatusInternalServerError, harnessv2.ErrorCodeSessionPoisoned, message, nil, false)
+		return
+	}
+	if leaseExpired {
+		writeError(w, http.StatusGone, harnessv2.ErrorCodeExpired, acp.ErrPromptLeaseExpired.Error(), nil, false)
 		return
 	}
 	if cancellationPending {
