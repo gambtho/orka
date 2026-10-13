@@ -155,6 +155,23 @@ func (s *Server) handleStartPrompt(w http.ResponseWriter, r *http.Request) {
 	runtimeSession := state.runtime
 	providerProxy := state.providerProxy
 	mcpProxy := state.mcpProxy
+	// Resume an adapter that exited while idle before this prompt gets any
+	// provider or MCP access. Some agents call the model during
+	// session/resume; with the prompt not yet active the provider proxy
+	// refuses that call instead of charging it to this prompt's maxTurns.
+	s.mu.Unlock()
+	recoverErr := runtimeSession.RecoverExitedAdapter(
+		r.Context(), string(request.Metadata.PromptID), string(request.Metadata.RequestDigest), request.Lease.ExpiresAt,
+	)
+	s.mu.Lock()
+	if recoverErr == nil && state.prompt != prompt {
+		recoverErr = fmt.Errorf("prompt %s was cleared while its adapter resumed", request.Metadata.PromptID)
+	}
+	if recoverErr != nil {
+		s.handlePromptStartFailureLocked(w, state, prompt, recoverErr)
+		return
+	}
+	now = time.Now().UTC()
 	stopRequestGate := context.AfterFunc(r.Context(), func() {
 		s.revokePromptRequestCapabilities(state, prompt)
 	})
@@ -2630,7 +2647,8 @@ func (s *Server) handlePromptStartFailureLocked(w http.ResponseWriter, state *se
 	preActivationRejected := cancellationPending || leaseExpired
 	cancellationTimedOut := errors.Is(err, acp.ErrPromptCancellationTimedOut)
 	activationFailed := errors.Is(err, errPromptProviderActivation) || errors.Is(err, errPromptMCPActivation) || errors.Is(err, acp.ErrPromptActivationExpired)
-	terminalAdmissionFailure := cancellationTimedOut || activationFailed
+	lost, adapterLost := errors.AsType[*acp.AdapterLostError](err)
+	terminalAdmissionFailure := cancellationTimedOut || activationFailed || adapterLost
 	sessionCleanup := false
 	if s.sessions[state.id] == state && state.prompt == prompt {
 		if terminalAdmissionFailure && (state.descriptor.State == harnessv2.RuntimeSessionStateIdle || state.descriptor.State == harnessv2.RuntimeSessionStatePromptRunning) {
@@ -2661,6 +2679,22 @@ func (s *Server) handlePromptStartFailureLocked(w http.ResponseWriter, state *se
 	s.mu.Unlock()
 	if sessionCleanup {
 		go s.cleanupDrainedSession(state.id, state)
+	}
+	if adapterLost {
+		// Preserve the typed pre-write rejection so the controller retires the
+		// binding and recreates a session from the canonical transcript.
+		slog.Warn(
+			"ACP adapter lost while idle; retiring runtime session",
+			"sessionID", state.id, "promptID", prompt.request.Metadata.PromptID,
+			"resumeAttempted", lost.Attempted,
+			// The cause can carry adapter-controlled JSON-RPC text.
+			"errorDetail", redactedPromptErrorDetail(lost),
+		)
+		writeError(
+			w, http.StatusConflict, harnessv2.ErrorCodePromptNotAccepted,
+			"ACP adapter exited while idle; prompt was not accepted and runtime session was retired", nil, false,
+		)
+		return
 	}
 	if cancellationTimedOut {
 		writeError(w, http.StatusConflict, harnessv2.ErrorCodeSessionPoisoned,
