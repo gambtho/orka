@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"net/http"
@@ -9,6 +10,7 @@ import (
 	"github.com/orka-agents/orka/internal/aitools"
 	gatewayruntime "github.com/orka-agents/orka/internal/gateway"
 	"github.com/orka-agents/orka/internal/gateway/protocol"
+	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 	"github.com/orka-agents/orka/internal/tools"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
@@ -18,14 +20,40 @@ type brokeredGatewayReplySender struct {
 	service *gatewayruntime.Service
 }
 
-var _ tools.GatewayMeetingDraftSender = (*brokeredGatewayReplySender)(nil)
+type brokeredGatewayMeetingDraftSender struct {
+	*brokeredGatewayReplySender
+}
 
-// NewBrokeredGatewayReplySender binds an ACP prompt guard and exact Task identity.
-// It grants no tool availability; the sealed descriptor policy does that. Each
-// method independently reauthorizes, prepares live data outside the SQLite writer,
-// and consumes the preparation under the existing authorized data transaction.
+var _ tools.GatewayMeetingDraftSender = (*brokeredGatewayMeetingDraftSender)(nil)
+
+// NewBrokeredGatewayReplySender binds an ACP prompt guard and exact Task identity
+// for content-only replies. Each method independently reauthorizes, prepares live
+// data outside the SQLite writer, and consumes the preparation under the existing
+// authorized data transaction.
 func NewBrokeredGatewayReplySender(reader client.Reader, service *gatewayruntime.Service, key client.ObjectKey, uid string, guard func(context.Context, func(context.Context) error) error) tools.GatewayReplySender {
-	return &brokeredGatewayReplySender{access: brokeredTaskDataAccess{authorizer: internalCallerAuthorizer{k8sReader: reader}, taskKey: key, taskUID: uid, guard: guard}, service: service}
+	return NewBrokeredGatewayReplySenderForDescriptor(reader, service, key, uid, guard, harnessv2.MCPToolDescriptor{})
+}
+
+// NewBrokeredGatewayReplySenderForDescriptor additionally binds draft capability
+// to the supervisor's frozen descriptor carried by the authenticated broker call,
+// never to tool arguments. External runtimes also pin it to a controller snapshot.
+// Availability alone is insufficient: old profiles must remain content-only even
+// when the current registry implementation understands meetingDraft.
+func NewBrokeredGatewayReplySenderForDescriptor(reader client.Reader, service *gatewayruntime.Service, key client.ObjectKey, uid string, guard func(context.Context, func(context.Context) error) error, descriptor harnessv2.MCPToolDescriptor) tools.GatewayReplySender {
+	sender := &brokeredGatewayReplySender{access: brokeredTaskDataAccess{authorizer: internalCallerAuthorizer{k8sReader: reader}, taskKey: key, taskUID: uid, guard: guard}, service: service}
+	tool := tools.NewReplyInConversationTool()
+	if descriptor.Name != tool.Name() || descriptor.Source != harnessv2.MCPToolSourceBrokeredBuiltin || descriptor.Effect != harnessv2.MCPToolEffectConsequential {
+		return sender
+	}
+	frozen, err := harnessv2.CanonicalJSON(descriptor.InputSchema)
+	if err != nil {
+		return sender
+	}
+	current, err := harnessv2.CanonicalJSON(tool.Parameters())
+	if err != nil || !bytes.Equal(frozen, current) {
+		return sender
+	}
+	return &brokeredGatewayMeetingDraftSender{sender}
 }
 
 func (s *brokeredGatewayReplySender) authorize(_ context.Context, task *corev1alpha1.Task) error {
@@ -62,7 +90,7 @@ func (s *brokeredGatewayReplySender) Enqueue(ctx context.Context, id, content st
 	return s.enqueue(ctx, id, content, nil)
 }
 
-func (s *brokeredGatewayReplySender) EnqueueMeetingDraft(ctx context.Context, id, content string, draft protocol.MeetingDraft) (tools.GatewayReplyReceipt, error) {
+func (s *brokeredGatewayMeetingDraftSender) EnqueueMeetingDraft(ctx context.Context, id, content string, draft protocol.MeetingDraft) (tools.GatewayReplyReceipt, error) {
 	return s.enqueue(ctx, id, content, &draft)
 }
 

@@ -13,6 +13,7 @@ import (
 
 	"github.com/gofiber/fiber/v3"
 	"github.com/orka-agents/orka/internal/gateway/workerclient"
+	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 	"github.com/orka-agents/orka/internal/tools"
 
 	gatewayv1alpha1 "github.com/orka-agents/orka/api/gateway/v1alpha1"
@@ -124,6 +125,89 @@ func TestBrokeredGatewayMeetingDraftUnsupportedIsDefinitive(t *testing.T) {
 	rows, err := f.data.ListGatewayDeliveries(t.Context(), store.GatewayDeliveryFilter{Namespace: f.task.Namespace})
 	require.NoError(t, err)
 	require.Empty(t, rows)
+}
+
+func TestBrokeredGatewayMeetingDraftFrozenDescriptor(t *testing.T) {
+	// Removing the descriptor fence would let a content-only frozen session
+	// enqueue a draft under the current registry implementation.
+	const contentOnlySchema = `{"type":"object","properties":{"content":{"type":"string","minLength":1,"maxLength":16384,"description":"Message text, at most 16384 UTF-8 bytes; never truncated."}},"required":["content"],"additionalProperties":false}`
+	currentSchema := tools.NewReplyInConversationTool().Parameters()
+	var schemaObject map[string]any
+	require.NoError(t, json.Unmarshal(currentSchema, &schemaObject))
+	reorderedSchema, err := json.MarshalIndent(schemaObject, "", "  ")
+	require.NoError(t, err)
+	for _, test := range []struct {
+		name       string
+		schema     json.RawMessage
+		allowDraft bool
+	}{
+		{"old content-only", json.RawMessage(contentOnlySchema), false},
+		{"draft property without exact schema", json.RawMessage(`{"type":"object","properties":{"content":{"type":"string"},"meetingDraft":{"type":"object"}},"required":["content"],"additionalProperties":false}`), false},
+		{"current", currentSchema, true},
+		{"current reordered JSON", reorderedSchema, true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			f, service := newBrokeredReplyFixture(t)
+			service.Config.InterimMessagesPerTask = 1
+			g := &gatewayv1alpha1.Gateway{}
+			require.NoError(t, service.Client.Get(t.Context(), client.ObjectKey{Namespace: f.task.Namespace, Name: "chat"}, g))
+			g.Status.ObservedCapabilities.Capabilities.MeetingDrafts = true
+			require.NoError(t, service.Client.Update(t.Context(), g))
+
+			// Freeze the actual descriptor, including its digest, at the same
+			// authenticated configuration boundary external ACP sessions use.
+			f.request.Authorization.ToolPolicy.Tools[0].InputSchema = test.schema
+			var err error
+			f.request.Authorization.ToolPolicy.DescriptorDigest, err = harnessv2.CanonicalMCPToolDescriptorDigest(f.request.Authorization.ToolPolicy.Tools)
+			require.NoError(t, err)
+			frozen := f.request.Authorization.Configuration()
+			f.credentials.ExpectedMCPConfiguration = &frozen
+			f.request.Call.Arguments = json.RawMessage(`{"content":"draft above","meetingDraft":` + apiMeetingDraft + `}`)
+			replyRequestDigest(t, f)
+
+			result := f.call(t)
+			require.Equal(t, http.StatusOK, result.Code, result.Body.String())
+			var response harnessv2.MCPBrokerCallResponse
+			require.NoError(t, json.Unmarshal(result.Body.Bytes(), &response))
+			require.Equal(t, !test.allowDraft, response.IsError, result.Body.String())
+			require.NotContains(t, result.Body.String(), "unknown")
+			rows, err := f.data.ListGatewayDeliveries(t.Context(), store.GatewayDeliveryFilter{Namespace: f.task.Namespace})
+			require.NoError(t, err)
+			if test.allowDraft {
+				require.Len(t, rows, 1)
+				require.Equal(t, "Planning", rows[0].Metadata["meeting.subject"])
+				return
+			}
+			require.Contains(t, result.Body.String(), "does not support meeting drafts")
+			require.Empty(t, rows, "rejected draft must not enter the outbox")
+			identity := store.ExternalEffectIdentity{Kind: "acp-mcp-tool", Namespace: f.task.Namespace, AggregateID: string(f.request.Authorization.RuntimeSessionUID), OperationID: string(f.request.Metadata.OperationID)}
+			effect, err := f.control.GetExternalEffectByIdentity(t.Context(), identity)
+			require.NoError(t, err)
+			require.Equal(t, store.ExternalEffectSucceeded, effect.State, "definitive rejection must not leave an unknown operation")
+			replay := f.call(t)
+			require.Equal(t, http.StatusOK, replay.Code, replay.Body.String())
+			require.NoError(t, json.Unmarshal(replay.Body.Bytes(), &response))
+			require.True(t, response.IsError)
+			require.True(t, response.Replayed)
+
+			// The rejected call consumes none of the single-message quota, and
+			// an old descriptor can still send ordinary content unchanged.
+			f.request.Metadata.OperationID = "plain-content"
+			f.request.Call.CallID = "plain-content"
+			f.request.Call.Arguments = json.RawMessage(`{"content":"ordinary reply"}`)
+			replyRequestDigest(t, f)
+			plain := f.call(t)
+			require.Equal(t, http.StatusOK, plain.Code, plain.Body.String())
+			response = harnessv2.MCPBrokerCallResponse{}
+			require.NoError(t, json.Unmarshal(plain.Body.Bytes(), &response))
+			require.False(t, response.IsError, plain.Body.String())
+			rows, err = f.data.ListGatewayDeliveries(t.Context(), store.GatewayDeliveryFilter{Namespace: f.task.Namespace})
+			require.NoError(t, err)
+			require.Len(t, rows, 1)
+			require.Equal(t, "ordinary reply", rows[0].Text)
+			require.Empty(t, rows[0].Metadata)
+		})
+	}
 }
 
 func TestBrokeredGatewayMeetingDraftTransport(t *testing.T) {
