@@ -34,8 +34,11 @@ type RuntimeSessionConfig struct {
 	Process        ProcessConfig
 	MCPServers     []MCPServer
 	NewSessionMeta Meta
-	AuthMethodID   string
-	ClientInfo     Implementation
+	// ResumeSessionID requests an installed native provider session. Failure to
+	// advertise or complete resume must fail creation without session/new.
+	ResumeSessionID string
+	AuthMethodID    string
+	ClientInfo      Implementation
 
 	InitializeTimeout time.Duration
 	PromptLease       time.Duration
@@ -72,6 +75,18 @@ type runtimeSessionDeletion struct {
 	status CleanupStatus
 	err    error
 }
+
+// InitializationError retains the failed session's stop proof. The session is
+// sealed against prompts, but remains available for a later cleanup attempt.
+type InitializationError struct {
+	Err     error
+	Cleanup CleanupStatus
+	session *RuntimeSession
+}
+
+func (e *InitializationError) Error() string                   { return e.Err.Error() }
+func (e *InitializationError) Unwrap() error                   { return e.Err }
+func (e *InitializationError) RuntimeSession() *RuntimeSession { return e.session }
 
 type PromptEventType string
 
@@ -247,22 +262,32 @@ func NewRuntimeSession(ctx context.Context, cfg RuntimeSessionConfig) (*RuntimeS
 		},
 	})
 	if err != nil {
-		_ = stopProcessBestEffort(process, cfg.CancelGrace)
-		return nil, fmt.Errorf("initialize ACP adapter: %w", err)
+		return nil, initializationFailed(session, fmt.Errorf("initialize ACP adapter: %w", err))
 	}
 	if len(cfg.MCPServers) > 0 && !acpMCPCapabilityEnabled(initialized.AgentCapabilities.MCPCapabilities, "http") {
-		_ = stopProcessBestEffort(process, cfg.CancelGrace)
-		return nil, fmt.Errorf("ACP adapter did not advertise HTTP MCP server support")
+		return nil, initializationFailed(session, fmt.Errorf("ACP adapter did not advertise HTTP MCP server support"))
 	}
 	if cfg.AuthMethodID != "" {
 		if !containsAuthMethod(initialized.AuthMethods, cfg.AuthMethodID) {
-			_ = stopProcessBestEffort(process, cfg.CancelGrace)
-			return nil, fmt.Errorf("ACP adapter did not advertise authentication method %q", cfg.AuthMethodID)
+			return nil, initializationFailed(session, fmt.Errorf("ACP adapter did not advertise authentication method %q", cfg.AuthMethodID))
 		}
 		if err := process.Client().Authenticate(initCtx, cfg.AuthMethodID); err != nil {
-			_ = stopProcessBestEffort(process, cfg.CancelGrace)
-			return nil, fmt.Errorf("authenticate ACP adapter: %w", err)
+			return nil, initializationFailed(session, fmt.Errorf("authenticate ACP adapter: %w", err))
 		}
+	}
+	if cfg.ResumeSessionID != "" {
+		if !initialized.AgentCapabilities.SessionCapability(SessionCapabilityResume) {
+			return nil, initializationFailed(session, fmt.Errorf("ACP adapter did not advertise session/resume support"))
+		}
+		_, err := process.Client().ResumeSession(initCtx, ResumeSessionRequest{
+			SessionID: cfg.ResumeSessionID, CWD: cfg.Process.Paths.Workspace,
+			MCPServers: append([]MCPServer{}, cfg.MCPServers...), Meta: newSessionMeta,
+		})
+		if err != nil {
+			return nil, initializationFailed(session, fmt.Errorf("resume ACP provider session: %w", err))
+		}
+		session.providerSessionID = cfg.ResumeSessionID
+		return session, nil
 	}
 	newSession, err := process.Client().NewSession(initCtx, NewSessionRequest{
 		CWD:        cfg.Process.Paths.Workspace,
@@ -270,8 +295,7 @@ func NewRuntimeSession(ctx context.Context, cfg RuntimeSessionConfig) (*RuntimeS
 		Meta:       newSessionMeta,
 	})
 	if err != nil {
-		_ = stopProcessBestEffort(process, cfg.CancelGrace)
-		return nil, fmt.Errorf("create ACP provider session: %w", err)
+		return nil, initializationFailed(session, fmt.Errorf("create ACP provider session: %w", err))
 	}
 	session.providerSessionID = newSession.SessionID
 	return session, nil
@@ -891,11 +915,11 @@ func containsAuthMethod(methods []AuthMethod, id string) bool {
 	return false
 }
 
-func stopProcessBestEffort(process *Process, grace time.Duration) error {
-	ctx, cancel := context.WithTimeout(context.Background(), grace*2)
+func initializationFailed(session *RuntimeSession, cause error) error {
+	ctx, cancel := context.WithTimeout(context.Background(), session.config.CancelGrace*2)
 	defer cancel()
-	_, err := process.Stop(ctx, grace)
-	return err
+	cleanup, err := session.Delete(ctx)
+	return &InitializationError{Err: errors.Join(cause, err), Cleanup: cleanup, session: session}
 }
 
 func (s *RuntimeSession) Freeze(ctx context.Context) error {
