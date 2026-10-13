@@ -2630,9 +2630,10 @@ func (s *Server) handlePromptStartFailureLocked(w http.ResponseWriter, state *se
 	preActivationRejected := cancellationPending || leaseExpired
 	cancellationTimedOut := errors.Is(err, acp.ErrPromptCancellationTimedOut)
 	activationFailed := errors.Is(err, errPromptProviderActivation) || errors.Is(err, errPromptMCPActivation) || errors.Is(err, acp.ErrPromptActivationExpired)
+	terminalAdmissionFailure := cancellationTimedOut || activationFailed
 	sessionCleanup := false
 	if s.sessions[state.id] == state && state.prompt == prompt {
-		if (cancellationTimedOut || activationFailed) && (state.descriptor.State == harnessv2.RuntimeSessionStateIdle || state.descriptor.State == harnessv2.RuntimeSessionStatePromptRunning) {
+		if terminalAdmissionFailure && (state.descriptor.State == harnessv2.RuntimeSessionStateIdle || state.descriptor.State == harnessv2.RuntimeSessionStatePromptRunning) {
 			state.descriptor.State = harnessv2.RuntimeSessionStatePoisoned
 			state.descriptor.LastTransitionAt = time.Now().UTC()
 		}
@@ -2651,7 +2652,7 @@ func (s *Server) handlePromptStartFailureLocked(w http.ResponseWriter, state *se
 		delete(state.operationReplays, operationID)
 		// Cleanup may have deferred to this never-accepted owner. There is no
 		// stream finisher to retry its retirement after rollback.
-		if (preActivationRejected || cancellationTimedOut || activationFailed) && (s.drain.Requested || s.poisoned || state.descriptor.State == harnessv2.RuntimeSessionStatePoisoned) &&
+		if (preActivationRejected || terminalAdmissionFailure) && (s.drain.Requested || s.poisoned || state.descriptor.State == harnessv2.RuntimeSessionStatePoisoned) &&
 			!state.creating && state.runtime != nil && !state.drainCleanupScheduled && isDrainCleanupState(state) {
 			state.drainCleanupScheduled = true
 			sessionCleanup = true
