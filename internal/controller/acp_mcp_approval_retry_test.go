@@ -7,6 +7,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/stretchr/testify/require"
@@ -167,93 +168,107 @@ func TestMCPApprovalStorageReadRecoveryContinuesOriginalCall(t *testing.T) {
 func TestMCPApprovalReadRetriesKeepOriginalExpiry(t *testing.T) {
 	for _, source := range []string{"decision", "receipt", "secret"} {
 		t.Run(source, func(t *testing.T) {
-			f := newMCPApprovalFixture(t)
-			// Leave time for fixture I/O and the fault barrier before approval.
-			// The actual retained expiry, not this duration, bounds every retry.
-			f.broker.ApprovalWaitTimeout = 3 * time.Second
-			fault := configureApprovalRetryReadFault(t, f, source)
-			var readMu sync.Mutex
-			var receiptReadDeadlines []time.Time
-			var pendingID string
-			settlementStarted := false
-			settlementReads := 0
-			if source == "receipt" {
-				f.broker.ApprovalEvents = approvalRetryEventStore{
-					TaskDataTransactionStore: f.events, DeduplicatingExecutionEventStore: f.events,
-					observeAppend: func(event *store.ExecutionEvent) {
+			synctest.Test(t, func(t *testing.T) {
+				f := newMCPApprovalFixture(t)
+				f.broker.ApprovalWaitTimeout = time.Second
+				fault := configureApprovalRetryReadFault(t, f, source)
+				var readMu sync.Mutex
+				var receiptReadDeadlines []time.Time
+				var pendingID string
+				settlementStarted := false
+				settlementReads := 0
+				if source == "receipt" {
+					f.broker.ApprovalEvents = approvalRetryEventStore{
+						TaskDataTransactionStore: f.events, DeduplicatingExecutionEventStore: f.events,
+						observeAppend: func(event *store.ExecutionEvent) {
+							readMu.Lock()
+							defer readMu.Unlock()
+							if event.Type == events.ExecutionEventTypeApprovalExpired && event.ToolCallID == pendingID {
+								settlementStarted = true
+							}
+						},
+					}
+					fault.observeReceiptRead = func(ctx context.Context) {
 						readMu.Lock()
 						defer readMu.Unlock()
-						if event.Type == events.ExecutionEventTypeApprovalExpired && event.ToolCallID == pendingID {
-							settlementStarted = true
+						// Expiry settlement has a detached context. Its expiry-append
+						// attempt marks that phase even if an earlier approval won.
+						// Never classify retries by whether their deadline is correct.
+						if settlementStarted {
+							settlementReads++
+							return
 						}
-					},
-				}
-				fault.observeReceiptRead = func(ctx context.Context) {
-					readMu.Lock()
-					defer readMu.Unlock()
-					// Expiry settlement has a detached context. Its expiry-append
-					// attempt marks that phase even if an earlier approval won.
-					// Never classify retries by whether their deadline is correct.
-					if settlementStarted {
-						settlementReads++
-						return
+						deadline, ok := ctx.Deadline()
+						if !ok {
+							t.Error("receipt retry has no deadline")
+						}
+						receiptReadDeadlines = append(receiptReadDeadlines, deadline)
 					}
-					deadline, ok := ctx.Deadline()
-					if !ok {
-						t.Error("receipt retry has no deadline")
-					}
-					receiptReadDeadlines = append(receiptReadDeadlines, deadline)
 				}
-			}
-			done := f.start(f.request)
-			pending := f.pending()
-			originalExpiry := *pending.ExpiresAt
-			readMu.Lock()
-			pendingID = pending.ID
-			readMu.Unlock()
-			fault.active.Store(true)
-			if source == "receipt" {
-				// Approval must not win the first decision read and bypass the fault.
-				requireApprovalReadRetrying(t, f, pending.ID, approvals.StatusPending, done, fault.reads)
-			}
-			f.decide(pending.ID, events.ExecutionEventTypeApprovalApproved)
-			requireApprovalReadRetrying(t, f, pending.ID, approvals.StatusApproved, done, fault.reads)
-			if source == "receipt" || source == "decision" {
-				// Unreadable receipts cannot rule out another execution claim.
-				// Unreadable history cannot prove a retained request for the
-				// expiry projection. Neither outage may be treated as absence.
+				done := f.start(f.request)
+				pending := f.pending()
+				require.NotNil(t, pending.ExpiresAt)
+				originalExpiry := *pending.ExpiresAt
+				readMu.Lock()
+				pendingID = pending.ID
+				readMu.Unlock()
+				fault.active.Store(true)
+				if source == "receipt" {
+					// Receipt polling only follows a pending decision. Observe the
+					// outage before approval can bypass that branch entirely.
+					requireApprovalReadRetrying(t, f, pending.ID, approvals.StatusPending, done, fault.reads)
+				}
+				f.decide(pending.ID, events.ExecutionEventTypeApprovalApproved)
+				requireApprovalReadRetrying(t, f, pending.ID, approvals.StatusApproved, done, fault.reads)
+				synctest.Wait()
+				require.True(t, time.Now().Before(originalExpiry))
+				time.Sleep(time.Until(originalExpiry) - time.Nanosecond)
+				synctest.Wait()
 				select {
 				case response := <-done:
-					require.Equal(t, http.StatusServiceUnavailable, response.Code, "body=%s", response.Body.String())
-				case <-time.After(15 * time.Second):
-					t.Fatal("approval call hung after the original expiry")
+					t.Fatalf("approval ended before its original expiry: HTTP %d body=%s", response.Code, response.Body.String())
+				default:
 				}
-			} else {
-				result := awaitMCPApprovalResult(t, done)
-				require.True(t, result.IsError)
-				require.JSONEq(t, string(acpApprovalError(pending.ID, acpApprovalCodeExpired)), string(result.Result))
-			}
-			require.False(t, time.Now().UTC().Before(originalExpiry))
-			if source == "receipt" {
-				readMu.Lock()
-				deadlines := append([]time.Time(nil), receiptReadDeadlines...)
-				expirySettlement := settlementStarted
-				cleanupReads := settlementReads
-				readMu.Unlock()
-				require.True(t, expirySettlement, "the original call must enter expiry settlement")
-				require.Equal(t, 1, cleanupReads, "only the terminal settlement read may use a detached context")
-				require.GreaterOrEqual(t, len(deadlines), 2, "receipt retries must be observed")
-				for attempt, deadline := range deadlines {
-					require.True(t, deadline.Equal(originalExpiry), "receipt retry %d deadline=%s, original expiry=%s", attempt, deadline, originalExpiry)
+				time.Sleep(time.Nanosecond)
+				synctest.Wait()
+				require.True(t, time.Now().Equal(originalExpiry), "retries must stop at the exact original expiry")
+				if source == "receipt" || source == "decision" {
+					// Unreadable receipts cannot rule out another execution claim.
+					// Unreadable history cannot prove a retained request for the
+					// expiry projection. Neither outage may be treated as absence.
+					select {
+					case response := <-done:
+						require.Equal(t, http.StatusServiceUnavailable, response.Code, "body=%s", response.Body.String())
+					default:
+						t.Fatal("storage outage extended the original approval wait")
+					}
+				} else {
+					require.Len(t, done, 1, "Secret retries must finish at the original expiry")
+					result := awaitMCPApprovalResult(t, done)
+					require.True(t, result.IsError)
+					require.JSONEq(t, string(acpApprovalError(pending.ID, acpApprovalCodeExpired)), string(result.Result))
 				}
-			}
-			require.Zero(t, f.count.Load())
-			fault.active.Store(false)
-			f.reopen()
-			replay := awaitMCPApprovalResult(t, f.start(f.request))
-			require.True(t, replay.IsError)
-			require.JSONEq(t, string(acpApprovalError(pending.ID, acpApprovalCodeExpired)), string(replay.Result))
-			require.Zero(t, f.count.Load(), "read recovery must not extend the original approval deadline")
+				if source == "receipt" {
+					readMu.Lock()
+					deadlines := append([]time.Time(nil), receiptReadDeadlines...)
+					expirySettlement := settlementStarted
+					cleanupReads := settlementReads
+					readMu.Unlock()
+					require.True(t, expirySettlement, "the original call must enter expiry settlement")
+					require.Equal(t, 1, cleanupReads, "only the terminal settlement read may use a detached context")
+					require.GreaterOrEqual(t, len(deadlines), 2, "receipt retries must be observed")
+					for attempt, deadline := range deadlines {
+						require.True(t, deadline.Equal(originalExpiry), "receipt retry %d deadline=%s, original expiry=%s", attempt, deadline, originalExpiry)
+					}
+				}
+				require.Zero(t, f.count.Load())
+				fault.active.Store(false)
+				f.reopen()
+				replay := awaitMCPApprovalResult(t, f.start(f.request))
+				require.True(t, replay.IsError)
+				require.JSONEq(t, string(acpApprovalError(pending.ID, acpApprovalCodeExpired)), string(replay.Result))
+				require.Zero(t, f.count.Load(), "read recovery must not extend the original approval deadline")
+			})
 		})
 	}
 }
