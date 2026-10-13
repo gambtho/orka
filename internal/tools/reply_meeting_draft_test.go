@@ -21,6 +21,61 @@ func (s *meetingReplySender) EnqueueMeetingDraft(ctx context.Context, id, conten
 	return s.Enqueue(ctx, id, content)
 }
 
+func TestReplyMeetingDraftSchemaUsesParserByteBounds(t *testing.T) {
+	var schema map[string]any
+	require.NoError(t, json.Unmarshal(NewReplyInConversationTool().Parameters(), &schema))
+	properties := schema["properties"].(map[string]any)
+	require.Equal(t, float64(16384), properties["content"].(map[string]any)["maxLength"])
+	draft := properties["meetingDraft"].(map[string]any)["properties"].(map[string]any)
+	named := draft["attendees"].(map[string]any)["oneOf"].([]any)[1].(map[string]any)["properties"].(map[string]any)
+	for name, text := range map[string]map[string]any{
+		"subject":          draft["subject"].(map[string]any),
+		"agenda item":      draft["agenda"].(map[string]any)["items"].(map[string]any),
+		"attendee name":    named["names"].(map[string]any)["items"].(map[string]any),
+		"preferred window": draft["preferredWindow"].(map[string]any),
+	} {
+		t.Run(name, func(t *testing.T) {
+			require.NotContains(t, text, "maxLength", "JSON Schema lengths count characters, not UTF-8 bytes")
+			require.Equal(t, float64(1), text["minLength"])
+		})
+	}
+}
+
+func TestReplyMeetingDraftParserKeepsUTF8ByteBounds(t *testing.T) {
+	for _, tc := range []struct {
+		field string
+		limit int
+	}{
+		{"subject", 200}, {"agenda", 256}, {"name", 128}, {"preferredWindow", 256},
+	} {
+		t.Run(tc.field, func(t *testing.T) {
+			for _, extra := range []string{"", "x"} {
+				text := strings.Repeat("é", tc.limit/2) + extra
+				draft := map[string]any{"subject": "Planning", "agenda": []string{"Next steps"}, "attendees": map[string]any{"mode": "everyone"}}
+				switch tc.field {
+				case "agenda":
+					draft[tc.field] = []string{text}
+				case "name":
+					draft["attendees"] = map[string]any{"mode": "named", "names": []string{text}}
+				default:
+					draft[tc.field] = text
+				}
+				raw, err := json.Marshal(map[string]any{"content": "Draft", "meetingDraft": draft})
+				require.NoError(t, err)
+				sender := &meetingReplySender{replySenderStub: replySenderStub{budget: GatewayReplyBudget{Limit: 10}}}
+				_, err = NewReplyInConversationTool().Execute(replyContext(sender), raw)
+				if extra == "" {
+					require.NoError(t, err)
+					require.Len(t, sender.contents, 1)
+				} else {
+					require.ErrorAs(t, err, new(*GatewayReplyRejection))
+					require.Empty(t, sender.contents)
+				}
+			}
+		})
+	}
+}
+
 func TestReplyMeetingDraftValidationAndCanonicalDefault(t *testing.T) {
 	s := &meetingReplySender{replySenderStub: replySenderStub{budget: GatewayReplyBudget{Limit: 10}}}
 	tool := NewReplyInConversationTool()

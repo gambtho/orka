@@ -1727,15 +1727,12 @@ func evalMeetingDraftLimitCases() []evalLimitCase {
 		{"agenda", ".agenda required", []any{"Next steps"}, nil, true},
 		{"attendees", ".attendees required", map[string]any{"mode": "everyone"}, nil, true},
 		{"subject", ".subject minLength=1", "x", "", false},
-		{"subject", ".subject maxLength=200", strings.Repeat("x", 200), strings.Repeat("x", 201), false},
 		{"agenda", ".agenda minItems=1", []any{"x"}, []any{}, false},
 		{"agenda", ".agenda maxItems=5", []any{"a", "b", "c", "d", "e"}, []any{"a", "b", "c", "d", "e", "f"}, false},
 		{"agenda", ".agenda[] minLength=1", []any{"x"}, []any{""}, false},
-		{"agenda", ".agenda[] maxLength=256", []any{strings.Repeat("x", 256)}, []any{strings.Repeat("x", 257)}, false},
 		{"durationMinutes", ".durationMinutes minimum=1", 1, 0, false},
 		{"durationMinutes", ".durationMinutes maximum=480", 480, 481, false},
 		{"preferredWindow", ".preferredWindow minLength=1", "x", "", false},
-		{"preferredWindow", ".preferredWindow maxLength=256", strings.Repeat("x", 256), strings.Repeat("x", 257), false},
 	} {
 		cases = append(cases, evalLimitCase{
 			name:   "worker reply_in_conversation meetingDraft" + tc.limit,
@@ -1747,44 +1744,6 @@ func evalMeetingDraftLimitCases() []evalLimitCase {
 				}
 				tool, ctx := evalMeetingDraftCall()
 				return evalRejectsMeetingDraft(ctx, tool, args(tc.field, tc.invalid, tc.omit))
-			},
-		})
-	}
-	// Like content, meeting text advertises character limits but validates UTF-8
-	// byte limits. Keep each known mismatch separate from its ASCII limit case.
-	for _, tc := range []struct {
-		field, path string
-		maximum     int
-	}{{"subject", "subject", 200}, {"agenda", "agenda[]", 256}, {"preferredWindow", "preferredWindow", 256}} {
-		cases = append(cases, evalLimitCase{
-			name:        "worker reply_in_conversation meetingDraft." + tc.path + " Unicode maximum",
-			limits:      []string{fmt.Sprintf("worker/reply_in_conversation.meetingDraft.%s maxLength=%d", tc.path, tc.maximum)},
-			knownDefect: fmt.Sprintf("reply_in_conversation meetingDraft.%s advertises a %d-character maximum but rejects schema-valid multibyte text above %d UTF-8 bytes", tc.path, tc.maximum, tc.maximum),
-			check: func(t *testing.T) (bool, string) {
-				textArgs := func(text string) string {
-					var value any = text
-					if tc.field == "agenda" {
-						value = []any{text}
-					}
-					return args(tc.field, value, false)
-				}
-				for _, character := range []string{"é", "界"} {
-					text := strings.Repeat(character, tc.maximum/len(character)) + strings.Repeat("x", tc.maximum%len(character))
-					if ok, detail := evalSucceeds(evalMeetingDraftCall, textArgs(text)); !ok {
-						return false, detail
-					}
-				}
-				var rejections []string
-				for _, characters := range []int{tc.maximum/len("界") + 1, tc.maximum} {
-					text := strings.Repeat("界", characters)
-					tool, ctx := evalMeetingDraftCall()
-					if ok, detail := evalRejectsMeetingDraft(ctx, tool, textArgs(text)); ok {
-						rejections = append(rejections, fmt.Sprintf("schema-valid text with %d characters/%d UTF-8 bytes rejected", characters, len(text)))
-					} else if !strings.HasPrefix(detail, "accepted ") {
-						t.Errorf("schema-valid meeting text rejected for another reason: %s", detail)
-					}
-				}
-				return len(rejections) == 0, strings.Join(rejections, "; ")
 			},
 		})
 	}
