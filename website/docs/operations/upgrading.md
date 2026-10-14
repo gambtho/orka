@@ -39,7 +39,7 @@ Object counts alone do not establish compatibility.
 | 149 objects | [`0e567418`](https://github.com/orka-agents/orka/commit/0e567418ae20b4a11b5684eb42da47c1cdf1c92e) | Add the GitHub mutation index, then empty connector and native-session tables and their indexes. |
 | 150 objects | [`1f18614c`](https://github.com/orka-agents/orka/commit/1f18614ca9dd2339a9c8caac8e3320e7daf61c2e), #731 | Add empty connector and native-session tables and their indexes. |
 | 162 objects | [`57583975`](https://github.com/orka-agents/orka/commit/57583975d265a1ca23ebc8106d8fe769c84ae4f3), #701 | Add empty native-session tables. |
-| 166 objects (current) | [`abd2c040`](https://github.com/orka-agents/orka/commit/abd2c0406ab660abd37af7c176b4eef610a19ce1), #732 | Validate only; no migration or automatic backup. |
+| 166 objects (current) | [`abd2c0406ab660abd37af7c176b4eef610a19ce1`](https://github.com/orka-agents/orka/commit/abd2c0406ab660abd37af7c176b4eef610a19ce1), #732 | Validate only; no migration or automatic backup. |
 
 ### Unsupported intermediate connector layout
 
