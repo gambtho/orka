@@ -2646,7 +2646,7 @@ func (s *Server) handlePromptStartFailureLocked(w http.ResponseWriter, state *se
 	leaseExpired := errors.Is(err, acp.ErrPromptLeaseExpired)
 	preActivationRejected := cancellationPending || leaseExpired
 	cancellationTimedOut := errors.Is(err, acp.ErrPromptCancellationTimedOut)
-	activationFailed := errors.Is(err, errPromptProviderActivation) || errors.Is(err, errPromptMCPActivation) || errors.Is(err, acp.ErrPromptActivationExpired)
+	activationMessage, activationFailed := promptActivationFailureMessage(err)
 	lost, adapterLost := errors.AsType[*acp.AdapterLostError](err)
 	terminalAdmissionFailure := cancellationTimedOut || activationFailed || adapterLost
 	sessionCleanup := false
@@ -2702,13 +2702,7 @@ func (s *Server) handlePromptStartFailureLocked(w http.ResponseWriter, state *se
 		return
 	}
 	if activationFailed {
-		message := errPromptProviderActivation.Error()
-		if errors.Is(err, acp.ErrPromptActivationExpired) {
-			message = acp.ErrPromptActivationExpired.Error()
-		} else if errors.Is(err, errPromptMCPActivation) {
-			message = errPromptMCPActivation.Error()
-		}
-		writeError(w, http.StatusInternalServerError, harnessv2.ErrorCodeSessionPoisoned, message, nil, false)
+		writeError(w, http.StatusInternalServerError, harnessv2.ErrorCodeSessionPoisoned, activationMessage, nil, false)
 		return
 	}
 	if leaseExpired {
@@ -2721,6 +2715,19 @@ func (s *Server) handlePromptStartFailureLocked(w http.ResponseWriter, state *se
 		return
 	}
 	writeError(w, http.StatusConflict, harnessv2.ErrorCodeAlreadyAccepted, safeError(err), nil, false)
+}
+
+func promptActivationFailureMessage(err error) (string, bool) {
+	switch {
+	case errors.Is(err, acp.ErrPromptActivationExpired):
+		return acp.ErrPromptActivationExpired.Error(), true
+	case errors.Is(err, errPromptMCPActivation):
+		return errPromptMCPActivation.Error(), true
+	case errors.Is(err, errPromptProviderActivation):
+		return errPromptProviderActivation.Error(), true
+	default:
+		return "", false
+	}
 }
 
 func deactivatePromptCapabilities(state *sessionState, promptID harnessv2.PromptID, next harnessv2.RuntimeSessionState) {
