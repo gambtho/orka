@@ -114,18 +114,7 @@ func prepareNativeRemoteTools(
 		return state.validate(ctx, reader, tool)
 	})
 	for name, tool := range state.tools {
-		// Dependency reads and discovery share the same per-Tool budget.
-		toolCtx, cancel := context.WithTimeout(ctx, worker.RemoteMCPTimeout(tool))
-		err := bindNativeRemoteDependencies(toolCtx, reader, tool, task.Spec.Transaction.Context["secret"], nil)
-		if err == nil {
-			state.tools[name] = tool.DeepCopy()
-			err = executor.VerifyRemoteMCPTool(toolCtx, tool)
-		}
-		if ctxErr := toolCtx.Err(); ctxErr != nil {
-			err = ctxErr
-		}
-		cancel()
-		if err != nil {
+		if err := state.prepareTool(ctx, reader, tool); err != nil {
 			return ctx, fmt.Errorf("verify remote MCP Tool %q before exposure: %w", name, err)
 		}
 	}
@@ -144,6 +133,21 @@ func prepareNativeRemoteTools(
 		}
 	}
 	return ctx, nil
+}
+
+// prepareTool gives dependency reads and discovery one shared per-Tool budget.
+func (s *nativeRemoteTools) prepareTool(ctx context.Context, reader client.Client, tool *corev1alpha1.Tool) error {
+	ctx, cancel := context.WithTimeout(ctx, worker.RemoteMCPTimeout(tool))
+	defer cancel()
+	err := bindNativeRemoteDependencies(ctx, reader, tool, s.task.Spec.Transaction.Context["secret"], nil)
+	if err == nil {
+		s.tools[tool.Name] = tool.DeepCopy()
+		err = s.executor.VerifyRemoteMCPTool(ctx, tool)
+	}
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return ctxErr
+	}
+	return err
 }
 
 // A frozen connector must not escape controller custody if its live Tool
