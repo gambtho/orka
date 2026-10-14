@@ -22,7 +22,9 @@ import (
 
 type approvalRetryReadFault struct {
 	active             atomic.Bool
+	decided            atomic.Bool
 	reads              chan struct{}
+	approvedReads      chan struct{}
 	observeReceiptRead func(context.Context)
 }
 
@@ -30,8 +32,12 @@ func (f *approvalRetryReadFault) readError() error {
 	if !f.active.Load() {
 		return nil
 	}
+	reads := f.reads
+	if f.decided.Load() {
+		reads = f.approvedReads
+	}
 	select {
-	case f.reads <- struct{}{}:
+	case reads <- struct{}{}:
 	default:
 	}
 	return errors.New("simulated approval read outage")
@@ -77,7 +83,7 @@ func (s approvalRetryEffectStore) GetExternalEffect(ctx context.Context, id stri
 
 func configureApprovalRetryReadFault(t *testing.T, f *mcpApprovalFixture, source string) *approvalRetryReadFault {
 	t.Helper()
-	fault := &approvalRetryReadFault{reads: make(chan struct{}, 2)}
+	fault := &approvalRetryReadFault{reads: make(chan struct{}, 2), approvedReads: make(chan struct{}, 2)}
 	switch source {
 	case "decision":
 		f.broker.ApprovalEvents = approvalRetryEventStore{DeduplicatingExecutionEventStore: f.events, TaskDataTransactionStore: f.events, fault: fault}
@@ -151,7 +157,9 @@ func TestMCPApprovalStorageReadRecoveryContinuesOriginalCall(t *testing.T) {
 			fault.active.Store(true)
 			requireApprovalReadRetrying(t, f, pending.ID, approvals.StatusPending, done, fault.reads)
 			f.decide(pending.ID, events.ExecutionEventTypeApprovalApproved)
-			requireApprovalReadRetrying(t, f, pending.ID, approvals.StatusApproved, done, fault.reads)
+			// A separate post-decision channel cannot consume buffered Pending reads.
+			fault.decided.Store(true)
+			requireApprovalReadRetrying(t, f, pending.ID, approvals.StatusApproved, done, fault.approvedReads)
 			fault.active.Store(false)
 			result := awaitMCPApprovalResult(t, done)
 			require.False(t, result.IsError || result.Replayed)
@@ -213,13 +221,15 @@ func TestMCPApprovalReadRetriesKeepOriginalExpiry(t *testing.T) {
 				pendingID = pending.ID
 				readMu.Unlock()
 				fault.active.Store(true)
-				if source == "receipt" {
-					// Receipt polling only follows a pending decision. Observe the
-					// outage before approval can bypass that branch entirely.
+				if source == "decision" || source == "receipt" {
+					// Observe Pending-phase outages first. Receipt polling only follows
+					// a pending decision, so approval could bypass that branch entirely.
 					requireApprovalReadRetrying(t, f, pending.ID, approvals.StatusPending, done, fault.reads)
 				}
 				f.decide(pending.ID, events.ExecutionEventTypeApprovalApproved)
-				requireApprovalReadRetrying(t, f, pending.ID, approvals.StatusApproved, done, fault.reads)
+				// A separate post-decision channel cannot consume buffered Pending reads.
+				fault.decided.Store(true)
+				requireApprovalReadRetrying(t, f, pending.ID, approvals.StatusApproved, done, fault.approvedReads)
 				synctest.Wait()
 				require.True(t, time.Now().Before(originalExpiry))
 				time.Sleep(time.Until(originalExpiry) - time.Nanosecond)
@@ -284,7 +294,9 @@ func TestMCPApprovalSecretReadRetriesStopOnCancellation(t *testing.T) {
 			pending := f.pending()
 			fault.active.Store(true)
 			f.decide(pending.ID, events.ExecutionEventTypeApprovalApproved)
-			requireApprovalReadRetrying(t, f, pending.ID, approvals.StatusApproved, done, fault.reads)
+			// A separate post-decision channel cannot consume buffered Pending reads.
+			fault.decided.Store(true)
+			requireApprovalReadRetrying(t, f, pending.ID, approvals.StatusApproved, done, fault.approvedReads)
 			if cancellation == "caller" {
 				cancel()
 				requireApprovalReadUnavailable(t, f, pending.ID, approvals.StatusApproved, done)
