@@ -87,6 +87,23 @@ store. Rolling back an installation requires a coordinated, offline restoration
 of the database, original key, configuration, and Kubernetes state—not just an
 image downgrade. This page does not qualify a general restore procedure.
 
+### Controller startup allowance
+
+Database backup, integrity checks, and migration run before the controller starts
+serving `/healthz`. Both deployment sources include a startup probe that allows
+about ten minutes for the entire initialization (60 failed probes, ten seconds
+apart, with a one-second request timeout). Kubernetes holds off the existing
+liveness and readiness probes until startup succeeds; their checks are unchanged.
+
+Before upgrading a large database or a slow persistent volume, increase the
+budget as needed. Helm exposes `controller.startupProbe.failureThreshold`,
+`periodSeconds`, and `timeoutSeconds`; for example,
+`--set controller.startupProbe.failureThreshold=120` allows about twenty minutes
+at the default ten-second interval. For Kustomize, patch the manager container's
+`startupProbe` timing fields in your overlay. The allowance is bounded: exceeding
+it can restart initialization and create another retained backup, so size the
+budget and free disk space before the upgrade.
+
 ## Update CRDs first {#the-one-thing-that-will-bite-you}
 
 CRDs define Orka's Kubernetes resource types. Helm installs them on a fresh

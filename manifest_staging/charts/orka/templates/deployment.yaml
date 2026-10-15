@@ -463,6 +463,13 @@ spec:
                   - {{ printf "--acp-upgrade-drain-trigger-url=http://127.0.0.1:%v%s" .Values.controller.acpRuntime.upgradeDrain.port "/acp/upgrade-drain" | quote }}
                   - {{ printf "--acp-upgrade-drain-trigger-timeout=%s" .Values.controller.acpRuntime.upgradeDrain.triggerTimeout | quote }}
           {{- end }}
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: health
+            failureThreshold: {{ .Values.controller.startupProbe.failureThreshold }}
+            periodSeconds: {{ .Values.controller.startupProbe.periodSeconds }}
+            timeoutSeconds: {{ .Values.controller.startupProbe.timeoutSeconds }}
           livenessProbe:
             httpGet:
               path: /healthz
