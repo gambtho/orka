@@ -102,8 +102,11 @@ func TestInterimDeliveryCapabilitiesAreOptionalAndStrict(t *testing.T) {
 		{"absent", "", false},
 		{"enabled", `,"interimDelivery":true`, false},
 		{"disabled", `,"interimDelivery":false`, false},
-		{"meeting drafts", `,"meetingDrafts":true`, false},
-		{"invalid drafts", `,"meetingDrafts":"true"`, true},
+		{"extensions", `,"extensions":["meetingDraft.v1","future.v2"]`, false},
+		{"empty extensions", `,"extensions":[]`, false},
+		{"legacy drafts", `,"meetingDrafts":true`, true},
+		{"invalid extensions", `,"extensions":true`, true},
+		{"invalid extension item", `,"extensions":[true]`, true},
 		{"unknown", `,"futureDelivery":true`, true},
 		{"wrong type", `,"interimDelivery":"true"`, true},
 	} {
@@ -118,8 +121,8 @@ func TestInterimDeliveryCapabilitiesAreOptionalAndStrict(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				if strings.Contains(string(encoded), `"meetingDrafts":true`) != (tc.name == "meeting drafts") || (tc.name != "meeting drafts" && strings.Contains(string(encoded), `"meetingDrafts"`)) {
-					t.Fatalf("draft capability round trip = %s", encoded)
+				if strings.Contains(string(encoded), `"extensions":["meetingDraft.v1","future.v2"]`) != (tc.name == "extensions") || (tc.name != "extensions" && strings.Contains(string(encoded), `"extensions"`)) {
+					t.Fatalf("extension round trip = %s", encoded)
 				}
 				if strings.Contains(string(encoded), `"interimDelivery":true`) != (tc.name == "enabled") {
 					t.Fatalf("capability round trip = %s", encoded)

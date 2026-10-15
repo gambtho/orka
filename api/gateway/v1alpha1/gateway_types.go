@@ -40,10 +40,10 @@ type GatewayCapabilities struct {
 	// +optional
 	InterimDelivery bool `json:"interimDelivery,omitempty"`
 
-	// MeetingDrafts indicates support for structured, unscheduled meeting proposals.
-	// Has no effect without interim delivery; false is omitted for older adapters.
+	// Extensions lists versioned structured-message schemas the adapter renders.
 	// +optional
-	MeetingDrafts bool `json:"meetingDrafts,omitempty"`
+	// +kubebuilder:validation:MaxItems=16
+	Extensions []string `json:"extensions,omitempty"`
 
 	// Threads indicates that thread identity is preserved.
 	// +optional

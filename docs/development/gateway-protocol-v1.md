@@ -12,7 +12,7 @@ Changes to required fields, field meaning, delivery statuses, authentication, id
 
 The bounded interim-delivery extension ([ADR 0032](../adr/0032-gateway-interim-delivery.md)) adds optional `interimDelivery` and delivery kind `message` without changing existing fields, `final`/`error` semantics, or response statuses. **Roll controllers first, then enable adapter advertisement.** Old adapters work unchanged with the new controller. Older strict controllers reject the new capability field: there is no reverse-skew guarantee. Before rollback, settle/abandon outstanding messages with the new controller and disable advertisement (`--interim-delivery=false` on the reference adapter); do not leave pending message rows for an old dispatcher.
 
-Structured meeting drafts add optional `meetingDrafts`, omitted when false, without changing V1 metadata or fingerprint versions. **Apply new CRDs and roll the controller and workers before enabling gateway advertisement.** Older strict controllers reject the new field. Pause draft intake and settle or explicitly abandon pending drafts with the new controller before withdrawing capability or rolling back; old dispatchers must not encounter pending draft metadata. Dispatch rechecks the capability and dead-letters withdrawn drafts rather than sending ordinary text in place of the action. Historical receipt replay remains available subject to the existing identity/authorization fences.
+Structured messages add an optional `extensions` list of versioned schemas, omitted when empty. Meeting drafts use `extensions: ["meetingDraft.v1"]` without changing V1 metadata or fingerprint versions; `meeting.version` remains the string `"1"`. **Apply new CRDs and roll the controller and workers before enabling gateway advertisement.** Older strict controllers reject the new field. Pause draft intake and settle or explicitly abandon pending drafts with the new controller before withdrawing capability or rolling back; old dispatchers must not encounter pending draft metadata. Dispatch rechecks the capability and dead-letters withdrawn drafts rather than sending ordinary text in place of the action. Historical receipt replay remains available subject to the existing identity/authorization fences.
 
 The `gateway.orka.ai/v1alpha1` Kubernetes resources and the controller SQLite schema are separate compatibility surfaces from the adapter protocol. Apply CRDs before a controller upgrade, back up the WAL-consistent database plus related Kubernetes objects, and do not run an older controller against a forward-migrated database unless the release explicitly documents that rollback as safe. Operational backup, migration, version-skew, and rollback procedures are documented in `website/docs/operations/gateways.md`.
 
@@ -42,10 +42,13 @@ A capability response uses:
     "senderIdentity": true,
     "explicitSessions": false,
     "idempotentDelivery": true,
-    "interimDelivery": true
+    "interimDelivery": true,
+    "extensions": ["meetingDraft.v1"]
   }
 }
 ```
+
+`extensions` advertises structured-message schemas, not provider-specific capability flags. Observed lists retain at most 16 unique identifiers, each at most 256 UTF-8 bytes. Blank, non-normalized, invalid Unicode, control-bearing, credential-shaped or redaction-placeholder values are dropped rather than repaired into supported schema identities. Probe output and fixture masking apply the same protections as adapter identity fields; an echoed outbound credential rejects the probe. Unknown safe extensions remain observable but do not authorize known actions. `GatewayClass.spec.capabilities.extensions` requires each listed schema generically; meeting-specific prerequisites are enforced at action admission and dispatch, not inferred by class readiness.
 
 `interimDelivery` is optional: omit it (or return false to a supporting controller) for final/error-only operation. The controller sends `kind: "message"` only when a current, ready adapter advertises true. Messages use the same delivery envelope and controller-derived reply routing as terminal deliveries, with a 16 KiB text bound instead of 64 KiB. They do not complete the Task/event, write canonical transcript messages, or release the Session lock.
 
@@ -165,7 +168,7 @@ Eligibility requires exact durable event/Task UID ownership, not a prompt, tool 
 }
 ```
 
-A draft is an **unscheduled proposal**, not a booked meeting. Orka has no calendar, directory, Graph, address-resolution or meeting-link API. The adapter handles rendering and attendee resolution within its own authorized route. Drafts require both current `interimDelivery` and `meetingDrafts` capability; missing draft support returns definitive `meeting_drafts_unsupported` (409), with no durable write. Text-only execution hosts retain their existing sender interface and definitively reject drafts without sending their prose.
+A draft is an **unscheduled proposal**, not a booked meeting. Orka has no calendar, directory, Graph, address-resolution or meeting-link API. The adapter handles rendering and attendee resolution within its own authorized route. Drafts require both current `interimDelivery` and exact `meetingDraft.v1` membership in `extensions`; missing draft support returns definitive `meeting_drafts_unsupported` (409), with no durable write. Text-only execution hosts retain their existing sender interface and definitively reject drafts without sending their prose.
 
 Draft objects and nested attendees reject unknown/duplicate properties, nulls, malformed Unicode and Cc controls. Bounds are UTF-8 **bytes**, enforced independently of schema character limits:
 - `subject`: nonempty, at most 200 bytes;
@@ -175,7 +178,7 @@ Draft objects and nested attendees reject unknown/duplicate properties, nulls, m
 - optional `preferredWindow`: nonempty, at most 256 bytes;
 - optional `suggestedStart`: valid ISO timestamp with explicit offset; end derives from duration.
 
-The controller derives a fixed string metadata projection, never arbitrary worker metadata: `meeting.version=1`, `meeting.subject`, decimal `meeting.durationMinutes`, `meeting.attendees=everyone|named`, contiguous `meeting.agenda.0` through `.4`, and for named mode contiguous `meeting.name.0` through `.9`. Optional keys are `meeting.preferredWindow` and `meeting.suggestedStart`. At most 21 draft keys fit the unchanged V1 bounds. Decoders must reject unknown `meeting.*` keys, gaps, contradictory modes and invalid values/version, not salvage a partial draft. `GatewayClass.allowedMetadataKeys` restricts **inbound** metadata; it is not an outbound draft allowlist.
+The controller derives a fixed string metadata projection, never arbitrary worker metadata: `meeting.version=1` (the metadata schema mapped to `meetingDraft.v1`), `meeting.subject`, decimal `meeting.durationMinutes`, `meeting.attendees=everyone|named`, contiguous `meeting.agenda.0` through `.4`, and for named mode contiguous `meeting.name.0` through `.9`. Optional keys are `meeting.preferredWindow` and `meeting.suggestedStart`. At most 21 draft keys fit the unchanged V1 bounds. Decoders must reject unknown `meeting.*` keys, gaps, contradictory modes and invalid values/version, not salvage a partial draft. `GatewayClass.allowedMetadataKeys` restricts **inbound** metadata; it is not an outbound draft allowlist.
 
 Only draft fields and display names enter durable delivery metadata, never roster-derived addresses, member IDs or a meeting URL. User-typed ordinary subject/agenda/content text is outside this address boundary. Optional times and attendee names are suggestions, not live availability or a calendar booking guarantee.
 
@@ -243,7 +246,7 @@ This acknowledges admission, not provider delivery. An authenticated replay can 
 {"error":{"code":"interim_delivery_unsupported","message":"gateway adapter does not advertise interimDelivery capability"}}
 ```
 
-A new draft on a ready interim-capable Gateway without `meetingDrafts` returns the same shape with `meeting_drafts_unsupported` (409). Draft capability withdrawal does not change retained receipt replay semantics.
+A new draft on a ready interim-capable Gateway without `meetingDraft.v1` in `extensions` returns the same shape with `meeting_drafts_unsupported` (409). Draft capability withdrawal does not change retained receipt replay semantics.
 
 Errors produced by the message handler use the same `error.code`/`error.message` shape with string codes: `invalid_request` (400), `unauthorized` (401), `forbidden` (403), `not_found` (404), `conflict` (409, including changed sanitized content or lifecycle conflict), `too_large` (413), `limit_reached` (429), `unavailable` (503), or `internal_error` (500). Authentication can fail before the message handler runs: the shared auth middleware uses the common error envelope with a numeric HTTP status in `error.code` (for example, `{"error":{"code":401,"message":"missing authorization header"}}`), not the handler's string `unauthorized` code. A terminal worker loses authorization; do not rely on replay to authorize a completed Task. For new admissions, transient unready/stale observations return `unavailable` (503), not a current adapter's unsupported-capability error.
 

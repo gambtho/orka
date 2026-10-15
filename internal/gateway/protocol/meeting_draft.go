@@ -16,6 +16,9 @@ import (
 	"github.com/orka-agents/orka/internal/redact"
 )
 
+// MeetingDraftExtension identifies the structured-message schema for meeting.version "1".
+const MeetingDraftExtension = "meetingDraft.v1"
+
 // MaxMeetingDraftJSONBytes allows fully escaped bounded strings, not arbitrary
 // worker metadata. The projection has at most 21 entries in the V1 envelope.
 const MaxMeetingDraftJSONBytes = 32 << 10

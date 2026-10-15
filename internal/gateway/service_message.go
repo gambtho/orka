@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"slices"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -26,7 +27,7 @@ var ErrInterimDeliveryUnsupported = &HTTPError{
 
 // ErrMeetingDraftsUnsupported is a definitive structured-action rejection.
 var ErrMeetingDraftsUnsupported = &HTTPError{
-	Code: http.StatusConflict, Message: "gateway adapter does not advertise meetingDrafts capability",
+	Code: http.StatusConflict, Message: "gateway adapter does not advertise meetingDraft.v1 extension",
 }
 
 // TaskMessageReceipt acknowledges durable admission, not provider delivery. A
@@ -92,7 +93,8 @@ func (s *Service) prepareTaskMessage(ctx context.Context, namespace, taskName, t
 		return nil, err
 	}
 	gateErr := messageGatewayAdmissionError(object)
-	if gateErr == nil && metadata["meeting.version"] != "" && !object.Status.ObservedCapabilities.Capabilities.MeetingDrafts {
+	if version, draft := metadata["meeting.version"]; gateErr == nil && draft &&
+		(version != "1" || !slices.Contains(object.Status.ObservedCapabilities.Capabilities.Extensions, protocol.MeetingDraftExtension)) {
 		gateErr = ErrMeetingDraftsUnsupported
 	}
 	now := time.Now().UTC()
@@ -241,7 +243,8 @@ func (s *Service) validateMessageDelivery(ctx context.Context, delivery *store.G
 	if err := messageGatewayAdmissionError(object); err != nil {
 		return err
 	}
-	if _, draft := delivery.Metadata["meeting.version"]; draft && !object.Status.ObservedCapabilities.Capabilities.MeetingDrafts {
+	if version, draft := delivery.Metadata["meeting.version"]; draft &&
+		(version != "1" || !slices.Contains(object.Status.ObservedCapabilities.Capabilities.Extensions, protocol.MeetingDraftExtension)) {
 		return ErrMeetingDraftsUnsupported
 	}
 	return nil

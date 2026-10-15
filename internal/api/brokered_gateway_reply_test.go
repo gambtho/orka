@@ -74,7 +74,7 @@ func TestBrokeredGatewayMeetingDraftLegacyConstructorIsContentOnly(t *testing.T)
 	f, service := newBrokeredReplyFixture(t)
 	g := &gatewayv1alpha1.Gateway{}
 	require.NoError(t, service.Client.Get(t.Context(), client.ObjectKey{Namespace: f.task.Namespace, Name: "chat"}, g))
-	g.Status.ObservedCapabilities.Capabilities.MeetingDrafts = true
+	g.Status.ObservedCapabilities.Capabilities.Extensions = []string{"meetingDraft.v1"}
 	require.NoError(t, service.Client.Update(t.Context(), g))
 	executor := f.broker.Executor.(controller.RegistryACPMCPToolExecutor)
 	factory := executor.ContextFactory

@@ -65,8 +65,15 @@ strict object shape, valid Unicode, nonempty sanitized text, and the stronger
 configuration, or approval argument. The optional structured `meetingDraft`
 extension keeps these routing/authority constraints: it carries bounded display
 names and unscheduled proposal fields, never addresses, a URL or arbitrary
-metadata. Admission and dispatch require `meetingDrafts` as well as interim
-support. The [protocol contract](../development/gateway-protocol-v1.md#optional-structured-meeting-draft)
+metadata. Generic `capabilities.extensions` lists versioned structured-message
+schemas, with at most 16 bounded, sanitized identifiers. The meeting schema is
+`meetingDraft.v1`; its delivery metadata retains `meeting.version: "1"`, preserving
+immutable delivery/replay identity. Admission and dispatch require exact extension
+membership as well as interim support. GatewayClass requirements use the same list
+as a generic subset check: this keeps the shared capability contract consistent
+without embedding meeting semantics in class readiness. Unsafe identifiers are
+dropped, never repaired into supported schemas; credential detection and safe
+probe/fixture output cover extensions alongside adapter identity fields. The [protocol contract](../development/gateway-protocol-v1.md#optional-structured-meeting-draft)
 defines bounds, immutable metadata replay, controller/worker-first rollout and
 settle/abandon-before-rollback requirements. Existing sealed ACP profiles do not
 automatically adopt the additive schema.

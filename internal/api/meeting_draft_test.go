@@ -29,7 +29,7 @@ func setAPIMeetingCapability(t *testing.T, reader client.Client, namespace strin
 	g := &gatewayv1alpha1.Gateway{}
 	require.NoError(t, reader.Get(t.Context(), client.ObjectKey{Namespace: namespace, Name: "chat"}, g))
 	// JSON exercises the additive API representation as well as service admission.
-	data := `{"interimDelivery":true,"meetingDrafts":` + map[bool]string{true: "true", false: "false"}[enabled] + `}`
+	data := `{"interimDelivery":true,"extensions":` + map[bool]string{true: `["meetingDraft.v1"]`, false: `[]`}[enabled] + `}`
 	require.NoError(t, json.Unmarshal([]byte(data), &g.Status.ObservedCapabilities.Capabilities))
 	require.NoError(t, reader.Status().Update(t.Context(), g))
 }
@@ -151,7 +151,7 @@ func TestBrokeredGatewayMeetingDraftFrozenDescriptor(t *testing.T) {
 			service.Config.InterimMessagesPerTask = 1
 			g := &gatewayv1alpha1.Gateway{}
 			require.NoError(t, service.Client.Get(t.Context(), client.ObjectKey{Namespace: f.task.Namespace, Name: "chat"}, g))
-			g.Status.ObservedCapabilities.Capabilities.MeetingDrafts = true
+			g.Status.ObservedCapabilities.Capabilities.Extensions = []string{"meetingDraft.v1"}
 			require.NoError(t, service.Client.Update(t.Context(), g))
 
 			// Freeze the actual descriptor, including its digest, at the same
@@ -214,7 +214,7 @@ func TestBrokeredGatewayMeetingDraftTransport(t *testing.T) {
 	f, service := newBrokeredReplyFixture(t)
 	g := &gatewayv1alpha1.Gateway{}
 	require.NoError(t, service.Client.Get(t.Context(), client.ObjectKey{Namespace: f.task.Namespace, Name: "chat"}, g))
-	require.NoError(t, json.Unmarshal([]byte(`{"interimDelivery":true,"meetingDrafts":true}`), &g.Status.ObservedCapabilities.Capabilities))
+	require.NoError(t, json.Unmarshal([]byte(`{"interimDelivery":true,"extensions":["meetingDraft.v1"]}`), &g.Status.ObservedCapabilities.Capabilities))
 	require.NoError(t, service.Client.Update(t.Context(), g))
 	f.request.Call.Arguments = json.RawMessage(`{"content":"draft above","meetingDraft":` + apiMeetingDraft + `}`)
 	replyRequestDigest(t, f)
