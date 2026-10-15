@@ -1716,8 +1716,7 @@ func evalMeetingDraftLimitCases() []evalLimitCase {
 		raw, _ := json.Marshal(map[string]any{"content": "Draft proposal", "meetingDraft": draft})
 		return string(raw)
 	}
-	var cases []evalLimitCase
-	for _, tc := range []struct {
+	specs := []struct {
 		field, limit   string
 		valid, invalid any
 		omit           bool
@@ -1733,7 +1732,9 @@ func evalMeetingDraftLimitCases() []evalLimitCase {
 		{"durationMinutes", ".durationMinutes minimum=1", 1, 0, false},
 		{"durationMinutes", ".durationMinutes maximum=480", 480, 481, false},
 		{"preferredWindow", ".preferredWindow minLength=1", "x", "", false},
-	} {
+	}
+	cases := make([]evalLimitCase, 0, len(specs))
+	for _, tc := range specs {
 		cases = append(cases, evalLimitCase{
 			name:   "worker reply_in_conversation meetingDraft" + tc.limit,
 			limits: []string{"worker/reply_in_conversation.meetingDraft" + tc.limit},
