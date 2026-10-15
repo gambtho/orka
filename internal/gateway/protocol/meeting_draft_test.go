@@ -22,6 +22,10 @@ func TestMeetingDraftTypedByteBoundsAndMaxProjection(t *testing.T) {
 	if len(metadata) != 21 || metadata["meeting.agenda.4"] != "e" || metadata["meeting.name.9"] != strings.Repeat("é", 64) {
 		t.Fatalf("invalid maximum projection %#v", metadata)
 	}
+	delivery := DeliveryRequest{ProtocolVersion: Version, DeliveryID: "delivery", IdempotencyID: "delivery", OriginatingEvent: "event", AccountID: "account", ContextID: "room", ReplyTarget: "room", Kind: DeliveryKindMessage, Text: "Draft above", Metadata: metadata}
+	if err := ValidateDeliveryRequest(&delivery); err != nil {
+		t.Fatalf("maximum projection exceeds delivery bounds: %v", err)
+	}
 	for _, change := range []func(*MeetingDraft){
 		func(d *MeetingDraft) { d.Subject += "x" },
 		func(d *MeetingDraft) { d.Agenda = []string{strings.Repeat("é", 129)} },
