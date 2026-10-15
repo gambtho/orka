@@ -7,6 +7,7 @@
 {{- include "orka.validatePublisherAuth" . }}
 {{- include "orka.validateSubstrateCredentials" . }}
 {{- $substrateCredentials := .Values.controller.substrate.apiCredentials | default dict -}}
+{{- $startupProbe := .Values.controller.startupProbe | default dict -}}
 {{- if $harnessV2 }}
 {{- if not .Values.publisher.enabled }}
 {{- fail "publisher must be enabled when controller.mode=harness-v2" }}
@@ -467,9 +468,9 @@ spec:
             httpGet:
               path: /healthz
               port: health
-            failureThreshold: {{ .Values.controller.startupProbe.failureThreshold }}
-            periodSeconds: {{ .Values.controller.startupProbe.periodSeconds }}
-            timeoutSeconds: {{ .Values.controller.startupProbe.timeoutSeconds }}
+            failureThreshold: {{ $startupProbe.failureThreshold | default 60 }}
+            periodSeconds: {{ $startupProbe.periodSeconds | default 10 }}
+            timeoutSeconds: {{ $startupProbe.timeoutSeconds | default 1 }}
           livenessProbe:
             httpGet:
               path: /healthz

@@ -3,6 +3,8 @@ package main
 import (
 	"fmt"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -75,6 +77,55 @@ func TestControllerStartupProbe(t *testing.T) {
 			require.Equal(t, int32(20), controller.LivenessProbe.PeriodSeconds)
 			require.Equal(t, int32(5), controller.ReadinessProbe.InitialDelaySeconds)
 			require.Equal(t, int32(10), controller.ReadinessProbe.PeriodSeconds)
+		})
+	}
+}
+
+func TestControllerStartupProbeReusedValues(t *testing.T) {
+	helm, err := exec.LookPath("helm")
+	if err != nil {
+		t.Skip("helm is required for startup probe render tests")
+	}
+	defaults, err := os.ReadFile("static/values.yaml")
+	require.NoError(t, err)
+	for _, tc := range []struct {
+		name     string
+		settings map[string]any
+		timing   [3]int32
+	}{
+		{name: "absent settings", timing: [3]int32{60, 10, 1}},
+		{name: "empty settings", settings: map[string]any{}, timing: [3]int32{60, 10, 1}},
+		{name: "partial settings", settings: map[string]any{"periodSeconds": 15}, timing: [3]int32{60, 15, 1}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			chartDir := filepath.Join(t.TempDir(), "chart")
+			require.NoError(t, os.CopyFS(chartDir, os.DirFS("static")))
+			forceStaticChartNamespaceMode(t, chartDir, "harness-v2")
+			var values map[string]any
+			require.NoError(t, yaml.Unmarshal(defaults, &values))
+			controller, ok := values["controller"].(map[string]any)
+			require.True(t, ok, "controller values must be a map")
+			delete(controller, "startupProbe")
+			if tc.settings != nil {
+				controller["startupProbe"] = tc.settings
+			}
+			// --reuse-values replaces the new chart defaults with the old
+			// release's coalesced values; a values overlay would merge them.
+			retained, err := yaml.Marshal(values)
+			require.NoError(t, err)
+			require.NoError(t, os.WriteFile(filepath.Join(chartDir, "values.yaml"), retained, 0o600))
+			args := append([]string{
+				"template", "test", chartDir, "--namespace", "orka-test", "--is-upgrade",
+			}, staticChartDefaultArgs()...)
+			args = append(args, "--show-only", "templates/deployment.yaml")
+			rendered, err := exec.Command(helm, args...).CombinedOutput()
+			require.NoError(t, err, "%s", rendered)
+			var deployment appsv1.Deployment
+			require.NoError(t, yaml.Unmarshal(rendered, &deployment))
+			require.Len(t, deployment.Spec.Template.Spec.Containers, 1)
+			probe := deployment.Spec.Template.Spec.Containers[0].StartupProbe
+			require.NotNil(t, probe)
+			require.Equal(t, tc.timing, [3]int32{probe.FailureThreshold, probe.PeriodSeconds, probe.TimeoutSeconds})
 		})
 	}
 }
